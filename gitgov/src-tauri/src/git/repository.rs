@@ -47,7 +47,7 @@ pub fn get_working_tree_changes(repo: &Repository) -> Result<Vec<FileChange>, Gi
     opts.include_untracked(true)
         .include_ignored(false)
         .recurse_untracked_dirs(true)
-        .show(StatusShow::Workdir);
+        .show(StatusShow::IndexAndWorkdir);
 
     let statuses = repo
         .statuses(Some(&mut opts))
