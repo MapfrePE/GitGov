@@ -171,33 +171,111 @@ pub fn save_token(username: &str, token: &str, expires_in: Option<i64>) -> Resul
     let json =
         serde_json::to_string(&stored).map_err(|e| AuthError::KeyringError(e.to_string()))?;
 
-    let entry = keyring::Entry::new("gitgov", username)
-        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+    // Try keyring first
+    let keyring_result = (|| {
+        let entry = keyring::Entry::new("gitgov", username)
+            .map_err(|e| AuthError::KeyringError(e.to_string()))?;
 
-    entry
-        .set_password(&json)
-        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+        entry
+            .set_password(&json)
+            .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+
+        Ok(())
+    })();
+
+    // Also save to file as backup (more reliable)
+    let file_result = save_token_to_file(username, &json);
+
+    // Log results
+    match (&keyring_result, &file_result) {
+        (Ok(_), Ok(_)) => {
+            tracing::info!(username = %username, "Token saved to keyring and file");
+        }
+        (Ok(_), Err(e)) => {
+            tracing::warn!(username = %username, error = %e, "Token saved to keyring but not to file");
+        }
+        (Err(e), Ok(_)) => {
+            tracing::warn!(username = %username, error = %e, "Token saved to file (keyring failed)");
+        }
+        (Err(ke), Err(fe)) => {
+            tracing::error!(username = %username, keyring_error = %ke, file_error = %fe, "Failed to save token anywhere");
+        }
+    }
+
+    // Return success if at least one method worked
+    if keyring_result.is_ok() || file_result.is_ok() {
+        Ok(())
+    } else {
+        keyring_result
+    }
+}
+
+fn save_token_to_file(username: &str, json: &str) -> Result<(), AuthError> {
+    let data_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("gitgov");
+
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| AuthError::KeyringError(format!("Failed to create data dir: {}", e)))?;
+
+    let token_file = data_dir.join(format!("{}.token", username));
+    std::fs::write(&token_file, json)
+        .map_err(|e| AuthError::KeyringError(format!("Failed to write token file: {}", e)))?;
 
     Ok(())
 }
 
-pub fn load_token(username: &str) -> Result<String, AuthError> {
-    let entry = keyring::Entry::new("gitgov", username)
-        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+fn load_token_from_file(username: &str) -> Result<String, AuthError> {
+    let data_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("gitgov");
 
-    let json = entry
-        .get_password()
-        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+    let token_file = data_dir.join(format!("{}.token", username));
+    std::fs::read_to_string(&token_file)
+        .map_err(|e| AuthError::KeyringError(format!("Failed to read token file: {}", e)))
+}
+
+pub fn load_token(username: &str) -> Result<String, AuthError> {
+    tracing::debug!(username = %username, "Attempting to load token");
+
+    // Try keyring first
+    let keyring_result: Result<String, AuthError> = (|| {
+        let entry = keyring::Entry::new("gitgov", username).map_err(|e| {
+            tracing::error!(username = %username, error = %e, "Failed to create keyring entry");
+            AuthError::KeyringError(format!("Failed to create keyring entry: {}", e))
+        })?;
+
+        let json = entry
+            .get_password()
+            .map_err(|e| {
+                tracing::error!(username = %username, error = %e, "Failed to get password from keyring");
+                AuthError::KeyringError(format!("Failed to get password: {}", e))
+            })?;
+
+        tracing::debug!(username = %username, "Token loaded from keyring");
+        Ok(json)
+    })();
+
+    // If keyring fails, try file
+    let json = match keyring_result {
+        Ok(json) => json,
+        Err(keyring_err) => {
+            tracing::warn!(username = %username, keyring_error = %keyring_err, "Keyring failed, trying file");
+            load_token_from_file(username)?
+        }
+    };
 
     // Try to parse as StoredToken (new format)
     if let Ok(stored) = serde_json::from_str::<StoredToken>(&json) {
         if stored.is_expired() {
             return Err(AuthError::TokenExpired);
         }
+        tracing::info!(username = %username, "Token loaded and valid");
         return Ok(stored.access_token);
     }
 
     // Fallback: old format (plain token)
+    tracing::info!(username = %username, "Token loaded (plain format)");
     Ok(json)
 }
 
