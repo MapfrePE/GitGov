@@ -1,0 +1,181 @@
+# GitGov Configuration
+# Este archivo define las reglas de control de flujo Git para el equipo
+
+[branches]
+# Patrones válidos para nombres de rama (glob patterns)
+patterns = [
+  "feat/*",           # Nuevas funcionalidades: feat/TICKET-123-descripcion
+  "fix/*",            # Correcciones de bugs: fix/TICKET-456-descripcion
+  "hotfix/*",         # Correcciones urgentes: hotfix/production-critical
+  "release/*",        # Ramas de release: release/v1.2.0
+  "chore/*",          # Tareas de mantenimiento: chore/update-dependencies
+]
+
+# Ramas que nadie puede tocar directamente
+protected = ["main", "master", "develop", "staging", "production"]
+
+# Grupos de desarrolladores con sus permisos
+[groups.frontend]
+members = ["juan-frontend", "maria-ui", "carlos-react"]
+allowed_branches = ["feat/*", "fix/*", "chore/*"]
+allowed_paths = [
+  "src/components/**",
+  "src/styles/**",
+  "src/pages/**",
+  "src/hooks/**",
+  "src/lib/**",
+  "public/**",
+  "*.css",
+  "*.scss",
+]
+
+[groups.backend]
+members = ["pedro-api", "ana-node", "luis-python"]
+allowed_branches = ["feat/*", "fix/*", "hotfix/*"]
+allowed_paths = [
+  "src/api/**",
+  "src/services/**",
+  "src/models/**",
+  "src/middleware/**",
+  "src/utils/**",
+  "prisma/**",
+  "migrations/**",
+  "*.sql",
+]
+
+[groups.devops]
+members = ["admin-infra", "ci-cd-master"]
+allowed_branches = ["feat/*", "fix/*", "hotfix/*", "release/*", "chore/*"]
+allowed_paths = [
+  "**",  # Acceso completo
+]
+
+# Usuarios con permisos de administrador (pueden ver audit logs y omitir validaciones)
+admins = ["admin-infra", "tech-lead"]
+
+# ============================================================================
+# PRE-PUSH CHECKLIST
+# ============================================================================
+# Validaciones que el cliente debe ejecutar antes de permitir un push
+# Cada item debe ser confirmado por el usuario o validado automáticamente
+
+[checklist]
+# Items que requieren confirmación del usuario
+confirm = [
+  "He probado mis cambios localmente",
+  "He actualizado la documentación si corresponde",
+  "He añadido tests para los nuevos cambios",
+  "No hay secrets o credenciales en el código",
+]
+
+# Validaciones automáticas (el cliente las ejecuta sin preguntar)
+auto_check = [
+  "branch_name_valid",        # El nombre de rama coincide con patterns
+  "not_protected_branch",     # No es push directo a rama protegida
+  "no_force_push_main",       # No force push a main/master
+  "conventional_commit",      # Mensajes siguen conventional commits
+]
+
+# ============================================================================
+# BRANCH PROTECTION RULES
+# ============================================================================
+# Reglas que GitGov puede orquestar via GitHub API
+
+[rules]
+# Requerir PR para cambios en ramas protegidas
+require_pull_request = true
+
+# Mínimo de aprobaciones para mergear
+min_approvals = 1
+
+# Requerir conventional commits (feat:, fix:, etc.)
+require_conventional_commits = true
+
+# Requerir que las PRs estén actualizadas con la rama base
+require_up_to_date = true
+
+# Auto-merge cuando se cumplen todas las condiciones
+auto_merge_enabled = false
+
+# Patrones de commits permitidos
+commit_patterns = [
+  "^(feat|fix|hotfix|chore|docs|test|refactor|perf|ci|build|revert)(\\(.+\\))?:\\s.+",
+]
+
+# ============================================================================
+# DRIFT DETECTION
+# ============================================================================
+# Verificación de que las protecciones GitHub no han sido modificadas
+
+[drift_detection]
+# Habilitar detección de desviaciones
+enabled = true
+
+# Intervalo de verificación (en minutos)
+check_interval_minutes = 60
+
+# Qué protecciones verificar
+verify = [
+  "branch_protection",        # Reglas de protección de ramas
+  "required_reviewers",       # Revisores requeridos
+  "status_checks",            # Checks de CI/CD requeridos
+  "admin_enforce",            # ¿Admins también deben seguir reglas?
+]
+
+# Acción cuando se detecta drift
+on_drift = "alert"            # alert | auto_fix | alert_and_fix
+
+# Canales de notificación
+alert_channels = [
+  "slack: #devops-alerts",
+  "email: tech-lead@company.com",
+]
+
+# ============================================================================
+# AUDIT CONFIGURATION
+# ============================================================================
+# Configuración de retención y export de eventos
+
+[audit]
+# Retención de eventos en días
+retention_days = 365
+
+# Auto-limpieza de eventos antiguos
+auto_cleanup = true
+
+# Export automático (para compliance)
+[audit.export]
+enabled = true
+format = "json"
+schedule = "weekly"           # daily | weekly | monthly
+include = [
+  "github_events",
+  "client_events",
+  "violations",
+  "noncompliance_signals",
+  "policy_changes",
+]
+
+# Hash de integridad para cada export
+include_hash = true
+
+# Destino del export (puede ser S3, GCS, local, etc.)
+destination = "local"         # local | s3 | gcs | azure_blob
+path = "./exports"
+
+# ============================================================================
+# SEVERITY LEVELS FOR VIOLATIONS
+# ============================================================================
+
+[severity]
+# Niveles de severidad para violaciones
+levels = ["low", "medium", "high", "critical"]
+
+# Mapeo de tipos de violación a severidad
+[severity.mapping]
+untrusted_path = "high"
+missing_telemetry = "medium"
+force_push_protected = "critical"
+branch_name_violation = "low"
+policy_override = "medium"
+bypass_protection = "critical"
