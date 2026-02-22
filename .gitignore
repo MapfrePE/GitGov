@@ -1,0 +1,38 @@
+# Rust build artifacts
+target/
+*.rlib
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Build outputs
+dist/
+build/
+
+# Tauri
+gitgov/src-tauri/target/
+gitgov/gitgov-server/target/
+
+# Exports
+exports/
+
+# Test artifacts
+coverage/
+.nyc_output/

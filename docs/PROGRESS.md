@@ -276,20 +276,24 @@ SERVER_URL=http://localhost:3000 API_KEY=xxx ./stress_test.sh
 | Archivo | Tipo | Descripción |
 |---------|------|-------------|
 | `gitgov-server/supabase_schema_v2.sql` | NUEVO | Migration con ingested_at, job hardening |
-| `gitgov-server/src/db.rs` | MODIFICADO | Job queue hardening completo |
-| `gitgov-server/src/main.rs` | MODIFICADO | Worker mejorado, CLI args, bootstrap security |
-| `gitgov-server/src/handlers.rs` | MODIFICADO | Job management endpoints |
+| `gitgov-server/supabase_schema_v3.sql` | NUEVO | Violation decisions, true append-only violations |
+| `gitgov-server/src/db.rs` | MODIFICADO | Job queue hardening, violation_decisions methods |
+| `gitgov-server/src/main.rs` | MODIFICADO | Worker mejorado, CLI args, bootstrap security, nuevas rutas |
+| `gitgov-server/src/handlers.rs` | MODIFICADO | Job management, violation decisions endpoints |
 | `gitgov-server/Cargo.toml` | MODIFICADO | Agregados clap, atty crates |
 | `gitgov-server/README.md` | MODIFICADO | Documentación job queue, bootstrap security |
 | `gitgov-server/tests/stress_test.sh` | NUEVO | Suite de stress tests |
+| `gitgov/gitgov.toml` | MODIFICADO | Completado con checklist, rules, drift_detection, audit, severity |
 
 ---
 
 ## Comandos para Aplicar en Producción
 
 ```bash
-# 1. Aplicar migration (después del schema base)
-psql -f gitgov-server/supabase_schema_v2.sql
+# 1. Aplicar migrations (en orden)
+psql -f gitgov-server/supabase_schema.sql      # Base schema
+psql -f gitgov-server/supabase_schema_v2.sql   # Job hardening
+psql -f gitgov-server/supabase_schema_v3.sql   # Violation decisions
 
 # 2. Build release
 cd gitgov-server && cargo build --release
