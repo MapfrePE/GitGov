@@ -163,15 +163,52 @@ curl -H "Authorization: Bearer $API_KEY" http://localhost:3000/stats
 
 ### ✅ V1.0 - Implementado
 
-| Feature | Descripción |
-|---------|-------------|
-| **Source of Truth** | Webhooks de GitHub → `github_events` (append-only) |
-| **Telemetría** | Desktop outbox → `client_events` (append-only) |
-| **Correlación** | client_event ↔ github_event por commit_sha |
-| **Bypass Detection** | Señales de noncompliance con confidence scoring |
-| **Policy Versioning** | Historial automático de cambios de gitgov.toml |
-| **Export** | PDF/Excel/JSON con hash SHA256 |
-| **Offline Queue** | Outbox JSONL + backoff exponencial |
+| Feature | Descripción | Estado |
+|---------|-------------|--------|
+| **Source of Truth** | Webhooks de GitHub → `github_events` (append-only) | ✅ |
+| **Telemetría** | Desktop outbox → `client_events` (append-only) | ✅ |
+| **Correlación** | client_event ↔ github_event por commit_sha | ✅ |
+| **Bypass Detection** | Señales de noncompliance con confidence scoring | ✅ |
+| **Policy Versioning** | Historial automático de cambios de gitgov.toml | ✅ |
+| **Export** | PDF/Excel/JSON con hash SHA256 | ✅ |
+| **Offline Queue** | Outbox JSONL + backoff exponencial | ✅ |
+| **Control Plane Dashboard** | Estadísticas y eventos en tiempo real | ✅ |
+| **Event Pipeline E2E** | Desktop → Server → Dashboard | ✅ |
+
+### Dashboard del Control Plane
+
+El dashboard muestra en tiempo real:
+
+| Métrica | Descripción | Fuente |
+|---------|-------------|--------|
+| Total Eventos GitHub | Pushes, creates, etc. | `github_events` |
+| Pushes Hoy | Pushes del día actual | `github_events` |
+| Bloqueados Hoy | Pushes bloqueados por reglas | `client_events` |
+| Devs Activos (Semana) | Usuarios únicos con actividad | `client_events` |
+| Repos Activos | Repositorios con pushes | `github_events` |
+| Eventos Recientes | Timeline de eventos combinados | `UNION github + client` |
+
+### Pipeline de Eventos
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   Desktop App   │────▶│    Outbox       │────▶│  Control Plane  │
+│                 │     │   (JSONL)       │     │    Server       │
+│  - attempt_push │     │                 │     │                 │
+│  - successful_  │     │  - Dedupe by    │     │  - Validate     │
+│    push         │     │    event_uuid   │     │    auth         │
+│  - commit       │     │  - Retry with   │     │  - Insert to    │
+│  - stage_files  │     │    backoff      │     │    PostgreSQL   │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+                                                        │
+                                                        ▼
+                                                ┌─────────────────┐
+                                                │   Dashboard     │
+                                                │                 │
+                                                │  GET /stats     │
+                                                │  GET /logs      │
+                                                └─────────────────┘
+```
 
 ### Bypass Detection - NO Binario
 

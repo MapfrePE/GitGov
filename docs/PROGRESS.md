@@ -1,5 +1,51 @@
 # GitGov - Registro de Progreso
 
+## Estado Actual: Sistema Funcional ✅
+
+### Checklist de Funcionalidad
+
+| Componente | Estado | Verificación |
+|------------|--------|--------------|
+| Desktop App Inicio | ✅ | Dashboard principal carga correctamente |
+| Commits en Dashboard | ✅ | Se registran y muestran en tiempo real |
+| Control Plane Conexión | ✅ | "Conectado al Control Plane" visible |
+| Eventos al Servidor | ✅ | Outbox envía eventos con `Authorization: Bearer` |
+| Dashboard de Control Plane | ✅ | Muestra estadísticas y eventos |
+| Autenticación API | ✅ | SHA256 hash de API key funciona |
+| Deduplicación | ✅ | `event_uuid` único previene duplicados |
+
+### Screenshot del Dashboard (2026-02-22)
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  Conectado al Control Plane                                        │
+│  URL del servidor: http://localhost:3000                           │
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌───────────┐ │
+│  │ Total GitHub │ │ Pushes Hoy   │ │ Bloqueados   │ │Devs Activ │ │
+│  │      0       │ │      0       │ │      0       │ │     1     │ │
+│  └──────────────┘ └──────────────┘ └──────────────┘ └───────────┘ │
+│                                                                    │
+│  Tasa de Éxito: 100.0%          │  Eventos Cliente por Estado     │
+│  Repos Activos: 0               │  ┌─────────────────────────┐    │
+│                                 │  │ success: 25             │    │
+│                                 │  └─────────────────────────┘    │
+│                                                                    │
+│  Eventos Recientes:                                                │
+│  ┌────────────────────────────────────────────────────────────────┐│
+│  │ Hora              │ Usuario   │ Tipo            │ Estado     ││
+│  ├────────────────────────────────────────────────────────────────┤│
+│  │ 22/2/2026 5:45:41 │ MapfrePE  │ successful_push │ success    ││
+│  │ 22/2/2026 5:45:41 │ MapfrePE  │ attempt_push    │ success    ││
+│  │ 22/2/2026 5:45:13 │ MapfrePE  │ commit          │ success    ││
+│  │ 22/2/2026 5:44:43 │ MapfrePE  │ stage_files     │ success    ││
+│  └────────────────────────────────────────────────────────────────┘│
+└────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Bug Fixes Críticos (2026-02-22 - Control Plane Sync)
 
 ### Resumen
@@ -270,6 +316,323 @@ request = request.header("Authorization", format!("Bearer {}", key));
 2. **Rust serde:** Usar `#[serde(default)]` en campos opcionales dentro de structs con `Default`
 3. **API contracts:** Mantener structs sincronizados entre servidor y cliente
 4. **Auth headers:** Unificar formato de headers en todo el código
+
+---
+
+## Pipeline de Eventos End-to-End ✅ (2026-02-22)
+
+### Resumen del Flujo Completo
+
+El sistema ahora registra correctamente todos los eventos desde el desktop hasta el Control Plane:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           DESKTOP APP (Tauri)                               │
+│                                                                             │
+│  Usuario hace push → cmd_push() → OutboxEvent → JSONL local                │
+│                              ↓                                               │
+│                    trigger_flush() → Background Worker                      │
+│                              ↓                                               │
+│                    POST /events (Authorization: Bearer)                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        CONTROL PLANE SERVER                                  │
+│                                                                             │
+│  ingest_client_events() → insert_client_events_batch() → PostgreSQL        │
+│                              ↓                                               │
+│                    client_events table (append-only)                        │
+│                              ↓                                               │
+│                    get_combined_events() → UNION github + client            │
+│                              ↓                                               │
+│                    GET /logs → Dashboard muestra eventos                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Eventos Registrados en el Dashboard
+
+| Timestamp | Usuario | Tipo | Rama | Estado |
+|-----------|---------|------|------|--------|
+| 22/2/2026 5:45:41 | MapfrePE | successful_push | main | success |
+| 22/2/2026 5:45:41 | MapfrePE | attempt_push | main | success |
+| 22/2/2026 5:45:13 | MapfrePE | commit | main | success |
+| 22/2/2026 5:44:43 | MapfrePE | stage_files | - | success |
+
+### Código: Flujo del Push (git_commands.rs:169-269)
+
+```rust
+pub fn cmd_push(
+    repo_path: String,
+    branch: String,
+    developer_login: String,
+    audit_db: State<'_, Arc<AuditDatabase>>,
+    outbox: State<'_, Arc<Outbox>>,
+) -> Result<(), String> {
+    // 1. REGISTRAR INTENTO (attempt_push)
+    let attempt_event = OutboxEvent::new(
+        "attempt_push".to_string(),
+        developer_login.clone(),
+        Some(branch.clone()),
+        AuditStatus::Success,
+    );
+    let attempt_uuid = outbox.add(attempt_event).ok();
+
+    // 2. VALIDAR RAMA PROTEGIDA
+    if cfg.branches.protected.iter().any(|p| p == &branch) {
+        // Registrar blocked_push y retornar error
+        let blocked_event = OutboxEvent::new(
+            "blocked_push".to_string(),
+            developer_login.clone(),
+            Some(branch.clone()),
+            AuditStatus::Blocked,
+        ).with_reason(format!("Rama protegida: {}", branch));
+        outbox.add(blocked_event);
+        return Err(...);
+    }
+
+    // 3. EJECUTAR PUSH
+    match push_to_remote(&repo, &branch, &token) {
+        Ok(()) => {
+            // 4. REGISTRAR ÉXITO (successful_push)
+            let success_event = OutboxEvent::new(
+                "successful_push".to_string(),
+                developer_login.clone(),
+                Some(branch.clone()),
+                AuditStatus::Success,
+            );
+            outbox.add(success_event);
+            
+            // 5. DISPARAR FLUSH INMEDIATO
+            trigger_flush(&outbox);
+            Ok(())
+        }
+        Err(e) => {
+            // Registrar push_failed
+            let event = OutboxEvent::new(
+                "push_failed".to_string(),
+                developer_login.clone(),
+                Some(branch.clone()),
+                status,
+            ).with_reason(e.to_string());
+            outbox.add(event);
+            Err(...)
+        }
+    }
+}
+```
+
+### Código: OutboxEvent (outbox.rs:23-70)
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboxEvent {
+    pub event_uuid: String,      // UUID único para deduplicación
+    pub event_type: String,      // attempt_push, successful_push, commit, etc.
+    pub user_login: String,      // Usuario que ejecutó la acción
+    pub branch: Option<String>,  // Rama afectada
+    pub commit_sha: Option<String>,
+    pub files: Vec<String>,
+    pub status: String,          // success, blocked, failed
+    pub reason: Option<String>,
+    pub timestamp: i64,          // Unix timestamp en ms
+    pub sent: bool,              // ¿Ya enviado al servidor?
+    pub attempts: u32,           // Intentos de envío
+}
+
+impl OutboxEvent {
+    pub fn new(
+        event_type: String,
+        user_login: String,
+        branch: Option<String>,
+        status: AuditStatus,
+    ) -> Self {
+        Self {
+            event_uuid: Uuid::new_v4().to_string(),
+            event_type,
+            user_login,
+            branch,
+            status: status.as_str().to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            sent: false,
+            attempts: 0,
+            // ... otros campos default
+        }
+    }
+}
+```
+
+### Código: Background Flush Worker (outbox.rs:462-597)
+
+```rust
+pub fn start_background_flush(&self, interval_secs: u64) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        loop {
+            // 1. ESPERAR con timeout de 1 segundo (wakeable)
+            let (lock, result) = worker_control.trigger.wait_timeout(...);
+            
+            // 2. CHECK SHUTDOWN
+            if worker_control.shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+
+            // 3. CHECK SI TOCA FLUSH
+            if now.duration_since(last_flush) < interval {
+                continue;
+            }
+
+            // 4. OBTENER EVENTOS PENDIENTES
+            let events_to_send = events.lock().unwrap()
+                .iter().filter(|e| !e.sent).cloned().collect();
+
+            // 5. ENVIAR BATCH AL SERVIDOR
+            let mut request = client.post(&format!("{}/events", url)).json(&batch);
+            if let Some(ref key) = api_key {
+                request = request.header("Authorization", format!("Bearer {}", key));
+            }
+
+            // 6. PROCESAR RESPUESTA
+            match request.send() {
+                Ok(response) if response.status().is_success() => {
+                    // Marcar eventos como enviados
+                    // Persistir estado
+                }
+                Ok(response) => {
+                    tracing::warn!("Outbox flush failed: status {}", response.status());
+                }
+                Err(e) => {
+                    tracing::warn!("Outbox flush network error: {}", e);
+                }
+            }
+        }
+    })
+}
+```
+
+### Código: Servidor Recibe Eventos (handlers.rs:746-810)
+
+```rust
+pub async fn ingest_client_events(
+    State(state): State<Arc<AppState>>,
+    Json(batch): Json<ClientEventBatch>,
+) -> impl IntoResponse {
+    let mut events = Vec::new();
+
+    for input in batch.events {
+        // 1. RESOLVER org_id y repo_id
+        let org_id = if let Some(ref org_name) = input.org_name {
+            state.db.get_org_by_login(org_name).await.ok().flatten().map(|o| o.id)
+        } else { None };
+
+        // 2. CREAR ClientEvent
+        let event = ClientEvent {
+            id: Uuid::new_v4().to_string(),
+            org_id,
+            repo_id,
+            event_uuid: input.event_uuid,  // Para deduplicación
+            event_type: ClientEventType::from_str(&input.event_type),
+            user_login: input.user_login,
+            branch: input.branch,
+            status: EventStatus::from_str(&input.status),
+            timestamp: input.timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
+        };
+
+        events.push(event);
+    }
+
+    // 3. INSERTAR EN BATCH (con deduplicación por event_uuid)
+    match state.db.insert_client_events_batch(&events).await {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(...))
+    }
+}
+```
+
+### Código: SQL get_combined_events (supabase_schema.sql:456-530)
+
+```sql
+CREATE OR REPLACE FUNCTION get_combined_events(
+    p_limit INTEGER DEFAULT 100,
+    p_offset INTEGER DEFAULT 0,
+    p_org_id UUID DEFAULT NULL,
+    p_repo_id UUID DEFAULT NULL,
+    p_source TEXT DEFAULT NULL,
+    p_event_type TEXT DEFAULT NULL,
+    p_user_login TEXT DEFAULT NULL
+) RETURNS TABLE (
+    id TEXT,
+    source TEXT,
+    event_type TEXT,
+    created_at TIMESTAMPTZ,
+    user_login TEXT,
+    repo_name TEXT,
+    branch TEXT,
+    status TEXT,
+    details JSONB
+) AS $$
+BEGIN
+    RETURN QUERY
+    -- EVENTOS DE GITHUB (webhooks)
+    SELECT
+        g.id::TEXT,
+        'github'::TEXT as source,
+        g.event_type,
+        g.created_at,
+        g.actor_login as user_login,
+        r.full_name as repo_name,
+        g.ref_name as branch,
+        NULL::TEXT as status,
+        jsonb_build_object('commits_count', g.commits_count, 'after_sha', g.after_sha)
+    FROM github_events g
+    LEFT JOIN repos r ON g.repo_id = r.id
+
+    UNION ALL
+
+    -- EVENTOS DEL CLIENTE (desktop)
+    SELECT
+        c.id::TEXT,
+        'client'::TEXT as source,
+        c.event_type,
+        c.created_at,
+        c.user_login,
+        r.full_name as repo_name,
+        c.branch,
+        c.status,
+        jsonb_build_object('reason', c.reason, 'files', c.files)
+    FROM client_events c
+    LEFT JOIN repos r ON c.repo_id = r.id
+
+    ORDER BY created_at DESC
+    LIMIT p_limit OFFSET p_offset;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+```
+
+### Métricas del Dashboard
+
+| Métrica | Valor Actual | Fuente |
+|---------|--------------|--------|
+| Total Eventos GitHub | 0 | `github_events` COUNT |
+| Pushes Hoy | 0 | `github_events` WHERE event_type='push' AND today |
+| Bloqueados Hoy | 0 | `client_events` WHERE status='blocked' AND today |
+| Devs Activos (Semana) | 1 | `client_events` DISTINCT user_login last 7 days |
+| Tasa de Éxito | 100% | pushes_today / (pushes + blocked) |
+| Repos Activos | 0 | `github_events` DISTINCT repo_id last 7 days |
+
+### Tipos de Eventos
+
+| Evento | Origen | Cuándo se genera |
+|--------|--------|------------------|
+| `attempt_push` | Desktop | Antes de cada push |
+| `successful_push` | Desktop | Después de push exitoso |
+| `blocked_push` | Desktop | Push a rama protegida |
+| `push_failed` | Desktop | Push rechazado por Git |
+| `commit` | Desktop | Después de crear commit |
+| `stage_files` | Desktop | Después de stage files |
+| `create_branch` | Desktop | Después de crear rama |
+| `blocked_branch` | Desktop | Creación de rama bloqueada |
+| `push` | GitHub Webhook | Push recibido via webhook |
+| `create` | GitHub Webhook | Creación de branch/tag |
 
 ---
 

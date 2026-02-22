@@ -426,6 +426,25 @@ docker run gitgov-server --print-bootstrap-key
 
 ## Testing
 
+### E2E Flow Test
+
+Verifica el pipeline completo de eventos:
+
+```bash
+cd gitgov-server/tests
+chmod +x e2e_flow_test.sh
+SERVER_URL=http://localhost:3000 API_KEY=your-key ./e2e_flow_test.sh
+```
+
+**Tests incluidos:**
+1. Health check del servidor
+2. Autenticación con `Authorization: Bearer`
+3. Rechazo de `X-API-Key` (header incorrecto)
+4. Envío de evento cliente
+5. Verificación en logs
+6. Obtención de estadísticas
+7. Query de eventos combinados
+
 ### Stress Tests
 
 ```bash
