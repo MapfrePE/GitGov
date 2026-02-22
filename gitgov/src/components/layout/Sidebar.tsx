@@ -7,7 +7,7 @@ export function Sidebar() {
   const { user, logout } = useAuthStore()
 
   const navItems = [
-    { to: '/', icon: GitBranch, label: 'Dashboard' },
+    { to: '/', icon: GitBranch, label: 'Inicio' },
     { to: '/control-plane', icon: Server, label: 'Control Plane' },
     ...(user?.is_admin ? [{ to: '/audit', icon: Shield, label: 'Auditoría' }] : []),
     { to: '/settings', icon: Settings, label: 'Configuración' },

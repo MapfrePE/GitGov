@@ -96,7 +96,7 @@ export function CommitPanel() {
           </div>
           
           <div className="flex items-center gap-2 text-xs">
-            <span className="text-surface-500">Preview:</span>
+            <span className="text-surface-500">Vista previa:</span>
             <code className={clsx(
               'px-2 py-0.5 rounded',
               isValidMessage ? 'bg-success-500/20 text-success-400' : 'bg-surface-700 text-surface-400'

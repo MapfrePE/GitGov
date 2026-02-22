@@ -33,9 +33,9 @@ export const FILE_STATUS_COLORS: Record<string, string> = {
 }
 
 export const FILE_STATUS_LABELS: Record<string, string> = {
-  M: 'Modified',
-  A: 'Added',
-  D: 'Deleted',
-  R: 'Renamed',
-  '?': 'Untracked',
+  M: 'Modificado',
+  A: 'Agregado',
+  D: 'Eliminado',
+  R: 'Renombrado',
+  '?': 'Sin seguimiento',
 }

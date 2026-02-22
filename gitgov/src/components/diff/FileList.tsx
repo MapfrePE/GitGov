@@ -1,9 +1,10 @@
 import { memo } from 'react'
 import clsx from 'clsx'
 import { useRepoStore } from '@/store/useRepoStore'
+import { useAuthStore } from '@/store/useAuthStore'
 import type { FileChange } from '@/lib/types'
 import { FILE_STATUS_COLORS } from '@/lib/constants'
-import { FileText, RefreshCw, AlertCircle, CheckSquare } from 'lucide-react'
+import { FileText, RefreshCw, AlertCircle, CheckSquare, Plus } from 'lucide-react'
 
 interface FileItemProps {
   file: FileChange
@@ -65,7 +66,7 @@ const FileItem = memo(function FileItem({ file, selected, disabled, onToggle, on
 
       {file.staged && (
         <span className="text-xs bg-brand-500/20 text-brand-400 px-1.5 py-0.5 rounded">
-          Staged
+          Preparado
         </span>
       )}
 
@@ -98,13 +99,22 @@ export function FileList() {
     selectAll,
     deselectAll,
     loadDiff,
+    stageSelected,
   } = useRepoStore()
+
+  const { user } = useAuthStore()
 
   const handleToggle = (path: string, isSelected: boolean) => {
     if (isSelected) {
       deselectFile(path)
     } else {
       selectFile(path)
+    }
+  }
+
+  const handleStageSelected = async () => {
+    if (selectedFiles.size > 0 && user) {
+      await stageSelected(user.login)
     }
   }
 
@@ -116,7 +126,16 @@ export function FileList() {
         <h3 className="text-sm font-medium text-white">
           Cambios ({fileChanges.length})
         </h3>
-        <div className="flex gap-1">
+        <div className="flex gap-2">
+          {selectedFiles.size > 0 && (
+            <button
+              onClick={handleStageSelected}
+              className="text-xs text-brand-400 hover:text-brand-300 flex items-center gap-1"
+            >
+              <Plus size={12} />
+              Preparar ({selectedFiles.size})
+            </button>
+          )}
           <button
             onClick={allSelected ? deselectAll : selectAll}
             className="text-xs text-surface-400 hover:text-white"

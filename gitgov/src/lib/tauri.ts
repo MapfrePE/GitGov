@@ -1,7 +1,15 @@
 import { invoke } from '@tauri-apps/api/core'
 
+const isTauri = typeof window !== 'undefined' && '__TAURI__' in window
+
 export async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  return invoke<T>(cmd, args)
+  if (isTauri) {
+    return invoke<T>(cmd, args)
+  }
+  
+  // When running in browser (not Tauri desktop), throw error
+  // GitHub auth only works in Tauri desktop, not in browser
+  throw new Error('Esta función requiere la aplicación desktop de GitGov. Descarga e instala GitGov Desktop para usar todas las funciones.')
 }
 
 export function parseCommandError(error: string): { code: string; message: string } {
@@ -17,4 +25,8 @@ export function parseCommandError(error: string): { code: string; message: strin
       message: error,
     }
   }
+}
+
+export function isTauriDesktop(): boolean {
+  return isTauri
 }

@@ -21,7 +21,7 @@ export function ServerConfigPanel() {
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <Server size={20} className="text-success-500" />
-            <span className="text-white font-medium">Connected to Control Plane</span>
+            <span className="text-white font-medium">Conectado al Control Plane</span>
           </div>
           <div className="flex gap-2">
             <Button variant="ghost" size="sm" onClick={checkConnection}>
@@ -29,13 +29,13 @@ export function ServerConfigPanel() {
             </Button>
             <Button variant="danger" size="sm" onClick={disconnect}>
               <Unlink size={14} className="mr-1" />
-              Disconnect
+              Desconectar
             </Button>
           </div>
         </div>
         
         <div className="bg-surface-900 rounded-lg p-3">
-          <p className="text-xs text-surface-400 mb-1">Server URL</p>
+          <p className="text-xs text-surface-400 mb-1">URL del servidor</p>
           <p className="text-sm text-white font-mono">{serverConfig.url}</p>
         </div>
         
@@ -52,12 +52,12 @@ export function ServerConfigPanel() {
     <div className="card">
       <div className="flex items-center gap-2 mb-4">
         <Link size={20} className="text-brand-500" />
-        <span className="text-white font-medium">Connect to Control Plane</span>
+        <span className="text-white font-medium">Conectar al Control Plane</span>
       </div>
       
       <div className="space-y-3">
         <div>
-          <label className="block text-sm text-surface-400 mb-1">Server URL</label>
+          <label className="block text-sm text-surface-400 mb-1">URL del servidor</label>
           <input
             type="text"
             value={url}
@@ -68,19 +68,19 @@ export function ServerConfigPanel() {
         </div>
         
         <div>
-          <label className="block text-sm text-surface-400 mb-1">API Key (optional)</label>
+          <label className="block text-sm text-surface-400 mb-1">API Key (opcional)</label>
           <input
             type="password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
-            placeholder="Your API key"
+            placeholder="Tu API key"
             className="input"
           />
         </div>
         
         <Button onClick={handleConnect} loading={isLoading} className="w-full">
           <Link size={16} className="mr-2" />
-          Connect
+          Conectar
         </Button>
         
         {error && (

@@ -211,7 +211,7 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
 
   commit: async (message: string, authorName: string, authorEmail: string, developerLogin: string) => {
     const { repoPath } = get()
-    if (!repoPath) throw new Error('No repo selected')
+    if (!repoPath) throw new Error('Ningún repositorio seleccionado')
     try {
       const hash = await tauriInvoke<string>('cmd_commit', {
         repoPath,
@@ -230,7 +230,7 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
 
   push: async (branch: string, developerLogin: string) => {
     const { repoPath } = get()
-    if (!repoPath) throw new Error('No repo selected')
+    if (!repoPath) throw new Error('Ningún repositorio seleccionado')
     try {
       await tauriInvoke('cmd_push', { repoPath, branch, developerLogin })
     } catch (e) {

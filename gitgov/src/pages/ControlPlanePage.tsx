@@ -10,7 +10,7 @@ export function ControlPlanePage() {
       <Header>
         <Link to="/settings">
           <Button variant="ghost" size="sm">
-            Settings
+            Configuración
           </Button>
         </Link>
       </Header>

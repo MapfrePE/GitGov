@@ -107,7 +107,7 @@ pub fn run() {
             commands::cmd_server_get_logs,
             commands::cmd_server_get_stats,
         ])
-        .build(tauri::generate_context!())
+        .run(tauri::generate_context!())
         .expect("error while running tauri application");
 
     // Signal shutdown and wait for worker to finish

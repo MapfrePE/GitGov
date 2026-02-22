@@ -55,7 +55,7 @@ export function ServerDashboard() {
     return (
       <div className="flex flex-col items-center justify-center h-64 text-surface-500">
         <Server size={48} className="mb-4" />
-        <p>Connect to a Control Plane server to view dashboard</p>
+        <p>Conecta a un servidor Control Plane para ver el dashboard</p>
       </div>
     )
   }
@@ -69,7 +69,7 @@ export function ServerDashboard() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-bold text-white">Control Plane Dashboard</h2>
+        <h2 className="text-xl font-bold text-white">Dashboard del Control Plane</h2>
         <div className="flex items-center gap-2">
           <label className="flex items-center gap-2 text-sm text-surface-400">
             <input
@@ -78,10 +78,10 @@ export function ServerDashboard() {
               onChange={(e) => setAutoRefresh(e.target.checked)}
               className="rounded border-surface-600"
             />
-            Auto-refresh
+            Auto-actualizar
           </label>
           <Button variant="ghost" size="sm" onClick={() => { loadStats(); loadLogs(50); }} loading={isLoading}>
-            Refresh
+            Actualizar
           </Button>
         </div>
       </div>
@@ -91,25 +91,25 @@ export function ServerDashboard() {
           <div className="grid grid-cols-4 gap-4">
             <StatCard
               icon={<TrendingUp size={16} />}
-              label="Total Events"
+              label="Total Eventos"
               value={serverStats.total_events}
               color="brand"
             />
             <StatCard
               icon={<Activity size={16} />}
-              label="Pushes Today"
+              label="Pushes Hoy"
               value={serverStats.pushes_today}
               color="success"
             />
             <StatCard
               icon={<AlertTriangle size={16} />}
-              label="Blocked Today"
+              label="Bloqueados Hoy"
               value={serverStats.blocked_today}
               color="danger"
             />
             <StatCard
               icon={<Users size={16} />}
-              label="Active Devs (Week)"
+              label="Devs Activos (Semana)"
               value={serverStats.active_devs_this_week}
               color="warning"
             />
@@ -117,7 +117,7 @@ export function ServerDashboard() {
 
           <div className="grid grid-cols-2 gap-4">
             <div className="card">
-              <h3 className="text-sm font-medium text-white mb-3">Success Rate</h3>
+              <h3 className="text-sm font-medium text-white mb-3">Tasa de Éxito</h3>
               <div className="flex items-center gap-4">
                 <div className="text-4xl font-bold text-success-400">{successRate}%</div>
                 <div className="flex-1">
@@ -132,7 +132,7 @@ export function ServerDashboard() {
             </div>
 
             <div className="card">
-              <h3 className="text-sm font-medium text-white mb-3">Top Repositories</h3>
+              <h3 className="text-sm font-medium text-white mb-3">Repositorios Top</h3>
               <div className="space-y-2">
                 {Object.entries(serverStats.events_by_repo)
                   .sort(([, a], [, b]) => b - a)
@@ -147,14 +147,14 @@ export function ServerDashboard() {
                     </div>
                   ))}
                 {Object.keys(serverStats.events_by_repo).length === 0 && (
-                  <p className="text-sm text-surface-500">No data yet</p>
+                  <p className="text-sm text-surface-500">Sin datos aún</p>
                 )}
               </div>
             </div>
           </div>
 
           <div className="card">
-            <h3 className="text-sm font-medium text-white mb-3">Active Developers</h3>
+            <h3 className="text-sm font-medium text-white mb-3">Desarrolladores Activos</h3>
             <div className="flex flex-wrap gap-2">
               {Object.entries(serverStats.events_by_developer)
                 .sort(([, a], [, b]) => b - a)
@@ -165,22 +165,22 @@ export function ServerDashboard() {
                   </div>
                 ))}
               {Object.keys(serverStats.events_by_developer).length === 0 && (
-                <p className="text-sm text-surface-500">No data yet</p>
+                <p className="text-sm text-surface-500">Sin datos aún</p>
               )}
             </div>
           </div>
 
           <div className="card">
-            <h3 className="text-sm font-medium text-white mb-3">Recent Events</h3>
+            <h3 className="text-sm font-medium text-white mb-3">Eventos Recientes</h3>
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr className="text-left text-xs text-surface-500 border-b border-surface-700">
-                    <th className="pb-2">Time</th>
-                    <th className="pb-2">Developer</th>
-                    <th className="pb-2">Action</th>
-                    <th className="pb-2">Branch</th>
-                    <th className="pb-2">Status</th>
+                    <th className="pb-2">Hora</th>
+                    <th className="pb-2">Desarrollador</th>
+                    <th className="pb-2">Acción</th>
+                    <th className="pb-2">Rama</th>
+                    <th className="pb-2">Estado</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -200,7 +200,7 @@ export function ServerDashboard() {
                             log.status === 'Success' ? 'success' : log.status === 'Blocked' ? 'danger' : 'warning'
                           }
                         >
-                          {log.status}
+                          {log.status === 'Success' ? 'Éxito' : log.status === 'Blocked' ? 'Bloqueado' : 'Fallido'}
                         </Badge>
                       </td>
                     </tr>
@@ -208,7 +208,7 @@ export function ServerDashboard() {
                   {serverLogs.length === 0 && (
                     <tr>
                       <td colSpan={5} className="py-4 text-center text-surface-500">
-                        No events yet
+                        Sin eventos aún
                       </td>
                     </tr>
                   )}

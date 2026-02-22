@@ -2,7 +2,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const GITHUB_CLIENT_ID: &str = "YOUR_GITHUB_CLIENT_ID";
+const GITHUB_CLIENT_ID: &str = "Ov23livabbc30nXBY0KF";
 const TOKEN_EXPIRATION_SECONDS: i64 = 28 * 24 * 60 * 60; // 28 days (GitHub default)
 
 #[derive(Debug, Error)]
