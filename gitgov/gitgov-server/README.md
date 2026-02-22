@@ -380,6 +380,31 @@ The system uses evidence-based language, NOT accusations:
 - **Export Hash**: Every export has SHA256 for verification
 - **Bootstrap Security**: API keys printed only with explicit flag or TTY
 
+### API Key Authentication
+
+**Important:** The server expects `Authorization: Bearer {api_key}` header, NOT `X-API-Key`.
+
+**Flow:**
+1. Client sends: `Authorization: Bearer 57f1ed59-371d-46ef-9fdf-508f59bc4963`
+2. Server hashes: `SHA256("57f1ed59-...")` → `abc123...`
+3. Server queries: `SELECT * FROM api_keys WHERE key_hash = 'abc123...'`
+4. If found → authentication successful
+
+**Example:**
+```bash
+curl -H "Authorization: Bearer $API_KEY" \
+  http://localhost:3000/stats
+```
+
+**Common Pitfall:**
+```bash
+# ❌ WRONG - Will return 401 Unauthorized
+curl -H "X-API-Key: $API_KEY" http://localhost:3000/stats
+
+# ✅ CORRECT - Use Authorization: Bearer
+curl -H "Authorization: Bearer $API_KEY" http://localhost:3000/stats
+```
+
 ### Bootstrap Key Security
 
 The bootstrap admin key is only printed when:

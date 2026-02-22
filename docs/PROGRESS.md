@@ -1,5 +1,278 @@
 # GitGov - Registro de Progreso
 
+## Bug Fixes Críticos (2026-02-22 - Control Plane Sync)
+
+### Resumen
+
+Se resolvieron múltiples errores de serialización y autenticación que impedían la comunicación correcta entre el cliente Tauri y el servidor backend.
+
+| Issue | Estado | Descripción |
+|-------|--------|-------------|
+| Panic en get_stats() | ✅ | NULL en `by_type`/`by_status` causaba crash |
+| Serialización ServerStats | ✅ | Estructura anidada vs plana incompatible |
+| Serialización CombinedEvent | ✅ | Cliente esperaba `AuditLogEntry`, servidor enviaba `CombinedEvent` |
+| Outbox 401 Unauthorized | ✅ | Header `X-API-Key` vs `Authorization: Bearer` |
+
+---
+
+### Bug 1 - Panic en `get_stats()` ✅
+
+**Problema:**
+```
+thread 'tokio-runtime-worker' panicked at src\db.rs:502:77:
+called `Result::unwrap()` on an `Err` value: ColumnDecode { 
+    index: "\"stats\"", 
+    source: Error("invalid type: null, expected a map", line: 1, column: 82) 
+}
+```
+
+**Causa raíz:**
+- PostgreSQL `json_object_agg()` devuelve `NULL` cuando no hay filas
+- Rust esperaba `HashMap<String, i64>` pero recibía `null`
+- Los structs `GitHubEventStats` y `ClientEventStats` no tenían `#[serde(default)]`
+
+**Solución aplicada:**
+
+1. **Rust (models.rs):** Agregado `#[serde(default)]` a campos HashMap:
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GitHubEventStats {
+    pub total: i64,
+    pub today: i64,
+    pub pushes_today: i64,
+    #[serde(default)]  // <-- Agregado
+    pub by_type: HashMap<String, i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClientEventStats {
+    pub total: i64,
+    pub today: i64,
+    pub blocked_today: i64,
+    #[serde(default)]  // <-- Agregado
+    pub by_type: HashMap<String, i64>,
+    #[serde(default)]  // <-- Agregado
+    pub by_status: HashMap<String, i64>,
+}
+```
+
+2. **SQL (supabase_schema.sql):** Agregado `COALESCE` para devolver `{}` en lugar de NULL:
+```sql
+'by_type', COALESCE(
+    (SELECT json_object_agg(event_type, cnt) FROM (...) t), 
+    '{}'::json
+),
+'by_status', COALESCE(
+    (SELECT json_object_agg(status, cnt) FROM (...) t), 
+    '{}'::json
+),
+```
+
+**SQL a ejecutar en Supabase:**
+```sql
+CREATE OR REPLACE FUNCTION get_audit_stats(p_org_id UUID DEFAULT NULL)
+RETURNS JSON AS $$
+DECLARE
+    result JSON;
+BEGIN
+    SELECT json_build_object(
+        'github_events', (
+            SELECT json_build_object(
+                'total', (SELECT COUNT(*) FROM github_events WHERE (p_org_id IS NULL OR org_id = p_org_id)),
+                'today', (SELECT COUNT(*) FROM github_events WHERE (p_org_id IS NULL OR org_id = p_org_id) AND created_at >= DATE_TRUNC('day', NOW())),
+                'pushes_today', (SELECT COUNT(*) FROM github_events WHERE (p_org_id IS NULL OR org_id = p_org_id) AND event_type = 'push' AND created_at >= DATE_TRUNC('day', NOW())),
+                'by_type', COALESCE((SELECT json_object_agg(event_type, cnt) FROM (SELECT event_type, COUNT(*) as cnt FROM github_events WHERE (p_org_id IS NULL OR org_id = p_org_id) GROUP BY event_type) t), '{}'::json)
+            )
+        ),
+        'client_events', (
+            SELECT json_build_object(
+                'total', (SELECT COUNT(*) FROM client_events WHERE (p_org_id IS NULL OR org_id = p_org_id)),
+                'today', (SELECT COUNT(*) FROM client_events WHERE (p_org_id IS NULL OR org_id = p_org_id) AND created_at >= DATE_TRUNC('day', NOW())),
+                'blocked_today', (SELECT COUNT(*) FROM client_events WHERE (p_org_id IS NULL OR org_id = p_org_id) AND status = 'blocked' AND created_at >= DATE_TRUNC('day', NOW())),
+                'by_type', COALESCE((SELECT json_object_agg(event_type, cnt) FROM (SELECT event_type, COUNT(*) as cnt FROM client_events WHERE (p_org_id IS NULL OR org_id = p_org_id) GROUP BY event_type) t), '{}'::json),
+                'by_status', COALESCE((SELECT json_object_agg(status, cnt) FROM (SELECT status, COUNT(*) as cnt FROM client_events WHERE (p_org_id IS NULL OR org_id = p_org_id) GROUP BY status) t), '{}'::json)
+            )
+        ),
+        'violations', (
+            SELECT json_build_object(
+                'total', (SELECT COUNT(*) FROM violations WHERE (p_org_id IS NULL OR org_id = p_org_id)),
+                'unresolved', (SELECT COUNT(*) FROM violations WHERE (p_org_id IS NULL OR org_id = p_org_id) AND NOT resolved),
+                'critical', (SELECT COUNT(*) FROM violations WHERE (p_org_id IS NULL OR org_id = p_org_id) AND severity = 'critical' AND NOT resolved)
+            )
+        ),
+        'active_devs_week', (SELECT COUNT(DISTINCT user_login) FROM client_events WHERE (p_org_id IS NULL OR org_id = p_org_id) AND created_at >= NOW() - INTERVAL '7 days'),
+        'active_repos', (SELECT COUNT(DISTINCT repo_id) FROM github_events WHERE (p_org_id IS NULL OR org_id = p_org_id) AND created_at >= NOW() - INTERVAL '7 days')
+    ) INTO result;
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+```
+
+---
+
+### Bug 2 - Serialización ServerStats ✅
+
+**Problema:**
+```
+Serialization error: error decoding response body
+```
+
+**Causa raíz:**
+El cliente Tauri esperaba estructura plana:
+```rust
+struct ServerStats {
+    pushes_today: i64,
+    blocked_today: i64,
+    total_events: i64,
+    events_by_repo: HashMap<String, i64>,
+    // ...
+}
+```
+
+Pero el servidor enviaba estructura anidada:
+```rust
+struct AuditStats {
+    github_events: GitHubEventStats,
+    client_events: ClientEventStats,
+    violations: ViolationStats,
+    // ...
+}
+```
+
+**Solución aplicada:**
+
+Sincronizadas las estructuras en:
+
+| Archivo | Cambio |
+|---------|--------|
+| `src-tauri/src/control_plane/server.rs` | `ServerStats` actualizado para coincidir con `AuditStats` del servidor |
+| `src/store/useControlPlaneStore.ts` | TypeScript interface actualizada |
+| `src/components/control_plane/ServerDashboard.tsx` | Frontend actualizado para usar campos anidados |
+
+**Nueva estructura unificada:**
+```rust
+pub struct ServerStats {
+    pub github_events: GitHubEventStats,
+    pub client_events: ClientEventStats,
+    pub violations: ViolationStats,
+    pub active_devs_week: i64,
+    pub active_repos: i64,
+}
+```
+
+---
+
+### Bug 3 - Serialización CombinedEvent ✅
+
+**Problema:**
+```
+Serialization error: error decoding response body
+```
+(En endpoint `/logs`)
+
+**Causa raíz:**
+El cliente esperaba `{ logs: Vec<AuditLogEntry> }` pero el servidor enviaba `{ events: Vec<CombinedEvent> }`.
+
+**Solución aplicada:**
+
+| Archivo | Cambio |
+|---------|--------|
+| `src-tauri/src/control_plane/server.rs` | Agregado struct `CombinedEvent` |
+| `src-tauri/src/commands/server_commands.rs` | `cmd_server_get_logs` retorna `Vec<CombinedEvent>` |
+| `src/lib/types.ts` | Agregado interface `CombinedEvent` |
+| `src/store/useControlPlaneStore.ts` | `serverLogs` usa `CombinedEvent[]` |
+| `src/components/control_plane/ServerDashboard.tsx` | Actualizado para usar campos de `CombinedEvent` |
+
+**Estructura unificada:**
+```rust
+pub struct CombinedEvent {
+    pub id: String,
+    pub source: String,        // "github" o "client"
+    pub event_type: String,
+    pub created_at: i64,
+    pub user_login: Option<String>,
+    pub repo_name: Option<String>,
+    pub branch: Option<String>,
+    pub status: Option<String>,
+    pub details: serde_json::Value,
+}
+```
+
+---
+
+### Bug 4 - Outbox 401 Unauthorized ✅
+
+**Problema:**
+```
+WARN Outbox flush failed: status 401 Unauthorized
+```
+
+**Causa raíz:**
+Inconsistencia en el header de autorización:
+- `send_batch()` usaba: `X-API-Key: {api_key}`
+- `start_background_flush()` usaba: `X-API-Key: {api_key}`
+- Servidor esperaba: `Authorization: Bearer {api_key}`
+
+**Flujo de autenticación del servidor:**
+```rust
+// auth.rs
+let token = auth_header.strip_prefix("Bearer ")?;
+let key_hash = format!("{:x}", sha2::Sha256::digest(token.as_bytes()));
+db.validate_api_key(&key_hash).await
+```
+
+**Solución aplicada:**
+
+| Archivo | Línea | Cambio |
+|---------|-------|--------|
+| `src-tauri/src/outbox/outbox.rs` | 439 | `X-API-Key` → `Authorization: Bearer` |
+| `src-tauri/src/outbox/outbox.rs` | 550 | `X-API-Key` → `Authorization: Bearer` |
+
+**Antes:**
+```rust
+request = request.header("X-API-Key", key);
+```
+
+**Después:**
+```rust
+request = request.header("Authorization", format!("Bearer {}", key));
+```
+
+---
+
+### Archivos Modificados
+
+| Archivo | Tipo | Descripción |
+|---------|------|-------------|
+| `gitgov-server/src/models.rs` | MODIFICADO | `#[serde(default)]` en HashMaps |
+| `gitgov-server/supabase_schema.sql` | MODIFICADO | `COALESCE` en `get_audit_stats()` |
+| `src-tauri/src/control_plane/server.rs` | MODIFICADO | `ServerStats`, `CombinedEvent`, auth header |
+| `src-tauri/src/commands/server_commands.rs` | MODIFICADO | Import `CombinedEvent` |
+| `src-tauri/src/outbox/outbox.rs` | MODIFICADO | Authorization header unificado |
+| `src/store/useControlPlaneStore.ts` | MODIFICADO | Interfaces TypeScript |
+| `src/lib/types.ts` | MODIFICADO | Agregado `CombinedEvent` |
+| `src/components/control_plane/ServerDashboard.tsx` | MODIFICADO | UI para nueva estructura |
+
+---
+
+### Build Status
+
+```
+✅ Desktop (Tauri): cargo build - 10 warnings
+✅ Server (Axum): cargo build - 22 warnings  
+```
+
+---
+
+### Lecciones Aprendidas
+
+1. **SQL NULL handling:** Siempre usar `COALESCE` con `json_object_agg()` cuando las tablas pueden estar vacías
+2. **Rust serde:** Usar `#[serde(default)]` en campos opcionales dentro de structs con `Default`
+3. **API contracts:** Mantener structs sincronizados entre servidor y cliente
+4. **Auth headers:** Unificar formato de headers en todo el código
+
+---
+
 ## Production Hardening (2026-02-21 - Parte 5 - FINAL)
 
 ### Resumen de Hardening Completo

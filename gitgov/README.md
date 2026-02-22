@@ -94,6 +94,71 @@ El enforcement real se logra configurando branch protection y rulesets en GitHub
 | `push` | Push a rama | `ref`, `after`, `commits[]`, `pusher`, `repository` |
 | `create` | Creación de branch/tag | `ref`, `ref_type`, `sender`, `repository` |
 
+## Control Plane Data Contracts
+
+### ServerStats (GET /stats)
+
+Estructura anidada devuelta por el servidor:
+
+```typescript
+interface ServerStats {
+  github_events: {
+    total: number
+    today: number
+    pushes_today: number
+    by_type: Record<string, number>
+  }
+  client_events: {
+    total: number
+    today: number
+    blocked_today: number
+    by_type: Record<string, number>
+    by_status: Record<string, number>
+  }
+  violations: {
+    total: number
+    unresolved: number
+    critical: number
+  }
+  active_devs_week: number
+  active_repos: number
+}
+```
+
+### CombinedEvent (GET /logs)
+
+Estructura unificada para eventos combinados:
+
+```typescript
+interface CombinedEvent {
+  id: string
+  source: 'github' | 'client'
+  event_type: string
+  created_at: number  // Unix timestamp (ms)
+  user_login?: string
+  repo_name?: string
+  branch?: string
+  status?: string
+  details: Record<string, unknown>
+}
+```
+
+### Authentication Flow
+
+El cliente Tauri autentica con el servidor usando API keys:
+
+1. **Header requerido:** `Authorization: Bearer {api_key}`
+2. **Servidor:** Calcula `SHA256(api_key)` y busca en tabla `api_keys`
+3. **Importante:** El servidor NO acepta `X-API-Key`, solo `Authorization: Bearer`
+
+```bash
+# ❌ WRONG - Returns 401
+curl -H "X-API-Key: $API_KEY" http://localhost:3000/stats
+
+# ✅ CORRECT
+curl -H "Authorization: Bearer $API_KEY" http://localhost:3000/stats
+```
+
 ## Features Principales
 
 ### ✅ V1.0 - Implementado
