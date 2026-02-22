@@ -493,14 +493,20 @@ impl Database {
     // ========================================================================
 
     pub async fn get_stats(&self) -> Result<AuditStats, DbError> {
-        let row = sqlx::query("SELECT get_audit_stats() as stats")
+        let result = sqlx::query("SELECT get_audit_stats() as stats")
             .fetch_one(&self.pool)
-            .await
-            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
-
-        let stats_json: sqlx::types::Json<AuditStats> = row.get("stats");
-
-        Ok(stats_json.0)
+            .await;
+        
+        match result {
+            Ok(row) => {
+                let stats_json: Option<sqlx::types::Json<AuditStats>> = row.get("stats");
+                Ok(stats_json.map(|j| j.0).unwrap_or_default())
+            }
+            Err(_) => {
+                // Function might not exist or return null, return default stats
+                Ok(AuditStats::default())
+            }
+        }
     }
 
     // ========================================================================

@@ -43,6 +43,21 @@ pub struct EventResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CombinedEvent {
+    pub id: String,
+    pub source: String,
+    pub event_type: String,
+    pub created_at: i64,
+    pub user_login: Option<String>,
+    pub repo_name: Option<String>,
+    pub branch: Option<String>,
+    pub status: Option<String>,
+    #[serde(default)]
+    pub details: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AuditFilter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_date: Option<i64>,
@@ -62,15 +77,56 @@ pub struct AuditFilter {
     pub offset: usize,
 }
 
+impl Default for AuditFilter {
+    fn default() -> Self {
+        Self {
+            start_date: None,
+            end_date: None,
+            developer_login: None,
+            action: None,
+            status: None,
+            branch: None,
+            repo_name: None,
+            limit: 50,
+            offset: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServerStats {
+    pub github_events: GitHubEventStats,
+    pub client_events: ClientEventStats,
+    pub violations: ViolationStats,
+    pub active_devs_week: i64,
+    pub active_repos: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GitHubEventStats {
+    pub total: i64,
+    pub today: i64,
     pub pushes_today: i64,
+    #[serde(default)]
+    pub by_type: std::collections::HashMap<String, i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClientEventStats {
+    pub total: i64,
+    pub today: i64,
     pub blocked_today: i64,
-    pub active_devs_this_week: i64,
-    pub most_frequent_action: Option<String>,
-    pub total_events: i64,
-    pub events_by_repo: std::collections::HashMap<String, i64>,
-    pub events_by_developer: std::collections::HashMap<String, i64>,
+    #[serde(default)]
+    pub by_type: std::collections::HashMap<String, i64>,
+    #[serde(default)]
+    pub by_status: std::collections::HashMap<String, i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ViolationStats {
+    pub total: i64,
+    pub unresolved: i64,
+    pub critical: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +156,7 @@ impl ControlPlaneClient {
         let mut request = self.client.post(&url).json(payload);
 
         if let Some(ref api_key) = self.config.api_key {
-            request = request.header("X-API-Key", api_key);
+            request = request.header("Authorization", format!("Bearer {}", api_key));
         }
 
         let response = request
@@ -119,13 +175,13 @@ impl ControlPlaneClient {
             .map_err(|e| ServerError::SerializationError(e.to_string()))
     }
 
-    pub fn get_logs(&self, filter: &AuditFilter) -> Result<Vec<AuditLogEntry>, ServerError> {
+    pub fn get_logs(&self, filter: &AuditFilter) -> Result<Vec<CombinedEvent>, ServerError> {
         let url = format!("{}/logs", self.config.url);
 
         let mut request = self.client.get(&url).query(filter);
 
         if let Some(ref api_key) = self.config.api_key {
-            request = request.header("X-API-Key", api_key);
+            request = request.header("Authorization", format!("Bearer {}", api_key));
         }
 
         let response = request
@@ -141,14 +197,14 @@ impl ControlPlaneClient {
 
         #[derive(Deserialize)]
         struct LogsResponse {
-            logs: Vec<AuditLogEntry>,
+            events: Vec<CombinedEvent>,
         }
 
         let result: LogsResponse = response
             .json()
             .map_err(|e| ServerError::SerializationError(e.to_string()))?;
 
-        Ok(result.logs)
+        Ok(result.events)
     }
 
     pub fn get_stats(&self) -> Result<ServerStats, ServerError> {
@@ -157,7 +213,7 @@ impl ControlPlaneClient {
         let mut request = self.client.get(&url);
 
         if let Some(ref api_key) = self.config.api_key {
-            request = request.header("X-API-Key", api_key);
+            request = request.header("Authorization", format!("Bearer {}", api_key));
         }
 
         let response = request
@@ -182,7 +238,7 @@ impl ControlPlaneClient {
         let mut request = self.client.get(&url);
 
         if let Some(ref api_key) = self.config.api_key {
-            request = request.header("X-API-Key", api_key);
+            request = request.header("Authorization", format!("Bearer {}", api_key));
         }
 
         let response = request

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { RouterProvider } from 'react-router-dom'
 import { router } from './router'
 import { useAuthStore } from './store/useAuthStore'
+import { useControlPlaneStore } from './store/useControlPlaneStore'
 import { ToastContainer } from './components/shared/Toast'
 import { Spinner } from './components/shared/Spinner'
 import { FolderGit2 } from 'lucide-react'
@@ -20,15 +21,19 @@ function SplashScreen() {
 
 function App() {
   const { checkExistingSession, isLoading } = useAuthStore()
+  const { initFromEnv } = useControlPlaneStore()
   const [initialized, setInitialized] = useState(false)
 
   useEffect(() => {
     const init = async () => {
-      await checkExistingSession()
+      await Promise.all([
+        checkExistingSession(),
+        initFromEnv(),
+      ])
       setInitialized(true)
     }
     init()
-  }, [checkExistingSession])
+  }, [checkExistingSession, initFromEnv])
 
   if (!initialized || isLoading) {
     return <SplashScreen />

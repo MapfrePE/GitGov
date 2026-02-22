@@ -61,8 +61,8 @@ export function ServerDashboard() {
   }
 
   const successRate = serverStats
-    ? serverStats.pushes_today + serverStats.blocked_today > 0
-      ? ((serverStats.pushes_today / (serverStats.pushes_today + serverStats.blocked_today)) * 100).toFixed(1)
+    ? serverStats.github_events.pushes_today + serverStats.client_events.blocked_today > 0
+      ? ((serverStats.github_events.pushes_today / (serverStats.github_events.pushes_today + serverStats.client_events.blocked_today)) * 100).toFixed(1)
       : '100.0'
     : '0'
 
@@ -91,26 +91,26 @@ export function ServerDashboard() {
           <div className="grid grid-cols-4 gap-4">
             <StatCard
               icon={<TrendingUp size={16} />}
-              label="Total Eventos"
-              value={serverStats.total_events}
+              label="Total Eventos GitHub"
+              value={serverStats.github_events.total}
               color="brand"
             />
             <StatCard
               icon={<Activity size={16} />}
               label="Pushes Hoy"
-              value={serverStats.pushes_today}
+              value={serverStats.github_events.pushes_today}
               color="success"
             />
             <StatCard
               icon={<AlertTriangle size={16} />}
               label="Bloqueados Hoy"
-              value={serverStats.blocked_today}
+              value={serverStats.client_events.blocked_today}
               color="danger"
             />
             <StatCard
               icon={<Users size={16} />}
               label="Devs Activos (Semana)"
-              value={serverStats.active_devs_this_week}
+              value={serverStats.active_devs_week}
               color="warning"
             />
           </div>
@@ -132,41 +132,48 @@ export function ServerDashboard() {
             </div>
 
             <div className="card">
-              <h3 className="text-sm font-medium text-white mb-3">Repositorios Top</h3>
-              <div className="space-y-2">
-                {Object.entries(serverStats.events_by_repo)
-                  .sort(([, a], [, b]) => b - a)
-                  .slice(0, 5)
-                  .map(([repo, count]) => (
-                    <div key={repo} className="flex items-center justify-between">
-                      <span className="text-sm text-surface-300 flex items-center gap-2">
-                        <GitBranch size={12} />
-                        {repo}
-                      </span>
-                      <Badge variant="neutral">{count}</Badge>
-                    </div>
-                  ))}
-                {Object.keys(serverStats.events_by_repo).length === 0 && (
-                  <p className="text-sm text-surface-500">Sin datos aún</p>
-                )}
+              <h3 className="text-sm font-medium text-white mb-3">Repos Activos</h3>
+              <div className="flex items-center gap-4">
+                <div className="text-4xl font-bold text-brand-400">{serverStats.active_repos}</div>
+                <span className="text-sm text-surface-400">últimos 7 días</span>
               </div>
             </div>
           </div>
 
-          <div className="card">
-            <h3 className="text-sm font-medium text-white mb-3">Desarrolladores Activos</h3>
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(serverStats.events_by_developer)
-                .sort(([, a], [, b]) => b - a)
-                .map(([dev, count]) => (
-                  <div key={dev} className="flex items-center gap-2 bg-surface-700 px-3 py-1.5 rounded-lg">
-                    <span className="text-sm text-white">{dev}</span>
-                    <Badge variant="neutral">{count}</Badge>
-                  </div>
-                ))}
-              {Object.keys(serverStats.events_by_developer).length === 0 && (
-                <p className="text-sm text-surface-500">Sin datos aún</p>
-              )}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="card">
+              <h3 className="text-sm font-medium text-white mb-3">Eventos GitHub por Tipo</h3>
+              <div className="space-y-2">
+                {Object.entries(serverStats.github_events.by_type)
+                  .sort(([, a], [, b]) => b - a)
+                  .slice(0, 5)
+                  .map(([eventType, count]) => (
+                    <div key={eventType} className="flex items-center justify-between">
+                      <span className="text-sm text-surface-300">{eventType}</span>
+                      <Badge variant="neutral">{count}</Badge>
+                    </div>
+                  ))}
+                {Object.keys(serverStats.github_events.by_type).length === 0 && (
+                  <p className="text-sm text-surface-500">Sin datos aún</p>
+                )}
+              </div>
+            </div>
+
+            <div className="card">
+              <h3 className="text-sm font-medium text-white mb-3">Eventos Cliente por Estado</h3>
+              <div className="space-y-2">
+                {Object.entries(serverStats.client_events.by_status)
+                  .sort(([, a], [, b]) => b - a)
+                  .map(([status, count]) => (
+                    <div key={status} className="flex items-center justify-between">
+                      <span className="text-sm text-surface-300">{status}</span>
+                      <Badge variant={status === 'blocked' ? 'danger' : 'success'}>{count}</Badge>
+                    </div>
+                  ))}
+                {Object.keys(serverStats.client_events.by_status).length === 0 && (
+                  <p className="text-sm text-surface-500">Sin datos aún</p>
+                )}
+              </div>
             </div>
           </div>
 
@@ -177,8 +184,9 @@ export function ServerDashboard() {
                 <thead>
                   <tr className="text-left text-xs text-surface-500 border-b border-surface-700">
                     <th className="pb-2">Hora</th>
-                    <th className="pb-2">Desarrollador</th>
-                    <th className="pb-2">Acción</th>
+                    <th className="pb-2">Usuario</th>
+                    <th className="pb-2">Tipo</th>
+                    <th className="pb-2">Repo</th>
                     <th className="pb-2">Rama</th>
                     <th className="pb-2">Estado</th>
                   </tr>
@@ -187,27 +195,28 @@ export function ServerDashboard() {
                   {serverLogs.slice(0, 10).map((log) => (
                     <tr key={log.id} className="border-b border-surface-700/50">
                       <td className="py-2 text-sm text-surface-400">
-                        {new Date(log.timestamp).toLocaleString()}
+                        {new Date(log.created_at).toLocaleString()}
                       </td>
-                      <td className="py-2 text-sm text-white">{log.developer_login}</td>
+                      <td className="py-2 text-sm text-white">{log.user_login || '-'}</td>
                       <td className="py-2">
-                        <Badge variant="neutral">{log.action}</Badge>
+                        <Badge variant="neutral">{log.event_type}</Badge>
                       </td>
-                      <td className="py-2 text-sm text-surface-300 font-mono">{log.branch}</td>
+                      <td className="py-2 text-sm text-surface-300">{log.repo_name || '-'}</td>
+                      <td className="py-2 text-sm text-surface-300 font-mono">{log.branch || '-'}</td>
                       <td className="py-2">
                         <Badge
                           variant={
-                            log.status === 'Success' ? 'success' : log.status === 'Blocked' ? 'danger' : 'warning'
+                            log.status === 'success' ? 'success' : log.status === 'blocked' ? 'danger' : 'warning'
                           }
                         >
-                          {log.status === 'Success' ? 'Éxito' : log.status === 'Blocked' ? 'Bloqueado' : 'Fallido'}
+                          {log.status || '-'}
                         </Badge>
                       </td>
                     </tr>
                   ))}
                   {serverLogs.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="py-4 text-center text-surface-500">
+                      <td colSpan={6} className="py-4 text-center text-surface-500">
                         Sin eventos aún
                       </td>
                     </tr>

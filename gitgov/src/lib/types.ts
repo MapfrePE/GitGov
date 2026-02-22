@@ -18,6 +18,18 @@ export interface AuditLogEntry {
   reason?: string
 }
 
+export interface CombinedEvent {
+  id: string
+  source: string
+  event_type: string
+  created_at: number
+  user_login?: string
+  repo_name?: string
+  branch?: string
+  status?: string
+  details: Record<string, unknown>
+}
+
 export interface AuditFilter {
   start_date?: number
   end_date?: number

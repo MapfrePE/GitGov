@@ -14,6 +14,9 @@ use tauri::Emitter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load .env file if present
+    dotenvy::dotenv().ok();
+
     // Initialize logging with debug level to see all messages
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
@@ -40,6 +43,14 @@ pub fn run() {
     let api_key = std::env::var("GITGOV_API_KEY").ok();
 
     let server_configured = server_url.is_some();
+
+    if server_configured {
+        tracing::info!(
+            server_url = ?server_url,
+            has_api_key = api_key.is_some(),
+            "GitGov Server configured from environment"
+        );
+    }
 
     let outbox = match Outbox::new(&app_data_dir) {
         Ok(o) => {

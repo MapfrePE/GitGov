@@ -1,7 +1,6 @@
 use crate::control_plane::{
-    AuditFilter, ControlPlaneClient, EventPayload, ServerConfig, ServerStats,
+    AuditFilter, CombinedEvent, ControlPlaneClient, EventPayload, ServerConfig, ServerStats,
 };
-use crate::models::AuditLogEntry;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +60,7 @@ pub fn cmd_server_send_event(
 pub fn cmd_server_get_logs(
     config: ServerConnectionConfig,
     filter: AuditFilter,
-) -> Result<Vec<AuditLogEntry>, String> {
+) -> Result<Vec<CombinedEvent>, String> {
     let client = ControlPlaneClient::new(ServerConfig {
         url: config.url,
         api_key: config.api_key,

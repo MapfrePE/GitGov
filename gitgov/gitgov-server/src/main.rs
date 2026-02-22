@@ -10,6 +10,7 @@ use axum::{
 };
 use clap::Parser;
 use dotenvy::dotenv;
+use sha2::Digest;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,6 +19,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::handlers::AppState;
+use crate::models::UserRole;
 
 #[derive(Parser, Debug)]
 #[command(name = "gitgov-server", about = "GitGov Control Plane")]
@@ -63,30 +65,64 @@ async fn main() {
     tracing::info!("Connected to Supabase database");
 
     // Bootstrap: create first admin API key if none exist
-    // SECURITY: Only print key if explicitly requested or running in TTY
+    // Or use the key from GITGOV_API_KEY env if configured
     let should_print_key = args.print_bootstrap_key || atty::is(atty::Stream::Stderr);
     
-    match db.bootstrap_admin_key().await {
-        Ok(Some(api_key)) => {
-            if should_print_key {
-                eprintln!();
-                eprintln!("╔════════════════════════════════════════════════════════════════╗");
-                eprintln!("║  BOOTSTRAP ADMIN KEY - SAVE NOW, WILL NOT BE SHOWN AGAIN       ║");
-                eprintln!("╠════════════════════════════════════════════════════════════════╣");
-                eprintln!("║  {}", api_key);
-                eprintln!("╚════════════════════════════════════════════════════════════════╝");
-                eprintln!();
+    // Check if GITGOV_API_KEY is configured and insert it if not exists
+    if let Ok(env_api_key) = std::env::var("GITGOV_API_KEY") {
+        let key_hash = format!("{:x}", sha2::Sha256::digest(env_api_key.as_bytes()));
+        
+        // Check if this key already exists
+        match db.validate_api_key(&key_hash).await {
+            Ok(Some(_)) => {
+                tracing::info!("GITGOV_API_KEY already exists in database");
             }
-            tracing::info!(
-                print_key = should_print_key,
-                "Bootstrap admin key created. Use --print-bootstrap-key to display."
-            );
+            Ok(None) => {
+                // Key doesn't exist, insert it
+                match db.create_api_key(&key_hash, "gitgov-desktop", None, &UserRole::Admin).await {
+                    Ok(_) => {
+                        tracing::info!("GITGOV_API_KEY inserted into database");
+                        if should_print_key {
+                            eprintln!();
+                            eprintln!("╔════════════════════════════════════════════════════════════════╗");
+                            eprintln!("║  GITGOV_API_KEY configured and ready                            ║");
+                            eprintln!("╚════════════════════════════════════════════════════════════════╝");
+                            eprintln!();
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to insert GITGOV_API_KEY: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to check GITGOV_API_KEY: {}", e);
+            }
         }
-        Ok(None) => {
-            tracing::info!("API keys already exist, skipping bootstrap");
-        }
-        Err(e) => {
-            tracing::error!("Failed to bootstrap admin key: {}", e);
+    } else {
+        // No GITGOV_API_KEY in env, use normal bootstrap
+        match db.bootstrap_admin_key().await {
+            Ok(Some(api_key)) => {
+                if should_print_key {
+                    eprintln!();
+                    eprintln!("╔════════════════════════════════════════════════════════════════╗");
+                    eprintln!("║  BOOTSTRAP ADMIN KEY - SAVE NOW, WILL NOT BE SHOWN AGAIN       ║");
+                    eprintln!("╠════════════════════════════════════════════════════════════════╣");
+                    eprintln!("║  {}", api_key);
+                    eprintln!("╚════════════════════════════════════════════════════════════════╝");
+                    eprintln!();
+                }
+                tracing::info!(
+                    print_key = should_print_key,
+                    "Bootstrap admin key created. Use --print-bootstrap-key to display."
+                );
+            }
+            Ok(None) => {
+                tracing::info!("API keys already exist, skipping bootstrap");
+            }
+            Err(e) => {
+                tracing::error!("Failed to bootstrap admin key: {}", e);
+            }
         }
     }
 
