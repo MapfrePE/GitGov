@@ -226,9 +226,13 @@ pub fn cmd_push(
     let token = match crate::commands::get_token_for_user(&developer_login) {
         Some(t) => t,
         None => {
+            tracing::error!(
+                developer_login = %developer_login,
+                "Token not found in keyring for user"
+            );
             trigger_flush(&outbox);
             return Err(to_command_error(
-                "No hay token guardado para el usuario",
+                format!("No hay token guardado para el usuario '{}'. Intenta re-autenticarte cerrando y abriendo la app.", developer_login),
                 "AUTH_ERROR",
             ));
         }

@@ -67,10 +67,23 @@ pub fn cmd_poll_auth(device_code: String, interval: u64) -> Result<Authenticated
 
     let gh_user = get_authenticated_user(&token).map_err(|e| to_command_error(e, "API_ERROR"))?;
 
-    save_token(&gh_user.login, &token, None).map_err(|e| to_command_error(e, "KEYRING_ERROR"))?;
+    tracing::info!(
+        login = %gh_user.login,
+        "Saving token to keyring for user"
+    );
+
+    save_token(&gh_user.login, &token, None).map_err(|e| {
+        tracing::error!(error = %e, "Failed to save token to keyring");
+        to_command_error(e, "KEYRING_ERROR")
+    })?;
+
+    tracing::info!(
+        login = %gh_user.login,
+        "Token saved successfully"
+    );
 
     Ok(AuthenticatedUser {
-        login: gh_user.login,
+        login: gh_user.login.clone(),
         name: gh_user.name.unwrap_or_else(|| "Unknown".to_string()),
         avatar_url: gh_user.avatar_url,
         group: None,
@@ -131,14 +144,18 @@ pub fn cmd_validate_token(token: String) -> Result<AuthenticatedUser, String> {
 }
 
 pub fn get_token_for_user(username: &str) -> Option<String> {
+    tracing::debug!(username = %username, "Attempting to load token from keyring");
     match load_token(username) {
-        Ok(token) => Some(token),
+        Ok(token) => {
+            tracing::debug!(username = %username, "Token loaded successfully");
+            Some(token)
+        }
         Err(crate::github::AuthError::TokenExpired) => {
-            tracing::warn!("Token expired for user: {}", username);
+            tracing::warn!(username = %username, "Token expired");
             None
         }
         Err(e) => {
-            tracing::warn!("Failed to load token for {}: {}", username, e);
+            tracing::warn!(username = %username, error = %e, "Failed to load token");
             None
         }
     }
