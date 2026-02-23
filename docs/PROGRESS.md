@@ -1,5 +1,18 @@
 # GitGov - Registro de Progreso
 
+## Documentación del Proyecto
+
+| Documento | Propósito |
+|-----------|-----------|
+| [AGENTS.md](../AGENTS.md) | Instrucciones para agentes de IA |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | Arquitectura detallada del sistema |
+| [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) | Guía de solución de problemas |
+| [PROGRESS.md](./PROGRESS.md) | Este archivo - Registro de progreso |
+| [GITGOV_PLAN_CLAUDE_CODE.md](./GITGOV_PLAN_CLAUDE_CODE.md) | Plan maestro original |
+| [GITGOV_ROADMAP_COMERCIAL_v2.md](./GITGOV_ROADMAP_COMERCIAL_v2.md) | Roadmap comercial |
+
+---
+
 ## Estado Actual: Sistema Funcional ✅
 
 ### Checklist de Funcionalidad

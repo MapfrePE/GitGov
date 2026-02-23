@@ -419,10 +419,16 @@ Ver [GITGOV_ROADMAP_COMERCIAL_v2.md](./GITGOV_ROADMAP_COMERCIAL_v2.md) para deta
 
 ## Documentación
 
-- [Plan Maestro](./GITGOV_PLAN_CLAUDE_CODE.md)
-- [Roadmap Comercial](./GITGOV_ROADMAP_COMERCIAL_v2.md)
-- [Progreso](./PROGRESS.md)
-- [Server README](./gitgov-server/README.md)
+| Documento | Descripción |
+|-----------|-------------|
+| [QUICKSTART.md](./docs/QUICKSTART.md) | Guía de inicio rápido (5 min) |
+| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Arquitectura detallada del sistema |
+| [TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) | Solución de problemas comunes |
+| [PROGRESS.md](./docs/PROGRESS.md) | Registro de progreso y cambios |
+| [AGENTS.md](./AGENTS.md) | Guía para agentes de IA |
+| [Plan Maestro](./docs/GITGOV_PLAN_CLAUDE_CODE.md) | Plan original del proyecto |
+| [Roadmap Comercial](./docs/GITGOV_ROADMAP_COMERCIAL_v2.md) | Roadmap de negocio |
+| [Server README](./gitgov-server/README.md) | Documentación del servidor |
 
 ## Licencia
 
