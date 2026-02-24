@@ -55,10 +55,59 @@ interface ControlPlaneActions {
   disconnect: () => void
 }
 
-// Default server config from environment
-const DEFAULT_SERVER_CONFIG: ServerConfig = {
-  url: import.meta.env.VITE_SERVER_URL || 'http://localhost:3000',
-  api_key: import.meta.env.VITE_API_KEY || undefined,
+const CONTROL_PLANE_CONFIG_STORAGE_KEY = 'gitgov.control_plane_config'
+
+// Compatibility fallback: existing desktop setups relied on this default key.
+// Keep it as last-resort fallback so the dashboard/logs continue working.
+const LEGACY_DEFAULT_API_KEY = '57f1ed59-371d-46ef-9fdf-508f59bc4963'
+
+function readStoredServerConfig(): ServerConfig | null {
+  try {
+    const raw = window.localStorage.getItem(CONTROL_PLANE_CONFIG_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<ServerConfig>
+    if (!parsed || typeof parsed.url !== 'string') return null
+    return {
+      url: parsed.url,
+      api_key: typeof parsed.api_key === 'string' && parsed.api_key.trim() ? parsed.api_key : undefined,
+    }
+  } catch {
+    return null
+  }
+}
+
+function persistServerConfig(config: ServerConfig | null) {
+  try {
+    if (!config) {
+      window.localStorage.removeItem(CONTROL_PLANE_CONFIG_STORAGE_KEY)
+      return
+    }
+    window.localStorage.setItem(CONTROL_PLANE_CONFIG_STORAGE_KEY, JSON.stringify(config))
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: ServerConfig | null): ServerConfig {
+  const stored = readStoredServerConfig()
+  const url =
+    input?.url?.trim() ||
+    previous?.url?.trim() ||
+    stored?.url?.trim() ||
+    import.meta.env.VITE_SERVER_URL ||
+    'http://localhost:3000'
+
+  const apiKey =
+    input?.api_key?.trim() ||
+    previous?.api_key?.trim() ||
+    stored?.api_key?.trim() ||
+    import.meta.env.VITE_API_KEY ||
+    LEGACY_DEFAULT_API_KEY
+
+  return {
+    url,
+    api_key: apiKey || undefined,
+  }
 }
 
 export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActions>((set, get) => ({
@@ -70,13 +119,17 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   error: null,
 
   initFromEnv: async () => {
-    // Auto-connect with default config from .env
-    set({ serverConfig: DEFAULT_SERVER_CONFIG })
+    // Auto-connect with stored config, env vars, or compatibility fallback.
+    const config = resolveServerConfig()
+    persistServerConfig(config)
+    set({ serverConfig: config })
     await get().checkConnection()
   },
 
   setServerConfig: (config) => {
-    set({ serverConfig: config })
+    const merged = resolveServerConfig(config, get().serverConfig)
+    persistServerConfig(merged)
+    set({ serverConfig: merged })
     get().checkConnection()
   },
 
@@ -126,5 +179,8 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
 
   clearError: () => set({ error: null }),
 
-  disconnect: () => set({ serverConfig: null, isConnected: false, serverStats: null, serverLogs: [] }),
+  disconnect: () => {
+    persistServerConfig(null)
+    set({ serverConfig: null, isConnected: false, serverStats: null, serverLogs: [], error: null })
+  },
 }))

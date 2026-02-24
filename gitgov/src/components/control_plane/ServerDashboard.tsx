@@ -33,7 +33,30 @@ function StatCard({ icon, label, value, color }: StatCardProps) {
 
 function readDetailString(log: CombinedEvent, key: string): string | null {
   const value = log.details?.[key]
-  return typeof value === 'string' && value.trim().length > 0 ? value : null
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value
+  }
+
+  const metadata =
+    log.details && typeof log.details === 'object'
+      ? (log.details['metadata'] as Record<string, unknown> | undefined)
+      : undefined
+
+  const nested = metadata?.[key]
+  if (typeof nested === 'string' && nested.trim().length > 0) {
+    return nested
+  }
+
+  const legacyDetails =
+    log.details && typeof log.details === 'object'
+      ? (log.details['legacy_details'] as Record<string, unknown> | undefined)
+      : undefined
+  const legacyMetadata =
+    legacyDetails && typeof legacyDetails === 'object'
+      ? (legacyDetails['metadata'] as Record<string, unknown> | undefined)
+      : undefined
+  const nestedLegacy = legacyMetadata?.[key]
+  return typeof nestedLegacy === 'string' && nestedLegacy.trim().length > 0 ? nestedLegacy : null
 }
 
 function getLogDetailPreview(log: CombinedEvent): string | null {
