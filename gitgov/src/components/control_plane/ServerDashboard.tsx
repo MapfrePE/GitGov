@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Button } from '@/components/shared/Button'
 import { Badge } from '@/components/shared/Badge'
@@ -76,9 +76,62 @@ function getShortCommitSha(log: CombinedEvent): string | null {
   return sha ? sha.slice(0, 7) : null
 }
 
+function readDetailFiles(log: CombinedEvent): string[] {
+  const direct = log.details?.['files']
+  if (Array.isArray(direct)) {
+    return direct.filter((v): v is string => typeof v === 'string')
+  }
+  return []
+}
+
+interface DashboardRow {
+  log: CombinedEvent
+  attachedFiles: string[]
+}
+
+function buildDashboardRows(logs: CombinedEvent[]): DashboardRow[] {
+  const rows: DashboardRow[] = []
+  const consumedStageFileIds = new Set<string>()
+
+  for (let i = 0; i < logs.length; i++) {
+    const log = logs[i]
+
+    if (log.event_type === 'stage_files') {
+      continue
+    }
+
+    let attachedFiles: string[] = []
+
+    if (log.event_type === 'commit') {
+      for (let j = i + 1; j < logs.length; j++) {
+        const candidate = logs[j]
+        if (candidate.event_type !== 'stage_files') continue
+        if (consumedStageFileIds.has(candidate.id)) continue
+        if ((candidate.user_login ?? '') !== (log.user_login ?? '')) continue
+
+        const deltaMs = log.created_at - candidate.created_at
+        if (deltaMs < 0) continue
+        if (deltaMs > 10 * 60 * 1000) break
+
+        const files = readDetailFiles(candidate)
+        if (files.length > 0) {
+          attachedFiles = files
+          consumedStageFileIds.add(candidate.id)
+        }
+        break
+      }
+    }
+
+    rows.push({ log, attachedFiles })
+  }
+
+  return rows
+}
+
 export function ServerDashboard() {
   const { serverStats, serverLogs, isConnected, isLoading, loadStats, loadLogs } = useControlPlaneStore()
   const [autoRefresh, setAutoRefresh] = useState(true)
+  const [expandedCommitRows, setExpandedCommitRows] = useState<Record<string, boolean>>({})
 
   useEffect(() => {
     if (isConnected && autoRefresh) {
@@ -112,6 +165,7 @@ export function ServerDashboard() {
       ? ((serverStats.github_events.pushes_today / (serverStats.github_events.pushes_today + serverStats.client_events.blocked_today)) * 100).toFixed(1)
       : '100.0'
     : '0'
+  const dashboardRows = buildDashboardRows(serverLogs).slice(0, 10)
 
   return (
     <div className="space-y-6">
@@ -239,46 +293,82 @@ export function ServerDashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {serverLogs.slice(0, 10).map((log) => (
-                    <tr key={log.id} className="border-b border-surface-700/50">
-                      <td className="py-2 text-sm text-surface-400">
-                        {new Date(log.created_at).toLocaleString()}
-                      </td>
-                      <td className="py-2 text-sm text-white">{log.user_login || '-'}</td>
-                      <td className="py-2">
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2">
-                            <Badge variant="neutral">{log.event_type}</Badge>
-                            {log.event_type === 'commit' && getShortCommitSha(log) && (
-                              <span className="text-xs text-surface-500 font-mono">
-                                {getShortCommitSha(log)}
-                              </span>
-                            )}
-                          </div>
-                          {getLogDetailPreview(log) && (
-                            <div
-                              className="text-xs text-surface-400 max-w-56 truncate"
-                              title={getLogDetailPreview(log) ?? undefined}
-                            >
-                              {getLogDetailPreview(log)}
+                  {dashboardRows.map(({ log, attachedFiles }) => {
+                    const isCommit = log.event_type === 'commit'
+                    const canExpandFiles = isCommit && attachedFiles.length > 0
+                    const isExpanded = !!expandedCommitRows[log.id]
+
+                    return (
+                      <Fragment key={log.id}>
+                        <tr key={log.id} className="border-b border-surface-700/50">
+                          <td className="py-2 text-sm text-surface-400">
+                            {new Date(log.created_at).toLocaleString()}
+                          </td>
+                          <td className="py-2 text-sm text-white">{log.user_login || '-'}</td>
+                          <td className="py-2">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <Badge variant="neutral">{log.event_type}</Badge>
+                                {isCommit && getShortCommitSha(log) && (
+                                  <span className="text-xs text-surface-500 font-mono">
+                                    {getShortCommitSha(log)}
+                                  </span>
+                                )}
+                                {canExpandFiles && (
+                                  <button
+                                    type="button"
+                                    className="text-xs text-brand-400 hover:text-brand-300 underline"
+                                    onClick={() =>
+                                      setExpandedCommitRows((prev) => ({ ...prev, [log.id]: !prev[log.id] }))
+                                    }
+                                  >
+                                    {isExpanded ? 'Ocultar archivos' : `Ver archivos (${attachedFiles.length})`}
+                                  </button>
+                                )}
+                              </div>
+                              {getLogDetailPreview(log) && (
+                                <div
+                                  className="text-xs text-surface-400 max-w-56 truncate"
+                                  title={getLogDetailPreview(log) ?? undefined}
+                                >
+                                  {getLogDetailPreview(log)}
+                                </div>
+                              )}
                             </div>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-2 text-sm text-surface-300">{log.repo_name || '-'}</td>
-                      <td className="py-2 text-sm text-surface-300 font-mono">{log.branch || '-'}</td>
-                      <td className="py-2">
-                        <Badge
-                          variant={
-                            log.status === 'success' ? 'success' : log.status === 'blocked' ? 'danger' : 'warning'
-                          }
-                        >
-                          {log.status || '-'}
-                        </Badge>
-                      </td>
-                    </tr>
-                  ))}
-                  {serverLogs.length === 0 && (
+                          </td>
+                          <td className="py-2 text-sm text-surface-300">{log.repo_name || '-'}</td>
+                          <td className="py-2 text-sm text-surface-300 font-mono">{log.branch || '-'}</td>
+                          <td className="py-2">
+                            <Badge
+                              variant={
+                                log.status === 'success' ? 'success' : log.status === 'blocked' ? 'danger' : 'warning'
+                              }
+                            >
+                              {log.status || '-'}
+                            </Badge>
+                          </td>
+                        </tr>
+                        {canExpandFiles && isExpanded && (
+                          <tr className="border-b border-surface-700/50">
+                            <td />
+                            <td colSpan={5} className="pb-3">
+                              <div className="bg-surface-900 rounded-md p-2">
+                                <div className="text-xs text-surface-400 mb-2">Archivos del commit</div>
+                                <div className="flex flex-col gap-1">
+                                  {attachedFiles.map((file) => (
+                                    <code key={`${log.id}-${file}`} className="text-xs text-surface-300 break-all">
+                                      {file}
+                                    </code>
+                                  ))}
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })}
+                  {dashboardRows.length === 0 && (
                     <tr>
                       <td colSpan={6} className="py-4 text-center text-surface-500">
                         Sin eventos aún
