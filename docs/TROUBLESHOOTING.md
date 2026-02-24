@@ -1,5 +1,14 @@
 # GitGov - Guía de Troubleshooting
 
+## Cómo Usar Esta Guía
+
+Esta guía te ayuda a resolver problemas comunes. Cada sección explica:
+- Qué síntomas verás
+- Por qué pasa
+- Cómo solucionarlo
+
+---
+
 ## Índice
 
 1. [Problemas de Autenticación](#problemas-de-autenticación)
@@ -13,381 +22,386 @@
 
 ## Problemas de Autenticación
 
-### Error: `401 Unauthorized`
+### Error: 401 Unauthorized
 
-**Síntomas:**
-```
-WARN Outbox flush failed: status 401 Unauthorized
-```
+**Qué verás:**
+- En los logs: "WARN Outbox flush failed: status 401 Unauthorized"
+- El dashboard no carga datos del servidor
+- Los eventos no aparecen en el servidor
 
-**Causas posibles:**
+**Por qué pasa:**
 
-| Causa | Solución |
-|-------|----------|
-| Header incorrecto | Usar `Authorization: Bearer {key}`, NO `X-API-Key` |
-| API key no existe en DB | Verificar con SQL: `SELECT * FROM api_keys WHERE key_hash = '...'` |
-| API key desactivada | `is_active = false` en tabla `api_keys` |
-| Hash incorrecto | El servidor hace SHA256 del token recibido |
+El servidor rechazó la request porque no pudo verificar tu identidad.
 
-**Verificación paso a paso:**
+**Causas más comunes:**
 
-```bash
-# 1. Verificar que el header es correcto
-curl -v -H "Authorization: Bearer $API_KEY" http://localhost:3000/stats
+| Causa | Cómo verificar | Solución |
+|-------|----------------|----------|
+| Header incorrecto | El header debe ser `Authorization: Bearer`, NO `X-API-Key` | Corregir el header en la configuración |
+| API key no existe | Verificar en la base de datos | Crear la API key nuevamente |
+| API key desactivada | El campo `is_active` está en false | Reactivar la key |
+| Hash incorrecto | El servidor calcula SHA256 del token recibido | Usar la key exacta, sin espacios extra |
 
-# 2. Calcular hash de la API key
-echo -n "57f1ed59-371d-46ef-9fdf-508f59bc4963" | sha256sum
+**Pasos para diagnosticar:**
 
-# 3. Verificar en la base de datos
-psql -c "SELECT * FROM api_keys WHERE key_hash = '<hash_calculado>'"
-```
+1. Verificar que el header se envía correctamente
+2. Calcular el hash SHA256 de tu API key
+3. Buscar ese hash en la tabla api_keys de la base de datos
+4. Confirmar que is_active es true
 
-**Código correcto:**
+**Solución más común:**
 
-```rust
-// ✅ CORRECTO
-request.header("Authorization", format!("Bearer {}", api_key))
-
-// ❌ INCORRECTO
-request.header("X-API-Key", api_key)
-```
+El error más frecuente es usar el header incorrecto. El servidor SOLO acepta:
+- ✅ `Authorization: Bearer TU_API_KEY`
+- ❌ `X-API-Key: TU_API_KEY` (esto NO funciona)
 
 ---
 
-### Error: `Missing Authorization header`
+### Error: Missing Authorization header
 
-**Causa:** El middleware no encuentra el header.
+**Qué verás:**
+- Error 401 inmediato
+- Mensaje: "Missing Authorization header"
 
-**Verificar:**
-1. El cliente está enviando el header
-2. No hay proxy/cors eliminando headers
-3. El header está bien formateado
+**Por qué pasa:**
 
-**Debug:**
-```rust
-// Agregar en auth.rs temporalmente
-tracing::debug!("Headers: {:?}", req.headers());
-```
+El middleware de autenticación no encontró ningún header de autorización en la request.
+
+**Causas y soluciones:**
+
+| Causa | Solución |
+|-------|----------|
+| El cliente no envía el header | Verificar que el código incluye el header |
+| Un proxy elimina headers | Revisar configuración de nginx/cloudflare |
+| CORS mal configurado | Habilitar el header Authorization en CORS |
 
 ---
 
 ## Problemas del Outbox
 
-### Error: `Outbox flush failed`
+### Error: Outbox flush failed
 
-**Síntomas:**
-```
-WARN Outbox flush failed: status 401 Unauthorized
-WARN Outbox flush network error: connection refused
-```
+**Qué verás:**
+- En los logs: "WARN Outbox flush failed: status XXX"
+- El dashboard del servidor no muestra tus eventos
+- El archivo outbox.jsonl crece pero los eventos no llegan
 
-**Diagnóstico:**
+**Por qué pasa:**
 
-```bash
-# Verificar configuración
-cat gitgov/.env | grep -E "SERVER_URL|API_KEY"
+El worker en background intentó enviar eventos al servidor pero falló.
 
-# Verificar que el servidor está corriendo
-curl http://localhost:3000/health
+**Diagnóstico paso a paso:**
 
-# Ver archivo de eventos pendientes
-cat ~/.gitgov/outbox.jsonl
-```
+1. **Verificar configuración**
+   - Confirmar que SERVER_URL está configurado
+   - Confirmar que API_KEY está configurado
+   - Verificar que no hay typos en los valores
 
-**Causas comunes:**
+2. **Verificar conectividad**
+   - El servidor está corriendo en el puerto 3000?
+   - Puedes hacer ping a la URL del servidor?
+   - Hay firewall bloqueando la conexión?
 
-| Error | Causa | Solución |
-|-------|-------|----------|
-| `connection refused` | Servidor no corre | Iniciar con `cargo run` |
-| `status 401` | Auth incorrecta | Ver header Authorization |
-| `timeout` | Red lenta | Aumentar timeout en código |
-| `certificate error` | HTTPS local | Usar HTTP en desarrollo |
+3. **Verificar el archivo de eventos**
+   - Existe ~/.gitgov/outbox.jsonl?
+   - Tiene contenido?
+   - Los eventos tienen "sent": false?
 
-**Verificar estado del outbox:**
+**Errores comunes y soluciones:**
 
-```rust
-// En código Rust
-let pending = outbox.get_pending_count();
-tracing::info!("Pending events: {}", pending);
-```
+| Error | Significado | Solución |
+|-------|-------------|----------|
+| connection refused | Servidor no está corriendo | Iniciar el servidor |
+| status 401 | Autenticación falló | Ver header Authorization |
+| timeout | Red muy lenta | Aumentar timeout o mejorar red |
+| certificate error | HTTPS con certificado inválido | Usar HTTP en desarrollo |
 
 ---
 
-### Error: `Events not being sent`
+### Error: Events not being sent
 
-**Síntomas:** Dashboard no muestra nuevos eventos.
+**Qué verás:**
+- El dashboard no muestra nuevos eventos
+- Haces commits/pushes pero no aparecen en el servidor
+- No hay errores en los logs
+
+**Por qué pasa:**
+
+Los eventos se están generando pero no se están enviando.
 
 **Verificar:**
 
-1. **Background worker iniciado:**
-```rust
-// En lib.rs, verificar que se llama:
-outbox.start_background_flush(60);
-```
+1. **El worker de background está iniciado?**
+   - Al iniciar la app debe llamarse a start_background_flush
+   - Si no, los eventos quedan en la cola local
 
-2. **Eventos en cola:**
-```bash
-# Ver archivo JSONL
-wc -l ~/.gitgov/outbox.jsonl
-```
+2. **Hay eventos en la cola?**
+   - Verificar el archivo ~/.gitgov/outbox.jsonl
+   - Debe tener líneas con eventos
 
-3. **Trigger manual:**
-```rust
-// Forzar flush
-trigger_flush(&outbox);
-```
+3. **Los eventos tienen sent: false?**
+   - Si todos tienen sent: true, ya se enviaron
+   - El problema está en otro lado
+
+**Solución:**
+
+Forzar un flush manual puede ayudar a diagnosticar. Si funciona manualmente, el problema está en el worker automático.
 
 ---
 
 ## Problemas de Base de Datos
 
-### Error: `invalid type: null, expected a map`
+### Error: invalid type: null, expected a map
 
-**Síntomas:**
-```
-thread 'tokio-runtime-worker' panicked:
-ColumnDecode { index: "\"stats\"", source: Error("invalid type: null, expected a map") }
-```
+**Qué verás:**
+- Crash del servidor con panic
+- Error mencionando "ColumnDecode" y "invalid type: null"
 
-**Causa:** `json_object_agg()` devuelve NULL cuando no hay filas.
+**Por qué pasa:**
 
-**Solución en SQL:**
-```sql
--- Agregar COALESCE
-'by_type', COALESCE(
-    (SELECT json_object_agg(event_type, cnt) FROM (...) t),
-    '{}'::json
-)
-```
+PostgreSQL tiene una función json_object_agg que devuelve NULL cuando no hay datos. Rust espera un objeto/mapa pero recibe null.
 
-**Solución en Rust:**
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct GitHubEventStats {
-    pub total: i64,
-    pub today: i64,
-    pub pushes_today: i64,
-    #[serde(default)]  // <-- Importante
-    pub by_type: HashMap<String, i64>,
-}
-```
+**Solución:**
+
+Se necesita usar COALESCE en las queries SQL para devolver un objeto vacío en lugar de NULL cuando no hay datos.
+
+También los structs en Rust deben tener `#[serde(default)]` en los campos que pueden estar vacíos.
 
 ---
 
-### Error: `function get_audit_stats() does not exist`
+### Error: function get_audit_stats() does not exist
 
-**Causa:** La función no fue creada en la base de datos.
+**Qué verás:**
+- Error al llamar al endpoint /stats
+- Mensaje: "function get_audit_stats() does not exist"
+
+**Por qué pasa:**
+
+La función SQL no fue creada en la base de datos.
 
 **Solución:**
-```bash
-# Ejecutar schema en Supabase SQL Editor
-# O usando psql:
-psql -f gitgov/gitgov-server/supabase_schema.sql
-```
+
+Ejecutar el archivo supabase_schema.sql en el editor SQL de Supabase o con psql.
 
 ---
 
-### Error: `relation "client_events" does not exist`
+### Error: relation "client_events" does not exist
 
-**Causa:** Tabla no creada.
+**Qué verás:**
+- Error al insertar eventos
+- Mensaje: "relation 'client_events' does not exist"
+
+**Por qué pasa:**
+
+La tabla no existe en la base de datos.
 
 **Solución:**
-```sql
--- Verificar tablas existentes
-SELECT tablename FROM pg_tables WHERE schemaname = 'public';
 
--- Crear tabla si falta
-CREATE TABLE client_events (
-    id UUID PRIMARY KEY,
-    event_uuid TEXT UNIQUE NOT NULL,
-    event_type TEXT NOT NULL,
-    user_login TEXT NOT NULL,
-    branch TEXT,
-    status TEXT NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-```
+1. Listar las tablas existentes
+2. Si falta la tabla, ejecutar el schema completo
+3. Verificar que te conectas a la base de datos correcta
 
 ---
 
 ## Problemas de Serialización
 
-### Error: `Serialization error: error decoding response body`
+### Error: Serialization error / error decoding response body
 
-**Causa:** Structs no coinciden entre cliente y servidor.
+**Qué verás:**
+- Error al recibir respuesta del servidor
+- Mensaje mencionando "Serialization" o "decoding"
 
-**Diagnóstico:**
+**Por qué pasa:**
 
-```bash
-# Ver respuesta del servidor
-curl -H "Authorization: Bearer $API_KEY" http://localhost:3000/stats | jq
+La estructura de datos que el cliente espera no coincide con lo que el servidor envía.
 
-# Comparar con struct en Rust
-```
+**Cómo diagnosticar:**
 
-**Verificar structs:**
+1. Ver la respuesta raw del servidor (sin parsear)
+2. Comparar con lo que el cliente espera
+3. Buscar diferencias en nombres de campos, tipos, o estructura
 
-```rust
-// Servidor (gitgov-server/src/models.rs)
-pub struct ServerStats {
-    pub github_events: GitHubEventStats,
-    pub client_events: ClientEventStats,
-    // ...
-}
+**Causas comunes:**
 
-// Cliente (src-tauri/src/control_plane/server.rs)
-pub struct ServerStats {
-    pub github_events: GitHubEventStats,
-    pub client_events: ClientEventStats,
-    // ...
-}
-```
+| Causa | Ejemplo | Solución |
+|-------|---------|----------|
+| Campo con nombre diferente | Servidor envía "pushes_today", cliente espera "pushesToday" | Sincronizar nombres |
+| Campo faltante | Servidor no envía un campo que el cliente requiere | Agregar default en el cliente |
+| Campo extra | Servidor envía un campo que el cliente no conoce | Ignorar campos desconocidos |
+| Estructura diferente | Servidor envía objeto anidado, cliente espera plano | Cambiar estructura |
 
-**Ambos deben ser IDÉNTICOS.**
+**Regla de oro:**
+
+Las estructuras de datos deben ser IDÉNTICAS entre cliente y servidor. Cualquier diferencia causará errores de serialización.
 
 ---
 
-### Error: `missing field` o `unknown field`
+### Error: missing field / unknown field
 
-**Causa:** Campos con nombres diferentes o faltantes.
+**Qué verás:**
+- Error específico mencionando un campo
+- "missing field: nombre_campo" o "unknown field: nombre_campo"
 
-**Solución:**
-- Usar `#[serde(rename = "campo_name")]` para renombrar
-- Usar `#[serde(default)]` para campos opcionales
-- Usar `#[serde(skip_serializing_if = "Option::is_none")]` para omitir nulls
+**Por qué pasa:**
+
+El JSON recibido tiene más o menos campos de los esperados.
+
+**Soluciones:**
+
+- Para campos faltantes: usar defaults en el cliente
+- Para campos unknown: el cliente debe ignorar campos extra
+- Para campos con nombre diferente: usar alias
 
 ---
 
 ## Problemas de Conexión
 
-### Error: `connection refused` (ECONNREFUSED)
+### Error: connection refused (ECONNREFUSED)
 
-**Causa:** Servidor no está corriendo o puerto incorrecto.
+**Qué verás:**
+- Error inmediato al intentar conectar
+- "connection refused" o "ECONNREFUSED"
+
+**Por qué pasa:**
+
+No hay nada escuchando en el puerto al que intentas conectar.
 
 **Verificar:**
-```bash
-# Verificar que el servidor corre
-lsof -i :3000
-# o
-netstat -an | grep 3000
 
-# Verificar URL en .env
-cat gitgov/.env | grep SERVER_URL
-```
+1. El servidor está corriendo?
+2. Está en el puerto correcto (3000 por defecto)?
+3. La URL en el .env es correcta?
+
+**Comandos de diagnóstico:**
+
+- Verificar qué procesos escuchan en puerto 3000
+- Verificar la URL configurada en .env
+- Intentar conectar manualmente con curl o browser
 
 ---
 
-### Error: `certificate verify failed`
+### Error: certificate verify failed
 
-**Causa:** HTTPS con certificado auto-firmado.
+**Qué verás:**
+- Error mencionando "certificate" o "SSL"
+- Solo pasa con HTTPS
 
-**Solución en desarrollo:**
-- Usar HTTP en lugar de HTTPS
-- O agregar certificado a trust store
+**Por qué pasa:**
 
-**Solución en código:**
-```rust
-// Solo para desarrollo - NO usar en producción
-let client = reqwest::Client::builder()
-    .danger_accept_invalid_certs(true)
-    .build()?;
-```
+El certificado SSL no es válido o es auto-firmado.
+
+**Soluciones:**
+
+- En desarrollo: usar HTTP en lugar de HTTPS
+- En producción: usar certificados válidos (Let's Encrypt)
+- Temporal: aceptar certificados inválidos (SOLO desarrollo)
 
 ---
 
 ## Logs y Debugging
 
-### Habilitar logs detallados
+### Cómo habilitar logs detallados
 
-**Rust (Server):**
-```bash
+**En el servidor:**
+```
 RUST_LOG=debug cargo run
 ```
 
-**Rust (Desktop):**
-```bash
+**En la desktop app:**
+```
 RUST_LOG=gitgov=debug npm run tauri dev
 ```
 
-### Logs útiles
+**Niveles de log:**
 
-**Ver eventos recibidos:**
-```sql
-SELECT 
-    event_type, 
-    user_login, 
-    branch, 
-    status, 
-    created_at 
-FROM client_events 
-ORDER BY created_at DESC 
-LIMIT 20;
-```
+| Nivel | Cuándo usar |
+|-------|-------------|
+| error | Solo errores críticos |
+| warn | Errores recuperables |
+| info | Eventos importantes |
+| debug | Todo lo que pasa |
+| trace | Muy detallado |
 
-**Ver estadísticas actuales:**
-```sql
-SELECT get_audit_stats();
-```
+### Qué buscar en los logs
 
-**Ver eventos combinados:**
-```sql
-SELECT * FROM get_combined_events(100, 0);
-```
+**Errores comunes:**
+- "panic" - Crash del programa
+- "ERROR" - Algo falló críticamente
+- "WARN" - Algo inesperado pero recuperable
 
-### Archivos de log
+**En el servidor:**
+- Buscar "failed" o "error"
+- Ver si hay requests con status 4xx o 5xx
+- Revisar queries SQL que fallan
 
-| Ubicación | Contenido |
-|-----------|-----------|
-| `~/.gitgov/outbox.jsonl` | Eventos pendientes |
-| `~/.gitgov/audit.db` | SQLite local de auditoría |
-| stdout | Logs del servidor |
+**En la desktop app:**
+- Buscar "outbox" para ver estado de eventos
+- Ver "flush" para saber si se envían eventos
+- Revisar errores de serialización
 
----
+### Archivos importantes
 
-## Comandos de Emergencia
-
-### Reiniciar outbox
-
-```bash
-# Backup
-cp ~/.gitgov/outbox.jsonl ~/.gitgov/outbox.jsonl.bak
-
-# Limpiar eventos enviados
-# (Editar archivo y eliminar líneas con "sent":true)
-```
-
-### Regenerar API key
-
-```sql
--- Desactivar key anterior
-UPDATE api_keys SET is_active = false WHERE client_id = 'gitgov-desktop';
-
--- Crear nueva (desde el servidor, se hace automáticamente al iniciar)
--- O insertar manualmente:
-INSERT INTO api_keys (key_hash, client_id, role, is_active)
-VALUES ('<sha256_hash>', 'gitgov-desktop', 'admin', true);
-```
-
-### Limpiar eventos de prueba
-
-```sql
--- Solo para desarrollo
-DELETE FROM client_events WHERE user_login = 'test_user';
-DELETE FROM github_events WHERE actor_login = 'test_user';
-```
+| Archivo | Qué contiene |
+|---------|--------------|
+| ~/.gitgov/outbox.jsonl | Eventos pendientes de enviar |
+| ~/.gitgov/audit.db | Base de datos SQLite local |
+| stdout/stderr | Logs del servidor |
 
 ---
 
 ## Checklist de Diagnóstico
 
-Cuando algo no funciona:
+Cuando algo no funciona, verifica en orden:
 
-1. [ ] Servidor corre en puerto 3000
-2. [ ] Health check devuelve OK
-3. [ ] API key existe en base de datos
-4. [ ] Header Authorization: Bearer se envía
-5. [ ] Structs cliente/servidor coinciden
-6. [ ] No hay NULLs en json_object_agg
-7. [ ] Background worker del outbox iniciado
-8. [ ] Archivo outbox.jsonl existe
-9. [ ] Logs no muestran errores
+1. [ ] El servidor está corriendo en puerto 3000
+2. [ ] El health check devuelve OK
+3. [ ] La API key existe en la base de datos
+4. [ ] El header Authorization: Bearer se envía correctamente
+5. [ ] Las estructuras de datos coinciden entre cliente y servidor
+6. [ ] No hay NULLs donde se esperan objetos
+7. [ ] El worker del outbox está iniciado
+8. [ ] El archivo outbox.jsonl existe
+9. [ ] Los logs no muestran errores
+
+---
+
+## Comandos de Emergencia
+
+### Reiniciar el outbox
+
+Si el outbox está atascado:
+
+1. Hacer backup del archivo outbox.jsonl
+2. Eliminar eventos ya enviados (líneas con "sent":true)
+3. Reiniciar la aplicación
+
+### Regenerar API key
+
+Si la API key está corrupta o perdida:
+
+1. Desactivar la key anterior en la base de datos
+2. Reiniciar el servidor (genera una nueva key automáticamente)
+3. Actualizar el .env de la desktop app con la nueva key
+
+### Limpiar datos de prueba
+
+Solo para desarrollo - eliminar eventos de testing:
+1. Conectar a la base de datos
+2. Eliminar eventos con user_login de prueba
+3. Verificar que el dashboard se actualiza
+
+---
+
+## Cuándo Pedir Ayuda
+
+Si después de seguir esta guía el problema persiste:
+
+1. Guardar los logs completos con RUST_LOG=debug
+2. Documentar los pasos exactos que causan el error
+3. Incluir versión de Rust, Node.js, y sistema operativo
+4. Describir qué intentaste y qué resultados obtuviste
+
+Consulta la documentación adicional:
+- Arquitectura: [ARCHITECTURE.md](./ARCHITECTURE.md)
+- Guía rápida: [QUICKSTART.md](./QUICKSTART.md)
+- Para agentes IA: [AGENTS.md](../AGENTS.md)

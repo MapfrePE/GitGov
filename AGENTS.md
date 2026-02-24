@@ -1,94 +1,76 @@
-# Guía para Agentes de IA - GitGov
+||||||||||as# Guía para Agentes de IA - GitGov
 
-> Este archivo contiene instrucciones críticas para agentes de IA que trabajen en este proyecto. Léelo completo antes de hacer cambios.
-
----
-
-## Estado Actual del Proyecto (2026-02-22)
-
-### ✅ Funcional
-
-| Componente | Estado | Notas |
-|------------|--------|-------|
-| Desktop App | ✅ | Inicia, muestra dashboard, commits |
-| Control Plane Server | ✅ | Corre en localhost:3000 |
-| Autenticación | ✅ | GitHub OAuth + API Keys |
-| Outbox | ✅ | Envía eventos con backoff |
-| Dashboard Control Plane | ✅ | Muestra estadísticas y eventos |
-| Pipeline E2E | ✅ | Desktop → Server → PostgreSQL → Dashboard |
-
-### ⚠️ Pendiente
-
-| Componente | Prioridad | Descripción |
-|------------|-----------|-------------|
-| Webhooks GitHub | Alta | Recibir eventos de GitHub |
-| Correlation Engine | Alta | Correlacionar client_events con github_events |
-| Drift Detection | Media | Detectar desviaciones de política |
-| Tests automatizados | Media | Expandir cobertura |
+> Este archivo proporciona contexto esencial para agentes de IA. Léelo completo antes de hacer cambios.
 
 ---
 
-## Comandos de Build
+## Qué es GitGov
 
-```bash
-# Desktop App (Tauri)
-cd gitgov
-npm install
-npm run tauri dev      # Desarrollo
-cargo build --manifest-path src-tauri/Cargo.toml  # Solo Rust
+GitGov es un sistema de gobernanza de Git distribuido que audita y controla operaciones de Git en organizaciones.
 
-# Control Plane Server
-cd gitgov/gitgov-server
-cargo build
-cargo run
-
-# Tests
-cd gitgov/gitgov-server/tests
-./e2e_flow_test.sh
-./stress_test.sh
-```
+**Tres componentes:**
+1. **Desktop App (Tauri)** - Aplicación de escritorio para desarrolladores
+2. **Control Plane Server (Axum)** - Servidor central que recopila eventos
+3. **GitHub Integration** - OAuth + Webhooks
 
 ---
 
-## Linting y Typecheck
+## Estado del Proyecto (2026-02-22)
 
-**SIEMPRE ejecutar antes de commit:**
+### Funcional
 
-```bash
-# Backend Rust
-cd gitgov/gitgov-server && cargo clippy -- -D warnings
-cd gitgov/src-tauri && cargo clippy -- -D warnings
+| Componente | Estado |
+|------------|--------|
+| Desktop App | Inicia, muestra dashboard, commits |
+| Control Plane Server | Corre en localhost:3000 |
+| Autenticación | GitHub OAuth + API Keys |
+| Outbox | Envía eventos con backoff |
+| Dashboard | Muestra estadísticas y eventos |
+| Pipeline E2E | Desktop → Server → PostgreSQL → Dashboard |
 
-# Frontend TypeScript
-cd gitgov && npm run lint
-cd gitgov && npm run typecheck
-```
+### Pendiente
+
+| Componente | Prioridad |
+|------------|-----------|
+| Webhooks GitHub | Alta |
+| Correlation Engine | Alta |
+| Drift Detection | Media |
+| Tests automatizados | Media |
+
+---
+
+## Comandos Esenciales
+
+**Desarrollo:**
+- Desktop: `cd gitgov && npm run tauri dev`
+- Server: `cd gitgov/gitgov-server && cargo run`
+- Tests: `cd gitgov/gitgov-server/tests && ./e2e_flow_test.sh`
+
+**Linting (EJECUTAR ANTES DE COMMIT):**
+- Server Rust: `cd gitgov/gitgov-server && cargo clippy -- -D warnings`
+- Desktop Rust: `cd gitgov/src-tauri && cargo clippy -- -D warnings`
+- Frontend TS: `cd gitgov && npm run lint && npm run typecheck`
 
 ---
 
 ## Arquitectura de Autenticación
 
-### Desktop → GitHub OAuth
-
-```
-1. Usuario hace login
-2. Desktop llama a GitHub Device Flow
-3. Usuario ingresa código en github.com/login/device
-4. GitHub retorna token
-5. Desktop guarda token en keyring (NO en archivo)
-```
-
 ### Desktop → Control Plane
 
-```
-1. Desktop lee API key de .env o config
-2. Envía header: Authorization: Bearer {api_key}
-3. Server calcula SHA256(api_key)
-4. Server busca en tabla api_keys por key_hash
+1. Desktop lee API key de .env o configuración
+2. Envía header: `Authorization: Bearer {api_key}`
+3. Server calcula SHA256 del token
+4. Busca en tabla api_keys por key_hash
 5. Si encuentra → autenticado
-```
 
-**⚠️ IMPORTANTE:** El servidor SOLO acepta `Authorization: Bearer`, NO `X-API-Key`.
+**CRÍTICO:** El servidor SOLO acepta `Authorization: Bearer`, NO `X-API-Key`.
+
+### Desktop → GitHub OAuth
+
+1. Desktop llama a GitHub Device Flow
+2. Usuario ingresa código en github.com/login/device
+3. GitHub retorna token
+4. Desktop guarda token en keyring (NUNCA en archivo)
 
 ---
 
@@ -100,10 +82,9 @@ cd gitgov && npm run typecheck
 Usuario hace push
     │
     ▼
-cmd_push() [git_commands.rs:169]
+cmd_push() en git_commands.rs
     │
     ├─► Crear OutboxEvent "attempt_push"
-    │       outbox.add(event) → JSONL
     │
     ├─► Validar rama protegida
     │       Si protegida → "blocked_push"
@@ -118,189 +99,142 @@ cmd_push() [git_commands.rs:169]
 
 ### Deduplicación
 
-Los eventos se deduplican por `event_uuid`:
-
-```sql
--- En client_events table
-event_uuid TEXT UNIQUE NOT NULL
-```
-
-Si el servidor recibe el mismo `event_uuid` dos veces, el segundo se rechaza con error de duplicado.
+Los eventos se deduplican por `event_uuid` único. Si el servidor recibe el mismo UUID dos veces, el segundo se rechaza.
 
 ---
 
-## Estructuras de Datos Críticas
+## Estructuras de Datos
 
 ### ServerStats (GET /stats)
 
-```typescript
-interface ServerStats {
-  github_events: {
-    total: number
-    today: number
-    pushes_today: number
-    by_type: Record<string, number>  // ⚠️ Puede ser {} si tabla vacía
-  }
-  client_events: {
-    total: number
-    today: number
-    blocked_today: number
-    by_type: Record<string, number>
-    by_status: Record<string, number>
-  }
-  violations: {
-    total: number
-    unresolved: number
-    critical: number
-  }
-  active_devs_week: number
-  active_repos: number
-}
-```
+Estructura anidada con tres secciones principales:
+
+**github_events:** total, today, pushes_today, by_type (puede ser {} si no hay datos)
+
+**client_events:** total, today, blocked_today, by_type, by_status (pueden ser {})
+
+**violations:** total, unresolved, critical
+
+**Plus:** active_devs_week, active_repos
 
 ### CombinedEvent (GET /logs)
 
-```typescript
-interface CombinedEvent {
-  id: string
-  source: 'github' | 'client'
-  event_type: string
-  created_at: number  // Unix timestamp ms
-  user_login?: string
-  repo_name?: string
-  branch?: string
-  status?: string
-  details: Record<string, unknown>
-}
-```
+Campos: id, source ("github" | "client"), event_type, created_at (timestamp ms), user_login?, repo_name?, branch?, status?, details
 
 ---
 
-## Errores Comunes y Soluciones
+## Errores Comunes
 
-### 1. Panic: "invalid type: null, expected a map"
+### Panic: "invalid type: null, expected a map"
 
-**Causa:** PostgreSQL `json_object_agg()` devuelve NULL cuando no hay filas.
+**Causa:** PostgreSQL json_object_agg() devuelve NULL cuando no hay filas.
 
-**Solución:** Usar `COALESCE` en SQL:
-```sql
-COALESCE(json_object_agg(...), '{}'::json)
-```
+**Solución:** Usar COALESCE en SQL y #[serde(default)] en Rust HashMaps.
 
-Y en Rust:
-```rust
-#[serde(default)]
-pub by_type: HashMap<String, i64>,
-```
-
-### 2. 401 Unauthorized en /events
+### 401 Unauthorized
 
 **Causa:** Header incorrecto.
 
-**Mal:**
-```rust
-request.header("X-API-Key", key)
-```
+**Incorrecto:** `X-API-Key: {key}`
+**Correcto:** `Authorization: Bearer {key}`
 
-**Bien:**
-```rust
-request.header("Authorization", format!("Bearer {}", key))
-```
-
-### 3. Serialization error: decoding response body
+### Serialization error
 
 **Causa:** Structs no coinciden entre cliente y servidor.
 
-**Solución:** Verificar que `ServerStats` y `CombinedEvent` sean idénticos en ambos lados.
+**Solución:** ServerStats y CombinedEvent deben ser idénticos en ambos lados.
 
-### 4. Outbox no envía eventos
+### Outbox no envía
 
-**Verificar:**
-1. `server_url` configurado en .env
-2. `api_key` configurado
-3. Background worker iniciado
-4. Conexión de red
+**Verificar:** server_url en .env, api_key en .env, background worker iniciado, conexión de red.
 
 ---
 
 ## Archivos Críticos
 
-| Archivo | Propósito | Modificar con cuidado |
-|---------|-----------|----------------------|
-| `gitgov/src-tauri/src/outbox/outbox.rs` | Cola de eventos offline | Auth headers, retry logic |
-| `gitgov/src-tauri/src/commands/git_commands.rs` | Operaciones Git | Event logging |
-| `gitgov/gitgov-server/src/auth.rs` | Middleware auth | Token validation |
-| `gitgov/gitgov-server/src/handlers.rs` | API handlers | Response structures |
-| `gitgov/gitgov-server/src/models.rs` | Data structures | Serde attributes |
-| `gitgov/gitgov-server/supabase_schema.sql` | DB schema | COALESCE in aggregates |
+| Archivo | Propósito | Precaución |
+|---------|-----------|------------|
+| outbox/outbox.rs | Cola de eventos offline | Auth headers, retry logic |
+| commands/git_commands.rs | Operaciones Git | Event logging |
+| auth.rs | Middleware auth | Token validation |
+| handlers.rs | API handlers | Response structures |
+| models.rs | Data structures | Serde attributes |
+| supabase_schema.sql | DB schema | COALESCE in aggregates |
 
 ---
 
 ## Variables de Entorno
 
-### Desktop (.env)
+**Desktop (.env):**
+- VITE_SERVER_URL=http://localhost:3000
+- VITE_API_KEY=(tu api key)
 
-```env
-VITE_SERVER_URL=http://localhost:3000
-VITE_API_KEY=57f1ed59-371d-46ef-9fdf-508f59bc4963
-```
-
-### Server (.env)
-
-```env
-DATABASE_URL=postgresql://...
-GITGOV_JWT_SECRET=...
-GITGOV_SERVER_ADDR=0.0.0.0:3000
-GITGOV_API_KEY=57f1ed59-371d-46ef-9fdf-508f59bc4963
-GITHUB_WEBHOOK_SECRET=...
-SUPABASE_URL=...
-SUPABASE_ANON_KEY=...
-```
+**Server (.env):**
+- DATABASE_URL=postgresql://...
+- GITGOV_JWT_SECRET=...
+- GITGOV_SERVER_ADDR=0.0.0.0:3000
+- GITGOV_API_KEY=(tu api key)
+- GITHUB_WEBHOOK_SECRET=...
 
 ---
 
 ## Convenciones de Código
 
-### Rust
+**Rust:**
+- Errores: thiserror
+- Logging: tracing (info/debug/warn/error)
+- Serde: #[serde(default)] en Option y HashMap
+- Async: tokio runtime
 
-- **Errores:** Usar `thiserror` para custom errors
-- **Logging:** Usar `tracing` con niveles info/debug/warn/error
-- **Serde:** Siempre `#[serde(default)]` en Option y HashMap
-- **Async:** Usar `tokio` runtime
-
-### TypeScript
-
-- **Estado:** Zustand stores en `src/store/`
-- **Tipos:** Interfaces en `src/lib/types.ts`
-- **Componentes:** Functional components con hooks
-- **Estilos:** Tailwind classes, no CSS custom
+**TypeScript:**
+- Estado: Zustand stores en src/store/
+- Tipos: Interfaces en src/lib/types.ts
+- Componentes: Functional components con hooks
+- Estilos: Tailwind classes
 
 ---
 
-## SQL para Debugging
+## Endpoints del Servidor
 
-```sql
--- Ver eventos del cliente
-SELECT * FROM client_events ORDER BY created_at DESC LIMIT 20;
-
--- Ver estadísticas
-SELECT * FROM get_audit_stats();
-
--- Ver eventos combinados
-SELECT * FROM get_combined_events(100, 0);
-
--- Ver API keys activas
-SELECT client_id, role, last_used FROM api_keys WHERE is_active = true;
-
--- Ver jobs pendientes
-SELECT * FROM jobs WHERE status IN ('pending', 'running');
-```
+| Endpoint | Auth | Propósito |
+|----------|------|-----------|
+| /health | None | Health check |
+| /events | Bearer | Ingesta de eventos del cliente |
+| /webhooks/github | HMAC | Webhooks de GitHub |
+| /stats | Bearer (admin) | Estadísticas |
+| /logs | Bearer | Eventos combinados |
+| /dashboard | Bearer (admin) | Datos del dashboard |
+| /jobs/metrics | Bearer (admin) | Métricas del job queue |
 
 ---
 
-## Contacto y Recursos
+## Tipos de Eventos
 
-- Documentación principal: `docs/PROGRESS.md`
-- Plan maestro: `docs/GITGOV_PLAN_CLAUDE_CODE.md`
-- Roadmap: `docs/GITGOV_ROADMAP_COMERCIAL_v2.md`
-- Server README: `gitgov/gitgov-server/README.md`
+| Evento | Origen | Cuándo |
+|--------|--------|--------|
+| attempt_push | Desktop | Antes de cada push |
+| successful_push | Desktop | Push exitoso |
+| blocked_push | Desktop | Push a rama protegida |
+| push_failed | Desktop | Error en push |
+| commit | Desktop | Commit creado |
+| stage_files | Desktop | Archivos staged |
+| push | GitHub | Webhook push |
+
+---
+
+## Seguridad
+
+1. Tokens en keyring - Nunca en archivos
+2. API keys hasheadas - SHA256 antes de DB
+3. HTTPS obligatorio en producción
+4. Append-only - Eventos no se modifican
+5. Deduplicación - event_uuid único
+
+---
+
+## Recursos
+
+- Arquitectura: docs/ARCHITECTURE.md
+- Troubleshooting: docs/TROUBLESHOOTING.md
+- Progreso: docs/PROGRESS.md
+- Inicio rápido: docs/QUICKSTART.md
