@@ -57,8 +57,8 @@ interface ControlPlaneActions {
 
 // Default server config from environment
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
-  url: 'http://localhost:3000',
-  api_key: '57f1ed59-371d-46ef-9fdf-508f59bc4963',
+  url: import.meta.env.VITE_SERVER_URL || 'http://localhost:3000',
+  api_key: import.meta.env.VITE_API_KEY || undefined,
 }
 
 export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActions>((set, get) => ({
@@ -114,7 +114,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
 
     set({ isLoading: true })
     try {
-      const logs = await tauriInvoke<AuditLogEntry[]>('cmd_server_get_logs', {
+      const logs = await tauriInvoke<CombinedEvent[]>('cmd_server_get_logs', {
         config: serverConfig,
         filter: { limit, offset: 0 },
       })

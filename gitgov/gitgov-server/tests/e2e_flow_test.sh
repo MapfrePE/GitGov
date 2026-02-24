@@ -24,7 +24,7 @@ fail() { echo -e "${RED}❌ $1${NC}"; exit 1; }
 # 1. Health Check
 echo "1. Health Check..."
 HEALTH=$(curl -s "$SERVER_URL/health")
-if [ "$HEALTH" = "OK" ]; then
+if echo "$HEALTH" | grep -q '"status":"ok"'; then
     pass "Server is healthy"
 else
     fail "Server health check failed: $HEALTH"
@@ -72,6 +72,7 @@ EVENT_RESPONSE=$(curl -s -X POST "$SERVER_URL/events" \
             \"event_uuid\": \"$EVENT_UUID\",
             \"event_type\": \"successful_push\",
             \"user_login\": \"test_user\",
+            \"files\": [],
             \"branch\": \"feat/test\",
             \"status\": \"success\",
             \"timestamp\": $TIMESTAMP

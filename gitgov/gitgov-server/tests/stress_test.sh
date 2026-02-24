@@ -8,6 +8,13 @@ set -e
 SERVER_URL="${SERVER_URL:-http://localhost:3000}"
 API_KEY="${API_KEY:-}"
 ORG_NAME="${ORG_NAME:-test-org}"
+EVENTS_BURST_COUNT="${EVENTS_BURST_COUNT:-280}"
+EVENTS_BURST_CONCURRENCY="${EVENTS_BURST_CONCURRENCY:-20}"
+AUDIT_BURST_COUNT="${AUDIT_BURST_COUNT:-80}"
+AUDIT_BURST_CONCURRENCY="${AUDIT_BURST_CONCURRENCY:-10}"
+RUN_RATE_LIMIT_TESTS="${RUN_RATE_LIMIT_TESTS:-1}"
+RUN_AUDIT_RATE_LIMIT_TEST="${RUN_AUDIT_RATE_LIMIT_TEST:-1}"
+RUN_WEBHOOK_STRESS_TESTS="${RUN_WEBHOOK_STRESS_TESTS:-1}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -28,6 +35,101 @@ echo_success() {
 
 echo_fail() {
     echo -e "${RED}✗ $1${NC}"
+}
+
+echo_info() {
+    echo "- $1"
+}
+
+require_api_key_or_skip() {
+    if [ -z "$API_KEY" ]; then
+        echo "Skipping: requires API_KEY"
+        return 1
+    fi
+    return 0
+}
+
+extract_retry_after_from_headers() {
+    local headers_file="$1"
+    local retry_after=""
+    retry_after=$(grep -i '^Retry-After:' "$headers_file" 2>/dev/null | head -n1 | sed 's/\r$//' | cut -d':' -f2- | xargs || true)
+    echo "$retry_after"
+}
+
+run_parallel_curl_burst() {
+    local count="$1"
+    local concurrency="$2"
+    local mode="$3"
+    local tmpdir="$4"
+    local i
+
+    for i in $(seq 1 "$count"); do
+        if [ "$mode" = "events" ]; then
+            local event_uuid="rate-evt-${i}-$(date +%s%N)"
+            local payload
+            payload='{"events":[{"event_uuid":"'"$event_uuid"'","event_type":"stage_files","user_login":"stress-test","files":[],"status":"success","metadata":{"suite":"stress_test","kind":"rate_limit"},"timestamp":'$(date +%s%3N)'}],"client_id":"stress-test","client_version":"stress-test"}'
+
+            (
+                curl -sS -X POST "$SERVER_URL/events" \
+                    -H "Content-Type: application/json" \
+                    -H "Authorization: Bearer $API_KEY" \
+                    -D "$tmpdir/headers.$i" \
+                    -o "$tmpdir/body.$i" \
+                    -w "%{http_code}" \
+                    -d "$payload" > "$tmpdir/status.$i" 2>"$tmpdir/curlerr.$i" || echo "000" > "$tmpdir/status.$i"
+            ) &
+        elif [ "$mode" = "audit" ]; then
+            local ts
+            ts=$(date +%s%3N)
+            local payload
+            payload='{"org_name":null,"entries":[{"@timestamp":'"$ts"',"action":"repo.access","actor":"stress-test","repository":"rate-limit-repo","data":{"i":'"$i"'}}]}'
+
+            (
+                curl -sS -X POST "$SERVER_URL/audit-stream/github" \
+                    -H "Content-Type: application/json" \
+                    -H "Authorization: Bearer $API_KEY" \
+                    -D "$tmpdir/headers.$i" \
+                    -o "$tmpdir/body.$i" \
+                    -w "%{http_code}" \
+                    -d "$payload" > "$tmpdir/status.$i" 2>"$tmpdir/curlerr.$i" || echo "000" > "$tmpdir/status.$i"
+            ) &
+        else
+            echo "Unknown burst mode: $mode"
+            return 1
+        fi
+
+        if [ $((i % concurrency)) -eq 0 ]; then
+            wait
+        fi
+    done
+
+    wait
+}
+
+summarize_status_codes() {
+    local tmpdir="$1"
+    local ok_count=0
+    local rate_count=0
+    local forbidden_count=0
+    local bad_request_count=0
+    local other_count=0
+    local unknown_count=0
+    local code
+
+    for f in "$tmpdir"/status.*; do
+        [ -e "$f" ] || continue
+        code=$(cat "$f" 2>/dev/null || echo "000")
+        case "$code" in
+            200) ok_count=$((ok_count + 1)) ;;
+            429) rate_count=$((rate_count + 1)) ;;
+            403) forbidden_count=$((forbidden_count + 1)) ;;
+            400) bad_request_count=$((bad_request_count + 1)) ;;
+            000) unknown_count=$((unknown_count + 1)) ;;
+            *) other_count=$((other_count + 1)) ;;
+        esac
+    done
+
+    echo "$ok_count $rate_count $forbidden_count $bad_request_count $other_count $unknown_count"
 }
 
 # Check server is running
@@ -292,23 +394,170 @@ test_job_metrics() {
     fi
 }
 
+# Test 7: Rate limiting on /events
+test_events_rate_limit() {
+    echo_header "Test 7: Rate Limiting /events"
+
+    if [ "$RUN_RATE_LIMIT_TESTS" != "1" ]; then
+        echo "Skipping: RUN_RATE_LIMIT_TESTS=$RUN_RATE_LIMIT_TESTS"
+        return 0
+    fi
+
+    if ! require_api_key_or_skip; then
+        return 0
+    fi
+
+    TMPDIR_RATE=$(mktemp -d 2>/dev/null || mktemp -d -t gitgov-rate-events)
+    trap 'rm -rf "$TMPDIR_RATE"' RETURN
+
+    echo_info "Sending $EVENTS_BURST_COUNT requests to /events (concurrency=$EVENTS_BURST_CONCURRENCY)"
+    run_parallel_curl_burst "$EVENTS_BURST_COUNT" "$EVENTS_BURST_CONCURRENCY" "events" "$TMPDIR_RATE"
+
+    read -r OK RATE FORBIDDEN BADREQ OTHER UNKNOWN <<EOF
+$(summarize_status_codes "$TMPDIR_RATE")
+EOF
+
+    echo_info "Status summary: 200=$OK 429=$RATE 403=$FORBIDDEN 400=$BADREQ other=$OTHER neterr=$UNKNOWN"
+
+    if [ "$RATE" -lt 1 ]; then
+        echo_fail "No 429 responses detected on /events burst"
+        rm -rf "$TMPDIR_RATE"
+        trap - RETURN
+        return 1
+    fi
+
+    if [ "$OK" -lt 1 ]; then
+        echo_fail "No successful requests detected before rate limiting on /events"
+        rm -rf "$TMPDIR_RATE"
+        trap - RETURN
+        return 1
+    fi
+
+    local retry_after=""
+    local hf
+    for hf in "$TMPDIR_RATE"/headers.*; do
+        [ -e "$hf" ] || continue
+        if grep -q "429" "$hf"; then
+            retry_after=$(extract_retry_after_from_headers "$hf")
+            [ -n "$retry_after" ] && break
+        fi
+    done
+
+    if [ -z "$retry_after" ]; then
+        # fallback: find any response with 429 and inspect matching headers file by index
+        for sf in "$TMPDIR_RATE"/status.*; do
+            [ -e "$sf" ] || continue
+            if [ "$(cat "$sf")" = "429" ]; then
+                local idx="${sf##*.}"
+                retry_after=$(extract_retry_after_from_headers "$TMPDIR_RATE/headers.$idx")
+                [ -n "$retry_after" ] && break
+            fi
+        done
+    fi
+
+    if [ -n "$retry_after" ]; then
+        echo_success "Retry-After header present on /events 429 responses: $retry_after"
+    else
+        echo_fail "Retry-After header missing on /events 429 responses"
+        rm -rf "$TMPDIR_RATE"
+        trap - RETURN
+        return 1
+    fi
+
+    rm -rf "$TMPDIR_RATE"
+    trap - RETURN
+    echo_success "Rate limiting /events test PASSED"
+}
+
+# Test 8: Rate limiting on /audit-stream/github (admin API key required)
+test_audit_stream_rate_limit() {
+    echo_header "Test 8: Rate Limiting /audit-stream/github"
+
+    if [ "$RUN_RATE_LIMIT_TESTS" != "1" ] || [ "$RUN_AUDIT_RATE_LIMIT_TEST" != "1" ]; then
+        echo "Skipping: RUN_RATE_LIMIT_TESTS=$RUN_RATE_LIMIT_TESTS RUN_AUDIT_RATE_LIMIT_TEST=$RUN_AUDIT_RATE_LIMIT_TEST"
+        return 0
+    fi
+
+    if ! require_api_key_or_skip; then
+        return 0
+    fi
+
+    TMPDIR_RATE=$(mktemp -d 2>/dev/null || mktemp -d -t gitgov-rate-audit)
+    trap 'rm -rf "$TMPDIR_RATE"' RETURN
+
+    echo_info "Sending $AUDIT_BURST_COUNT requests to /audit-stream/github (concurrency=$AUDIT_BURST_CONCURRENCY)"
+    run_parallel_curl_burst "$AUDIT_BURST_COUNT" "$AUDIT_BURST_CONCURRENCY" "audit" "$TMPDIR_RATE"
+
+    read -r OK RATE FORBIDDEN BADREQ OTHER UNKNOWN <<EOF
+$(summarize_status_codes "$TMPDIR_RATE")
+EOF
+
+    echo_info "Status summary: 200=$OK 429=$RATE 403=$FORBIDDEN 400=$BADREQ other=$OTHER neterr=$UNKNOWN"
+
+    if [ "$FORBIDDEN" -gt 0 ] && [ "$OK" -eq 0 ] && [ "$RATE" -eq 0 ]; then
+        echo "Skipping: API_KEY appears to be non-admin for /audit-stream/github"
+        rm -rf "$TMPDIR_RATE"
+        trap - RETURN
+        return 0
+    fi
+
+    if [ "$RATE" -lt 1 ]; then
+        echo_fail "No 429 responses detected on /audit-stream/github burst"
+        rm -rf "$TMPDIR_RATE"
+        trap - RETURN
+        return 1
+    fi
+
+    local retry_after=""
+    local sf
+    for sf in "$TMPDIR_RATE"/status.*; do
+        [ -e "$sf" ] || continue
+        if [ "$(cat "$sf")" = "429" ]; then
+            local idx="${sf##*.}"
+            retry_after=$(extract_retry_after_from_headers "$TMPDIR_RATE/headers.$idx")
+            [ -n "$retry_after" ] && break
+        fi
+    done
+
+    if [ -z "$retry_after" ]; then
+        echo_fail "Retry-After header missing on /audit-stream/github 429 responses"
+        rm -rf "$TMPDIR_RATE"
+        trap - RETURN
+        return 1
+    fi
+
+    echo_success "Retry-After header present on /audit-stream/github 429 responses: $retry_after"
+    rm -rf "$TMPDIR_RATE"
+    trap - RETURN
+    echo_success "Rate limiting /audit-stream/github test PASSED"
+}
+
 # Run all tests
 main() {
     echo_header "GitGov Stress Test Suite"
     echo "Server: $SERVER_URL"
     echo "Org: $ORG_NAME"
     echo "API Key: ${API_KEY:-not set}"
+    echo "Run webhook stress tests: $RUN_WEBHOOK_STRESS_TESTS"
+    echo "Run rate limit tests: $RUN_RATE_LIMIT_TESTS"
     
     check_server
     
     FAILED=0
     
-    test_webhook_idempotency || FAILED=$((FAILED + 1))
-    test_job_dedupe || FAILED=$((FAILED + 1))
+    if [ "$RUN_WEBHOOK_STRESS_TESTS" = "1" ]; then
+        test_webhook_idempotency || FAILED=$((FAILED + 1))
+        test_job_dedupe || FAILED=$((FAILED + 1))
+        test_multi_org || FAILED=$((FAILED + 1))
+        test_high_volume || FAILED=$((FAILED + 1))
+    else
+        echo "Skipping legacy webhook stress tests (RUN_WEBHOOK_STRESS_TESTS=$RUN_WEBHOOK_STRESS_TESTS)"
+    fi
+
     test_stale_reset || FAILED=$((FAILED + 1))
-    test_multi_org || FAILED=$((FAILED + 1))
-    test_high_volume || FAILED=$((FAILED + 1))
     test_job_metrics || FAILED=$((FAILED + 1))
+    test_events_rate_limit || FAILED=$((FAILED + 1))
+    test_audit_stream_rate_limit || FAILED=$((FAILED + 1))
     
     echo_header "Test Results"
     

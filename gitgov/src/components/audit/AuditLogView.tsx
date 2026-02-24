@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import type { AuditFilter } from '@/lib/types'
 import { useAuditStore } from '@/store/useAuditStore'
 import { useAuthStore } from '@/store/useAuthStore'
 import { AuditLogRow } from './AuditLogRow'
@@ -8,7 +9,7 @@ import { RefreshCw, Users, AlertTriangle, TrendingUp } from 'lucide-react'
 
 export function AuditLogView() {
   const { user } = useAuthStore()
-  const { logs, stats, filter, isLoading, loadLogs, loadStats, setFilter } = useAuditStore()
+  const { logs, stats, isLoading, loadLogs, loadStats, setFilter } = useAuditStore()
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
 
@@ -25,7 +26,7 @@ export function AuditLogView() {
   }
 
   const handleDateFilter = () => {
-    const newFilter: Partial<typeof filter> = {}
+    const newFilter: Partial<AuditFilter> = {}
     if (dateFrom) {
       newFilter.start_date = new Date(dateFrom).getTime()
     }

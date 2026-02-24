@@ -54,7 +54,10 @@ pub async fn auth_middleware(
     let auth_user = db
         .validate_api_key(&key_hash)
         .await
-        .map_err(|e| AuthError(format!("Database error: {}", e)))?
+        .map_err(|e| {
+            tracing::error!("Authentication backend error: {}", e);
+            AuthError("Authentication backend unavailable".to_string())
+        })?
         .ok_or_else(|| AuthError("Invalid or expired API key".to_string()))?;
 
     let (client_id, role, org_id) = auth_user;

@@ -141,6 +141,9 @@ pub fn cmd_commit(
                 AuditStatus::Success,
             )
             .with_commit_sha(commit_hash.clone())
+            .with_metadata(serde_json::json!({
+                "commit_message": message.clone()
+            }))
             .with_user_name(author_name);
 
             let _ = outbox.add(event);
@@ -155,6 +158,9 @@ pub fn cmd_commit(
                 current_branch,
                 AuditStatus::Failed,
             )
+            .with_metadata(serde_json::json!({
+                "commit_message": message.clone()
+            }))
             .with_reason(e.to_string());
 
             let _ = outbox.add(event);

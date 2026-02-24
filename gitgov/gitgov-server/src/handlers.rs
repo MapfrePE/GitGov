@@ -2,6 +2,7 @@ use crate::auth::{require_admin, AuthUser};
 use crate::db::{Database, DbError, JobMetrics, Job};
 use crate::models::*;
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -144,11 +145,39 @@ pub async fn get_signals(
         filter.user_login.clone()
     };
 
+    // If a non-admin requests a specific org, ensure it matches their scoped org (if any)
+    if auth_user.role != UserRole::Admin {
+        if let (Some(requested_org), Some(scoped_org_id)) = (filter.org_name.as_deref(), auth_user.org_id.as_deref()) {
+            match state.db.get_org_by_login(requested_org).await {
+                Ok(Some(org)) if org.id == scoped_org_id => {}
+                Ok(Some(_)) => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(SignalsResponse { signals: vec![], total: 0 }),
+                    );
+                }
+                Ok(None) => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(SignalsResponse { signals: vec![], total: 0 }),
+                    );
+                }
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(SignalsResponse { signals: vec![], total: 0 }),
+                    );
+                }
+            }
+        }
+    }
+
     match state.db.get_noncompliance_signals(
         filter.org_name.as_deref(),
         filter.confidence.as_deref(),
         filter.status.as_deref(),
         filter.signal_type.as_deref(),
+        filter_user.as_deref(),
         limit,
         offset,
     ).await {
@@ -175,13 +204,43 @@ pub struct UpdateSignalRequest {
 }
 
 pub async fn update_signal(
+    Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
     Path(signal_id): Path<String>,
     Json(payload): Json<UpdateSignalRequest>,
 ) -> impl IntoResponse {
+    let signal = match state.db.get_signal_by_id(&signal_id).await {
+        Ok(Some(signal)) => signal,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Signal not found"})),
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to load signal {}: {}", signal_id, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal database error"})),
+            );
+        }
+    };
+
+    if auth_user.role != UserRole::Admin {
+        let same_user = signal.actor_login == auth_user.client_id;
+        let same_org = auth_user.org_id.is_some() && auth_user.org_id == signal.org_id;
+        if !same_user && !same_org {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "Insufficient permissions to update this signal"})),
+            );
+        }
+    }
+
     match state.db.update_signal_status(
         &signal_id,
         &payload.status,
+        &auth_user.client_id,
         payload.notes.as_deref(),
     ).await {
         Ok(()) => (StatusCode::OK, Json(json!({"success": true}))),
@@ -230,9 +289,17 @@ pub async fn confirm_signal(
 }
 
 pub async fn trigger_detection(
+    Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
     Path(org_name): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(_) = require_admin(&auth_user) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Admin access required"})),
+        );
+    }
+
     let org = match state.db.get_org_by_login(&org_name).await {
         Ok(Some(o)) => o,
         Ok(None) => {
@@ -298,7 +365,7 @@ pub async fn add_violation_decision(
     match state.db.add_violation_decision(
         &violation_id,
         &payload.decision_type,
-        &payload.decided_by,
+        &auth_user.client_id,
         payload.notes.as_deref(),
         payload.evidence.clone(),
     ).await {
@@ -306,7 +373,7 @@ pub async fn add_violation_decision(
             tracing::info!(
                 violation_id = %violation_id,
                 decision_type = %payload.decision_type,
-                decided_by = %payload.decided_by,
+                decided_by = %auth_user.client_id,
                 admin = %auth_user.client_id,
                 "Violation decision added"
             );
@@ -316,7 +383,7 @@ pub async fn add_violation_decision(
                     "decision_id": decision_id,
                     "violation_id": violation_id,
                     "decision_type": payload.decision_type,
-                    "decided_by": payload.decided_by
+                    "decided_by": auth_user.client_id
                 })),
             )
         }
@@ -328,10 +395,43 @@ pub async fn add_violation_decision(
 }
 
 pub async fn get_violation_decisions(
-    Extension(_auth_user): Extension<AuthUser>,
+    Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
     Path(violation_id): Path<String>,
 ) -> impl IntoResponse {
+    if auth_user.role != UserRole::Admin {
+        let scope = match state.db.get_violation_scope(&violation_id).await {
+            Ok(Some(scope)) => scope,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"decisions": [], "error": "Violation not found"})),
+                );
+            }
+            Err(e) => {
+                tracing::error!("Failed to load violation scope: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"decisions": [], "error": "Internal database error"})),
+                );
+            }
+        };
+
+        let (violation_org_id, violation_user_login) = scope;
+        let same_user = violation_user_login
+            .as_deref()
+            .map(|login| login == auth_user.client_id)
+            .unwrap_or(false);
+        let same_org = auth_user.org_id.is_some() && auth_user.org_id == violation_org_id;
+
+        if !same_user && !same_org {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"decisions": [], "error": "Insufficient permissions"})),
+            );
+        }
+    }
+
     match state.db.get_violation_decisions(&violation_id).await {
         Ok(decisions) => (StatusCode::OK, Json(json!({"decisions": decisions}))),
         Err(e) => {
@@ -381,6 +481,7 @@ pub async fn get_policy_history(
 // ============================================================================
 
 pub async fn export_events(
+    Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ExportRequest>,
 ) -> impl IntoResponse {
@@ -390,11 +491,14 @@ pub async fn export_events(
         None
     };
 
-    let filter = EventFilter {
+    let mut filter = EventFilter {
         start_date: payload.start_date,
         end_date: payload.end_date,
         ..Default::default()
     };
+    if auth_user.role != UserRole::Admin {
+        filter.user_login = Some(auth_user.client_id.clone());
+    }
 
     let events = match state.db.get_combined_events(&filter).await {
         Ok(e) => e,
@@ -419,8 +523,8 @@ pub async fn export_events(
 
     let export_log = ExportLog {
         id: Uuid::new_v4().to_string(),
-        org_id,
-        exported_by: "api".to_string(),
+        org_id: if auth_user.role == UserRole::Admin { org_id } else { auth_user.org_id.clone().or(org_id) },
+        exported_by: auth_user.client_id.clone(),
         export_type: payload.export_type.clone(),
         date_range_start: payload.start_date,
         date_range_end: payload.end_date,
@@ -463,7 +567,7 @@ pub struct WebhookResponse {
 pub async fn handle_github_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(payload): Json<serde_json::Value>,
+    body: Bytes,
 ) -> impl IntoResponse {
     let delivery_id = headers
         .get("X-GitHub-Delivery")
@@ -485,7 +589,7 @@ pub async fn handle_github_webhook(
     // Validate HMAC signature if secret is configured
     if let Some(ref secret) = state.github_webhook_secret {
         if let Some(ref sig) = signature {
-            if !validate_github_signature(secret, &payload, sig) {
+            if !validate_github_signature(secret, &body, sig) {
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(WebhookResponse {
@@ -510,6 +614,23 @@ pub async fn handle_github_webhook(
             );
         }
     }
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(e) => {
+            tracing::warn!("Invalid JSON webhook payload: {}", e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(WebhookResponse {
+                    received: false,
+                    delivery_id: delivery_id.clone(),
+                    event_type: event_type.clone(),
+                    processed: Some(false),
+                    error: Some("Invalid JSON payload".to_string()),
+                }),
+            );
+        }
+    };
 
     // Store raw webhook event for debugging
     let webhook_id = match state.db.store_webhook_event(
@@ -582,22 +703,22 @@ pub async fn handle_github_webhook(
     }
 }
 
-fn validate_github_signature(secret: &str, payload: &serde_json::Value, signature: &str) -> bool {
-    let payload_bytes = match serde_json::to_vec(payload) {
-        Ok(b) => b,
+fn validate_github_signature(secret: &str, payload_bytes: &[u8], signature: &str) -> bool {
+    let signature_hex = match signature.strip_prefix("sha256=") {
+        Some(hex) => hex,
+        None => return false,
+    };
+    let signature_bytes = match hex::decode(signature_hex) {
+        Ok(bytes) => bytes,
         Err(_) => return false,
     };
-
     let mut mac = match <hmac::Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes()) {
         Ok(m) => m,
         Err(_) => return false,
     };
 
-    mac.update(&payload_bytes);
-    let result = mac.finalize();
-    let computed = format!("sha256={}", hex::encode(result.into_bytes()));
-
-    signature == computed
+    mac.update(payload_bytes);
+    mac.verify_slice(&signature_bytes).is_ok()
 }
 
 async fn process_push_event(
@@ -744,14 +865,21 @@ async fn get_or_create_org_repo(db: &Database, repo: &GitHubRepository) -> Resul
 // ============================================================================
 
 pub async fn ingest_client_events(
+    Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
     Json(batch): Json<ClientEventBatch>,
 ) -> impl IntoResponse {
     let mut events = Vec::new();
 
     for input in batch.events {
+        let effective_user_login = if auth_user.role == UserRole::Admin {
+            input.user_login.clone()
+        } else {
+            auth_user.client_id.clone()
+        };
+
         // Get org and repo IDs
-        let org_id = if let Some(ref org_name) = input.org_name {
+        let requested_org_id = if let Some(ref org_name) = input.org_name {
             state.db.get_org_by_login(org_name).await
                 .ok()
                 .flatten()
@@ -760,14 +888,70 @@ pub async fn ingest_client_events(
             None
         };
 
-        let repo_id = if let Some(ref repo_full_name) = input.repo_full_name {
+        if auth_user.role != UserRole::Admin {
+            if let (Some(scoped_org_id), Some(requested_org_id)) =
+                (auth_user.org_id.as_deref(), requested_org_id.as_deref())
+            {
+                if scoped_org_id != requested_org_id {
+                    tracing::warn!(
+                        auth_user = %auth_user.client_id,
+                        requested_org_id = %requested_org_id,
+                        scoped_org_id = %scoped_org_id,
+                        event_uuid = %input.event_uuid,
+                        "Rejecting client event with org mismatch"
+                    );
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(ClientEventResponse {
+                            accepted: vec![],
+                            duplicates: vec![],
+                            errors: vec![EventError {
+                                event_uuid: input.event_uuid,
+                                error: "Event org_name is outside API key scope".to_string(),
+                            }],
+                        }),
+                    );
+                }
+            }
+        }
+
+        let org_id = if auth_user.role == UserRole::Admin {
+            requested_org_id
+        } else {
+            auth_user.org_id.clone().or(requested_org_id)
+        };
+
+        let repo = if let Some(ref repo_full_name) = input.repo_full_name {
             state.db.get_repo_by_full_name(repo_full_name).await
                 .ok()
                 .flatten()
-                .map(|r| r.id)
         } else {
             None
         };
+        if auth_user.role != UserRole::Admin {
+            if let (Some(scoped_org_id), Some(repo)) = (auth_user.org_id.as_deref(), repo.as_ref()) {
+                if repo.org_id.as_deref() != Some(scoped_org_id) {
+                    tracing::warn!(
+                        auth_user = %auth_user.client_id,
+                        repo = %repo.full_name,
+                        event_uuid = %input.event_uuid,
+                        "Rejecting client event with repo outside API key scope"
+                    );
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(ClientEventResponse {
+                            accepted: vec![],
+                            duplicates: vec![],
+                            errors: vec![EventError {
+                                event_uuid: input.event_uuid,
+                                error: "Event repo_full_name is outside API key scope".to_string(),
+                            }],
+                        }),
+                    );
+                }
+            }
+        }
+        let repo_id = repo.map(|r| r.id);
 
         let event = ClientEvent {
             id: Uuid::new_v4().to_string(),
@@ -775,7 +959,7 @@ pub async fn ingest_client_events(
             repo_id,
             event_uuid: input.event_uuid,
             event_type: ClientEventType::from_str(&input.event_type),
-            user_login: input.user_login,
+            user_login: effective_user_login,
             user_name: input.user_name,
             branch: input.branch,
             commit_sha: input.commit_sha,
@@ -1211,7 +1395,7 @@ pub async fn ingest_audit_stream(
         let event_org_id = org.as_ref().map(|o| o.id.clone());
         let event_repo_id = get_repo_id_for_audit_entry(&state, &entry, event_org_id.as_deref()).await;
 
-        let delivery_id = format!("audit-{}-{}", entry.timestamp, uuid::Uuid::new_v4());
+        let delivery_id = make_audit_delivery_id(&entry, event_org_id.as_deref());
 
         let (target, old_value, new_value) = extract_audit_changes(&entry);
 
@@ -1257,17 +1441,33 @@ pub async fn ingest_audit_stream(
 }
 
 pub async fn get_governance_events(
-    Extension(_auth_user): Extension<AuthUser>,
+    Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
     Query(filter): Query<GovernanceEventFilter>,
 ) -> impl IntoResponse {
     let limit = if filter.limit == 0 { 100 } else { filter.limit } as i64;
     let offset = filter.offset as i64;
 
-    let org_id = if let Some(ref org_name) = filter.org_name {
+    let requested_org_id = if let Some(ref org_name) = filter.org_name {
         state.db.get_org_by_login(org_name).await.ok().flatten().map(|o| o.id)
     } else {
         None
+    };
+
+    let org_id = if auth_user.role == UserRole::Admin {
+        requested_org_id
+    } else {
+        if let (Some(scoped_org_id), Some(requested_org_id)) =
+            (auth_user.org_id.as_deref(), requested_org_id.as_deref())
+        {
+            if scoped_org_id != requested_org_id {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(GovernanceEventsResponse { events: vec![] }),
+                );
+            }
+        }
+        auth_user.org_id.clone().or(requested_org_id)
     };
 
     match state.db.get_governance_events(org_id.as_deref(), filter.event_type.as_deref(), limit, offset).await {
@@ -1293,9 +1493,26 @@ pub struct GovernanceEventsResponse {
 }
 
 fn is_relevant_audit_action(action: &str) -> bool {
-    RELEVANT_AUDIT_ACTIONS.iter().any(|relevant| {
-        action == *relevant || action.starts_with(&format!("{}.", relevant.split('.').next().unwrap_or("")))
-    })
+    RELEVANT_AUDIT_ACTIONS.contains(&action)
+}
+
+fn make_audit_delivery_id(entry: &GitHubAuditLogEntry, org_id: Option<&str>) -> String {
+    let digest_input = serde_json::json!({
+        "org_id": org_id,
+        "timestamp": entry.timestamp,
+        "action": entry.action,
+        "actor": entry.actor,
+        "repo": entry.repo,
+        "repository": entry.repository,
+        "repository_id": entry.repository_id,
+        "team": entry.team,
+        "user": entry.user,
+        "data": entry.data,
+    });
+
+    let bytes = serde_json::to_vec(&digest_input).unwrap_or_default();
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    format!("audit-{}-{}", entry.timestamp, hash)
 }
 
 async fn get_repo_id_for_audit_entry(state: &Arc<AppState>, entry: &GitHubAuditLogEntry, org_id: Option<&str>) -> Option<String> {
@@ -1421,10 +1638,90 @@ pub async fn retry_dead_job(
             )
         }
         Err(e) => {
+            let status = match e {
+                DbError::NotFound(_) => StatusCode::NOT_FOUND,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                status,
                 Json(json!({"error": sanitize_db_error(&e)})),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_relevant_audit_action, make_audit_delivery_id, validate_github_signature};
+    use crate::models::GitHubAuditLogEntry;
+    use hmac::Mac;
+    use sha2::Sha256;
+
+    fn sign(secret: &str, body: &[u8]) -> String {
+        let mut mac = <hmac::Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    #[test]
+    fn validates_correct_github_signature_for_raw_body() {
+        let secret = "top-secret";
+        let body = br#"{"ref":"refs/heads/main","forced":false}"#;
+        let signature = sign(secret, body);
+
+        assert!(validate_github_signature(secret, body, &signature));
+    }
+
+    #[test]
+    fn rejects_invalid_or_malformed_signature() {
+        let secret = "top-secret";
+        let body = br#"{"a":1}"#;
+
+        assert!(!validate_github_signature(secret, body, "sha256=deadbeef"));
+        assert!(!validate_github_signature(secret, body, "deadbeef"));
+        assert!(!validate_github_signature(secret, body, "sha256=not-hex"));
+    }
+
+    #[test]
+    fn raw_body_bytes_matter_for_signature_validation() {
+        let secret = "top-secret";
+        let compact = br#"{"a":1}"#;
+        let pretty = b"{\n  \"a\": 1\n}";
+        let signature = sign(secret, compact);
+
+        assert!(validate_github_signature(secret, compact, &signature));
+        assert!(!validate_github_signature(secret, pretty, &signature));
+    }
+
+    #[test]
+    fn audit_action_filter_is_exact_and_rejects_prefix_overmatch() {
+        assert!(is_relevant_audit_action("repo.permissions_granted"));
+        assert!(!is_relevant_audit_action("repo.delete"));
+        assert!(!is_relevant_audit_action("protected_branch.unknown_new_event"));
+    }
+
+    #[test]
+    fn audit_delivery_id_is_deterministic_for_same_entry() {
+        let entry = GitHubAuditLogEntry {
+            timestamp: 1_700_000_000_000,
+            action: "repo.permissions_granted".to_string(),
+            actor: Some("alice".to_string()),
+            actor_location: None,
+            org: Some("acme".to_string()),
+            repo: Some("acme/app".to_string()),
+            repository: None,
+            repository_id: Some(123),
+            user: Some("bob".to_string()),
+            team: None,
+            data: Some(serde_json::json!({"new": "write"})),
+            created_at: None,
+        };
+
+        let id1 = make_audit_delivery_id(&entry, Some("org-1"));
+        let id2 = make_audit_delivery_id(&entry, Some("org-1"));
+        let id3 = make_audit_delivery_id(&entry, Some("org-2"));
+
+        assert_eq!(id1, id2);
+        assert_ne!(id1, id3);
     }
 }

@@ -1,12 +1,9 @@
-use crate::audit::AuditDatabase;
 use crate::github::{
-    delete_token, get_authenticated_user, load_token, poll_for_token, save_token,
-    start_device_flow, DeviceFlowResponse,
+    delete_token, get_authenticated_user, load_token, poll_for_token, save_token, start_device_flow,
 };
 use crate::models::AuthenticatedUser;
+use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tauri::State;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceFlowInfo {
@@ -37,6 +34,38 @@ fn to_command_error(e: impl std::fmt::Display, code: &str) -> String {
         message: e.to_string(),
     })
     .unwrap_or_else(|_| format!("{{\"code\":\"{}\",\"message\":\"{}\"}}", code, e))
+}
+
+fn current_user_file_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("gitgov")
+        .join("current_user.json")
+}
+
+fn save_current_user_session(user: &AuthenticatedUser) -> Result<(), String> {
+    let path = current_user_file_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| to_command_error(e, "SESSION_ERROR"))?;
+    }
+
+    let json = serde_json::to_string(user)
+        .map_err(|e| to_command_error(e, "SESSION_ERROR"))?;
+
+    std::fs::write(&path, json).map_err(|e| to_command_error(e, "SESSION_ERROR"))?;
+    Ok(())
+}
+
+fn load_current_user_session() -> Option<AuthenticatedUser> {
+    let path = current_user_file_path();
+    let json = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<AuthenticatedUser>(&json).ok()
+}
+
+fn clear_current_user_session() {
+    let path = current_user_file_path();
+    let _ = std::fs::remove_file(path);
 }
 
 #[tauri::command]
@@ -82,31 +111,38 @@ pub fn cmd_poll_auth(device_code: String, interval: u64) -> Result<Authenticated
         "Token saved successfully"
     );
 
-    Ok(AuthenticatedUser {
+    let user = AuthenticatedUser {
         login: gh_user.login.clone(),
         name: gh_user.name.unwrap_or_else(|| "Unknown".to_string()),
         avatar_url: gh_user.avatar_url,
         group: None,
         is_admin: false,
-    })
+    };
+
+    save_current_user_session(&user)?;
+
+    Ok(user)
 }
 
 #[tauri::command]
 pub fn cmd_get_current_user() -> Result<Option<AuthenticatedUser>, String> {
-    let stored_login: Option<String> = None;
-
-    if let Some(login) = stored_login {
-        if let Ok(token) = load_token(&login) {
+    if let Some(session_user) = load_current_user_session() {
+        if let Ok(token) = load_token(&session_user.login) {
             if let Ok(gh_user) = get_authenticated_user(&token) {
-                return Ok(Some(AuthenticatedUser {
+                let refreshed_user = AuthenticatedUser {
                     login: gh_user.login,
-                    name: gh_user.name.unwrap_or_else(|| "Unknown".to_string()),
+                    name: gh_user.name.unwrap_or_else(|| session_user.name),
                     avatar_url: gh_user.avatar_url,
-                    group: None,
-                    is_admin: false,
-                }));
+                    group: session_user.group,
+                    is_admin: session_user.is_admin,
+                };
+                let _ = save_current_user_session(&refreshed_user);
+                return Ok(Some(refreshed_user));
             }
         }
+
+        // Session exists but token is invalid/expired; clear local session marker.
+        clear_current_user_session();
     }
 
     Ok(None)
@@ -120,13 +156,22 @@ pub fn cmd_set_current_user(
     group: Option<String>,
     is_admin: bool,
 ) -> Result<(), String> {
-    let _ = (login, name, avatar_url, group, is_admin);
-    Ok(())
+    let user = AuthenticatedUser {
+        login,
+        name,
+        avatar_url,
+        group,
+        is_admin,
+    };
+    save_current_user_session(&user)
 }
 
 #[tauri::command]
 pub fn cmd_logout(username: String) -> Result<(), String> {
-    delete_token(&username).map_err(|e| to_command_error(e, "KEYRING_ERROR"))?;
+    if let Err(e) = delete_token(&username) {
+        tracing::warn!(username = %username, error = %e, "Token cleanup failed during logout");
+    }
+    clear_current_user_session();
     Ok(())
 }
 

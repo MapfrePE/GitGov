@@ -8,7 +8,6 @@ pub mod models;
 pub mod outbox;
 
 use outbox::Outbox;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Emitter;
 
@@ -71,8 +70,6 @@ pub fn run() {
         tracing::warn!("GITGOV_SERVER_URL not configured. Audit events will be stored locally until server is configured.");
     }
 
-    // Shutdown flag for clean worker termination
-    let shutdown = Arc::new(AtomicBool::new(false));
     let outbox_clone = Arc::clone(&outbox);
     let worker_handle = outbox_clone.start_background_flush(60);
 
@@ -90,7 +87,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 tracing::info!("Window close requested, signaling worker shutdown");
             }
@@ -128,7 +125,7 @@ pub fn run() {
 
     // Signal shutdown and wait for worker to finish
     tracing::info!("Application shutting down, stopping outbox worker...");
-    shutdown.store(true, Ordering::Relaxed);
+    outbox_clone.signal_shutdown();
 
     // Give worker a moment to finish current flush
     if worker_handle.join().is_ok() {

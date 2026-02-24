@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Button } from '@/components/shared/Button'
 import { Badge } from '@/components/shared/Badge'
-import { TrendingUp, Users, AlertTriangle, Activity, GitBranch, Server } from 'lucide-react'
+import { TrendingUp, Users, AlertTriangle, Activity, Server } from 'lucide-react'
+import type { CombinedEvent } from '@/lib/types'
 
 interface StatCardProps {
   icon: React.ReactNode
@@ -30,6 +31,28 @@ function StatCard({ icon, label, value, color }: StatCardProps) {
   )
 }
 
+function readDetailString(log: CombinedEvent, key: string): string | null {
+  const value = log.details?.[key]
+  return typeof value === 'string' && value.trim().length > 0 ? value : null
+}
+
+function getLogDetailPreview(log: CombinedEvent): string | null {
+  if (log.event_type === 'commit') {
+    return readDetailString(log, 'commit_message')
+  }
+
+  if (log.status === 'failed' || log.status === 'blocked') {
+    return readDetailString(log, 'reason')
+  }
+
+  return null
+}
+
+function getShortCommitSha(log: CombinedEvent): string | null {
+  const sha = readDetailString(log, 'commit_sha')
+  return sha ? sha.slice(0, 7) : null
+}
+
 export function ServerDashboard() {
   const { serverStats, serverLogs, isConnected, isLoading, loadStats, loadLogs } = useControlPlaneStore()
   const [autoRefresh, setAutoRefresh] = useState(true)
@@ -46,10 +69,11 @@ export function ServerDashboard() {
     
     const interval = setInterval(() => {
       loadStats()
+      loadLogs(50)
     }, 30000)
     
     return () => clearInterval(interval)
-  }, [isConnected, autoRefresh, loadStats])
+  }, [isConnected, autoRefresh, loadStats, loadLogs])
 
   if (!isConnected) {
     return (
@@ -199,7 +223,24 @@ export function ServerDashboard() {
                       </td>
                       <td className="py-2 text-sm text-white">{log.user_login || '-'}</td>
                       <td className="py-2">
-                        <Badge variant="neutral">{log.event_type}</Badge>
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <Badge variant="neutral">{log.event_type}</Badge>
+                            {log.event_type === 'commit' && getShortCommitSha(log) && (
+                              <span className="text-xs text-surface-500 font-mono">
+                                {getShortCommitSha(log)}
+                              </span>
+                            )}
+                          </div>
+                          {getLogDetailPreview(log) && (
+                            <div
+                              className="text-xs text-surface-400 max-w-56 truncate"
+                              title={getLogDetailPreview(log) ?? undefined}
+                            >
+                              {getLogDetailPreview(log)}
+                            </div>
+                          )}
+                        </div>
                       </td>
                       <td className="py-2 text-sm text-surface-300">{log.repo_name || '-'}</td>
                       <td className="py-2 text-sm text-surface-300 font-mono">{log.branch || '-'}</td>

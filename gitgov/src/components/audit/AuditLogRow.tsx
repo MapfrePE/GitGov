@@ -11,9 +11,10 @@ interface AuditLogRowProps {
 
 export const AuditLogRow = memo(function AuditLogRow({ log }: AuditLogRowProps) {
   const [expanded, setExpanded] = useState(false)
+  const [renderedAt] = useState(() => Date.now())
 
   const timestamp = new Date(log.timestamp)
-  const isRecent = Date.now() - log.timestamp < 24 * 60 * 60 * 1000
+  const isRecent = renderedAt - log.timestamp < 24 * 60 * 60 * 1000
   const formattedDate = isRecent
     ? formatDistanceToNow(timestamp, { addSuffix: true, locale: es })
     : format(timestamp, 'dd/MM/yyyy HH:mm')

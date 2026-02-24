@@ -339,6 +339,7 @@ pub struct EventFilter {
     pub source: Option<String>,
     pub event_type: Option<String>,
     pub user_login: Option<String>,
+    pub branch: Option<String>,
     pub repo_full_name: Option<String>,
     pub org_name: Option<String>,
     pub status: Option<String>,

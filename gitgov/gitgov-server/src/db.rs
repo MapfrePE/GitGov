@@ -2,6 +2,7 @@ use crate::models::*;
 use sha2::Digest;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -196,6 +197,24 @@ impl Database {
         let limit = if filter.limit == 0 { 100 } else { filter.limit } as i64;
         let offset = filter.offset as i64;
 
+        let org_id = if let Some(org_name) = filter.org_name.as_deref() {
+            self.get_org_by_login(org_name).await?.map(|o| o.id)
+        } else {
+            None
+        };
+        let repo_id = if let Some(repo_full_name) = filter.repo_full_name.as_deref() {
+            self.get_repo_by_full_name(repo_full_name).await?.map(|r| r.id)
+        } else {
+            None
+        };
+
+        if filter.org_name.is_some() && org_id.is_none() {
+            return Ok(vec![]);
+        }
+        if filter.repo_full_name.is_some() && repo_id.is_none() {
+            return Ok(vec![]);
+        }
+
         let mut query = String::from(
             "SELECT id::text, org_id::text, repo_id::text, delivery_id, event_type, actor_login, actor_id, ref_name, ref_type, before_sha, after_sha, commit_shas::text, commits_count, payload::text, created_at FROM github_events WHERE 1=1"
         );
@@ -203,6 +222,14 @@ impl Database {
 
         let mut conditions = Vec::new();
 
+        if org_id.is_some() {
+            conditions.push(format!("org_id = ${}", param_count));
+            param_count += 1;
+        }
+        if repo_id.is_some() {
+            conditions.push(format!("repo_id = ${}", param_count));
+            param_count += 1;
+        }
         if filter.start_date.is_some() {
             conditions.push(format!("created_at >= to_timestamp(${0}/1000.0)", param_count));
             param_count += 1;
@@ -219,16 +246,26 @@ impl Database {
             conditions.push(format!("event_type = ${}", param_count));
             param_count += 1;
         }
+        if filter.branch.is_some() {
+            conditions.push(format!("ref_name = ${}", param_count));
+            param_count += 1;
+        }
 
         if !conditions.is_empty() {
             query.push_str(" AND ");
             query.push_str(&conditions.join(" AND "));
         }
 
-        query.push_str(&format!(" ORDER BY created_at DESC LIMIT ${} OFFSET {}", param_count, param_count + 1));
+        query.push_str(&format!(" ORDER BY created_at DESC LIMIT ${} OFFSET ${}", param_count, param_count + 1));
 
         let mut sql_query = sqlx::query(&query);
 
+        if let Some(ref org_id) = org_id {
+            sql_query = sql_query.bind(org_id);
+        }
+        if let Some(ref repo_id) = repo_id {
+            sql_query = sql_query.bind(repo_id);
+        }
         if let Some(start) = filter.start_date {
             sql_query = sql_query.bind(start);
         }
@@ -240,6 +277,9 @@ impl Database {
         }
         if let Some(ref event_type) = filter.event_type {
             sql_query = sql_query.bind(event_type);
+        }
+        if let Some(ref branch) = filter.branch {
+            sql_query = sql_query.bind(branch);
         }
 
         sql_query = sql_query.bind(limit).bind(offset);
@@ -327,20 +367,120 @@ impl Database {
     }
 
     pub async fn insert_client_events_batch(&self, events: &[ClientEvent]) -> Result<ClientEventResponse, DbError> {
+        let mut in_batch_seen = HashSet::new();
+        let mut deduped_events: Vec<&ClientEvent> = Vec::with_capacity(events.len());
+        let mut duplicates: Vec<String> = Vec::new();
+
+        for event in events {
+            if !in_batch_seen.insert(event.event_uuid.clone()) {
+                duplicates.push(event.event_uuid.clone());
+                continue;
+            }
+            deduped_events.push(event);
+        }
+
+        match self.insert_client_events_batch_tx(&deduped_events).await {
+            Ok(mut response) => {
+                response.duplicates.extend(duplicates);
+                Ok(response)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    batch_size = deduped_events.len(),
+                    "Transactional client event batch insert failed, falling back to per-row inserts"
+                );
+
+                let mut accepted = Vec::new();
+                let mut errors = Vec::new();
+                for event in deduped_events {
+                    match self.insert_client_event(event).await {
+                        Ok(()) => accepted.push(event.event_uuid.clone()),
+                        Err(DbError::Duplicate(_)) => duplicates.push(event.event_uuid.clone()),
+                        Err(err) => errors.push(EventError {
+                            event_uuid: event.event_uuid.clone(),
+                            error: err.to_string(),
+                        }),
+                    }
+                }
+
+                Ok(ClientEventResponse {
+                    accepted,
+                    duplicates,
+                    errors,
+                })
+            }
+        }
+    }
+
+    async fn insert_client_events_batch_tx(
+        &self,
+        events: &[&ClientEvent],
+    ) -> Result<ClientEventResponse, DbError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
         let mut accepted = Vec::new();
         let mut duplicates = Vec::new();
         let mut errors = Vec::new();
 
         for event in events {
-            match self.insert_client_event(event).await {
-                Ok(()) => accepted.push(event.event_uuid.clone()),
-                Err(DbError::Duplicate(_)) => duplicates.push(event.event_uuid.clone()),
-                Err(e) => errors.push(EventError {
-                    event_uuid: event.event_uuid.clone(),
-                    error: e.to_string(),
-                }),
+            let files_json = match serde_json::to_string(&event.files) {
+                Ok(json) => json,
+                Err(e) => {
+                    errors.push(EventError {
+                        event_uuid: event.event_uuid.clone(),
+                        error: DbError::SerializationError(e.to_string()).to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            let result = sqlx::query(
+                r#"
+                INSERT INTO client_events (
+                    id, org_id, repo_id, event_uuid, event_type, user_login, user_name,
+                    branch, commit_sha, files, status, reason, metadata, client_version
+                )
+                VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb, $14)
+                ON CONFLICT (event_uuid) DO NOTHING
+                "#,
+            )
+            .bind(&event.id)
+            .bind(&event.org_id)
+            .bind(&event.repo_id)
+            .bind(&event.event_uuid)
+            .bind(event.event_type.as_str())
+            .bind(&event.user_login)
+            .bind(&event.user_name)
+            .bind(&event.branch)
+            .bind(&event.commit_sha)
+            .bind(&files_json)
+            .bind(event.status.as_str())
+            .bind(&event.reason)
+            .bind(&event.metadata)
+            .bind(&event.client_version)
+            .execute(&mut *tx)
+            .await;
+
+            match result {
+                Ok(res) if res.rows_affected() == 0 => duplicates.push(event.event_uuid.clone()),
+                Ok(_) => accepted.push(event.event_uuid.clone()),
+                Err(e) if e.to_string().contains("duplicate") => duplicates.push(event.event_uuid.clone()),
+                Err(e) => {
+                    // Abort fast so caller can retry with per-row path preserving legacy behavior.
+                    let _ = tx.rollback().await;
+                    return Err(DbError::DatabaseError(e.to_string()));
+                }
             }
         }
+
+        tx.commit()
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
         Ok(ClientEventResponse {
             accepted,
@@ -353,6 +493,24 @@ impl Database {
         let limit = if filter.limit == 0 { 100 } else { filter.limit } as i64;
         let offset = filter.offset as i64;
 
+        let org_id = if let Some(org_name) = filter.org_name.as_deref() {
+            self.get_org_by_login(org_name).await?.map(|o| o.id)
+        } else {
+            None
+        };
+        let repo_id = if let Some(repo_full_name) = filter.repo_full_name.as_deref() {
+            self.get_repo_by_full_name(repo_full_name).await?.map(|r| r.id)
+        } else {
+            None
+        };
+
+        if filter.org_name.is_some() && org_id.is_none() {
+            return Ok(vec![]);
+        }
+        if filter.repo_full_name.is_some() && repo_id.is_none() {
+            return Ok(vec![]);
+        }
+
         let mut query = String::from(
             "SELECT id::text, org_id::text, repo_id::text, event_uuid, event_type, user_login, user_name, branch, commit_sha, files::text, status, reason, metadata::text, client_version, created_at FROM client_events WHERE 1=1"
         );
@@ -360,6 +518,14 @@ impl Database {
 
         let mut conditions = Vec::new();
 
+        if org_id.is_some() {
+            conditions.push(format!("org_id = ${}", param_count));
+            param_count += 1;
+        }
+        if repo_id.is_some() {
+            conditions.push(format!("repo_id = ${}", param_count));
+            param_count += 1;
+        }
         if filter.start_date.is_some() {
             conditions.push(format!("created_at >= to_timestamp(${0}/1000.0)", param_count));
             param_count += 1;
@@ -380,16 +546,26 @@ impl Database {
             conditions.push(format!("status = ${}", param_count));
             param_count += 1;
         }
+        if filter.branch.is_some() {
+            conditions.push(format!("branch = ${}", param_count));
+            param_count += 1;
+        }
 
         if !conditions.is_empty() {
             query.push_str(" AND ");
             query.push_str(&conditions.join(" AND "));
         }
 
-        query.push_str(&format!(" ORDER BY created_at DESC LIMIT ${} OFFSET {}", param_count, param_count + 1));
+        query.push_str(&format!(" ORDER BY created_at DESC LIMIT ${} OFFSET ${}", param_count, param_count + 1));
 
         let mut sql_query = sqlx::query(&query);
 
+        if let Some(ref org_id) = org_id {
+            sql_query = sql_query.bind(org_id);
+        }
+        if let Some(ref repo_id) = repo_id {
+            sql_query = sql_query.bind(repo_id);
+        }
         if let Some(start) = filter.start_date {
             sql_query = sql_query.bind(start);
         }
@@ -404,6 +580,9 @@ impl Database {
         }
         if let Some(ref status) = filter.status {
             sql_query = sql_query.bind(status);
+        }
+        if let Some(ref branch) = filter.branch {
+            sql_query = sql_query.bind(branch);
         }
 
         sql_query = sql_query.bind(limit).bind(offset);
@@ -453,19 +632,109 @@ impl Database {
         let limit = if filter.limit == 0 { 100 } else { filter.limit } as i32;
         let offset = filter.offset as i32;
 
+        let org_id = if let Some(org_name) = filter.org_name.as_deref() {
+            self.get_org_by_login(org_name).await?.map(|o| o.id)
+        } else {
+            None
+        };
+
+        let repo_id = if let Some(repo_full_name) = filter.repo_full_name.as_deref() {
+            self.get_repo_by_full_name(repo_full_name).await?.map(|r| r.id)
+        } else {
+            None
+        };
+
+        // If caller requested a specific org/repo and it doesn't exist, return empty result.
+        if filter.org_name.is_some() && org_id.is_none() {
+            return Ok(vec![]);
+        }
+        if filter.repo_full_name.is_some() && repo_id.is_none() {
+            return Ok(vec![]);
+        }
+
+        let start_date = filter
+            .start_date
+            .and_then(chrono::DateTime::from_timestamp_millis);
+        let end_date = filter
+            .end_date
+            .and_then(chrono::DateTime::from_timestamp_millis);
+
         let result = sqlx::query(
-            "SELECT * FROM get_combined_events($1, $2, NULL, NULL, $3, $4, $5)"
+            r#"
+            SELECT id, source, event_type, created_at, user_login, repo_name, branch, status, details
+            FROM (
+                SELECT
+                    g.id::TEXT AS id,
+                    'github'::TEXT AS source,
+                    g.event_type,
+                    g.created_at,
+                    g.actor_login AS user_login,
+                    r.full_name AS repo_name,
+                    g.ref_name AS branch,
+                    NULL::TEXT AS status,
+                    jsonb_build_object(
+                        'commits_count', g.commits_count,
+                        'after_sha', g.after_sha
+                    ) AS details
+                FROM github_events g
+                LEFT JOIN repos r ON g.repo_id = r.id
+                WHERE ($1::uuid IS NULL OR g.org_id = $1::uuid)
+                  AND ($2::uuid IS NULL OR g.repo_id = $2::uuid)
+                  AND ($3::text IS NULL OR $3 = 'github')
+                  AND ($4::text IS NULL OR g.event_type = $4)
+                  AND ($5::text IS NULL OR g.actor_login = $5)
+                  AND ($6::text IS NULL OR g.ref_name = $6)
+                  AND ($7::timestamptz IS NULL OR g.created_at >= $7)
+                  AND ($8::timestamptz IS NULL OR g.created_at <= $8)
+                  AND ($9::text IS NULL)
+
+                UNION ALL
+
+                SELECT
+                    c.id::TEXT AS id,
+                    'client'::TEXT AS source,
+                    c.event_type,
+                    c.created_at,
+                    c.user_login,
+                    r.full_name AS repo_name,
+                    c.branch,
+                    c.status,
+                    jsonb_build_object(
+                        'reason', c.reason,
+                        'files', c.files
+                    ) AS details
+                FROM client_events c
+                LEFT JOIN repos r ON c.repo_id = r.id
+                WHERE ($1::uuid IS NULL OR c.org_id = $1::uuid)
+                  AND ($2::uuid IS NULL OR c.repo_id = $2::uuid)
+                  AND ($3::text IS NULL OR $3 = 'client')
+                  AND ($4::text IS NULL OR c.event_type = $4)
+                  AND ($5::text IS NULL OR c.user_login = $5)
+                  AND ($6::text IS NULL OR c.branch = $6)
+                  AND ($7::timestamptz IS NULL OR c.created_at >= $7)
+                  AND ($8::timestamptz IS NULL OR c.created_at <= $8)
+                  AND ($9::text IS NULL OR c.status = $9)
+            ) combined
+            ORDER BY created_at DESC
+            LIMIT $10 OFFSET $11
+            "#
         )
-        .bind(limit)
-        .bind(offset)
+        .bind(&org_id)
+        .bind(&repo_id)
         .bind(&filter.source)
         .bind(&filter.event_type)
         .bind(&filter.user_login)
+        .bind(&filter.branch)
+        .bind(start_date)
+        .bind(end_date)
+        .bind(&filter.status)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
-        let events: Vec<CombinedEvent> = result
+        let mut events: Vec<CombinedEvent> = result
             .iter()
             .map(|row| {
                 let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
@@ -484,6 +753,84 @@ impl Database {
                 }
             })
             .collect();
+
+        // Enrich client event details with metadata/commit_sha/user_name directly from client_events.
+        // This avoids depending on DB function migrations for UI-visible fields like commit_message.
+        let client_event_ids: Vec<String> = events
+            .iter()
+            .filter(|e| e.source == "client")
+            .map(|e| e.id.clone())
+            .collect();
+
+        if !client_event_ids.is_empty() {
+            let rows = sqlx::query(
+                r#"
+                SELECT id::text, commit_sha, user_name, COALESCE(metadata, '{}'::jsonb) as metadata
+                FROM client_events
+                WHERE id::text = ANY($1::text[])
+                "#,
+            )
+            .bind(&client_event_ids)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+            let mut enrichment: HashMap<String, (Option<String>, Option<String>, serde_json::Value)> =
+                HashMap::new();
+            for row in rows {
+                enrichment.insert(
+                    row.get("id"),
+                    (row.get("commit_sha"), row.get("user_name"), row.get("metadata")),
+                );
+            }
+
+            for event in events.iter_mut().filter(|e| e.source == "client") {
+                let Some((commit_sha, user_name, metadata)) = enrichment.get(&event.id) else {
+                    continue;
+                };
+
+                let existing_details =
+                    std::mem::replace(&mut event.details, serde_json::Value::Object(serde_json::Map::new()));
+
+                let mut details_obj = match existing_details {
+                    serde_json::Value::Object(map) => map,
+                    serde_json::Value::Null => serde_json::Map::new(),
+                    other => {
+                        let mut map = serde_json::Map::new();
+                        map.insert("legacy_details".to_string(), other);
+                        map
+                    }
+                };
+
+                if let Some(sha) = commit_sha {
+                    details_obj
+                        .entry("commit_sha".to_string())
+                        .or_insert_with(|| serde_json::Value::String(sha.clone()));
+                }
+
+                if let Some(name) = user_name {
+                    details_obj
+                        .entry("user_name".to_string())
+                        .or_insert_with(|| serde_json::Value::String(name.clone()));
+                }
+
+                match metadata {
+                    serde_json::Value::Object(meta_obj) => {
+                        for (k, v) in meta_obj {
+                            details_obj.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                    serde_json::Value::Null => {}
+                    other => {
+                        details_obj
+                            .entry("metadata".to_string())
+                            .or_insert_with(|| other.clone());
+                    }
+                }
+
+                event.details = serde_json::Value::Object(details_obj);
+            }
+        }
 
         Ok(events)
     }
@@ -624,8 +971,9 @@ impl Database {
     pub async fn validate_api_key(&self, key_hash: &str) -> Result<Option<(String, UserRole, Option<String>)>, DbError> {
         let result = sqlx::query(
             r#"
-            UPDATE api_keys SET last_used = NOW() WHERE key_hash = $1 AND is_active = TRUE
-            RETURNING client_id, role, org_id::text
+            SELECT client_id, role, org_id::text, last_used
+            FROM api_keys
+            WHERE key_hash = $1 AND is_active = TRUE
             "#,
         )
         .bind(key_hash)
@@ -639,6 +987,36 @@ impl Database {
                 let role = UserRole::from_str(&role);
                 let client_id: String = row.get("client_id");
                 let org_id: Option<String> = row.get("org_id");
+
+                // Reduce write amplification on high-traffic endpoints.
+                // `last_used` is observability metadata, so update only every ~5 minutes.
+                let last_used: Option<chrono::DateTime<chrono::Utc>> = row.get("last_used");
+                let should_update_last_used = last_used
+                    .map(|ts| chrono::Utc::now().signed_duration_since(ts).num_minutes() >= 5)
+                    .unwrap_or(true);
+
+                if should_update_last_used {
+                    if let Err(e) = sqlx::query(
+                        r#"
+                        UPDATE api_keys
+                        SET last_used = NOW()
+                        WHERE key_hash = $1
+                          AND is_active = TRUE
+                          AND (last_used IS NULL OR last_used < NOW() - INTERVAL '5 minutes')
+                        "#,
+                    )
+                    .bind(key_hash)
+                    .execute(&self.pool)
+                    .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            client_id = %client_id,
+                            "Failed to update api_keys.last_used (non-fatal)"
+                        );
+                    }
+                }
+
                 Ok(Some((client_id, role, org_id)))
             }
             None => Ok(None),
@@ -716,30 +1094,35 @@ impl Database {
         confidence: Option<&str>,
         status: Option<&str>,
         signal_type: Option<&str>,
+        actor_login: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<NoncomplianceSignal>, i64), DbError> {
         let mut conditions = Vec::new();
         let mut param_count = 1;
 
-        let org_id_subquery = if org_name.is_some() {
+        if org_name.is_some() {
             conditions.push(format!("ns.org_id = (SELECT id FROM orgs WHERE login = ${})", param_count));
             param_count += 1;
-            true
-        } else {
-            false
-        };
+        }
 
         if confidence.is_some() {
             conditions.push(format!("ns.confidence = ${}", param_count));
             param_count += 1;
         }
         if status.is_some() {
-            conditions.push(format!("ns.status = ${}", param_count));
+            conditions.push(format!(
+                "COALESCE((SELECT sd.decision FROM signal_decisions sd WHERE sd.signal_id = ns.id ORDER BY sd.created_at DESC LIMIT 1), ns.status) = ${}",
+                param_count
+            ));
             param_count += 1;
         }
         if signal_type.is_some() {
             conditions.push(format!("ns.signal_type = ${}", param_count));
+            param_count += 1;
+        }
+        if actor_login.is_some() {
+            conditions.push(format!("ns.actor_login = ${}", param_count));
             param_count += 1;
         }
 
@@ -752,22 +1135,21 @@ impl Database {
         let count_query = format!("SELECT COUNT(*) as total FROM noncompliance_signals ns{}", where_clause);
         
         let mut count_sql = sqlx::query(&count_query);
-        let mut param_idx = 1;
         
         if let Some(org) = org_name {
             count_sql = count_sql.bind(org);
-            param_idx += 1;
         }
         if let Some(c) = confidence {
             count_sql = count_sql.bind(c);
-            param_idx += 1;
         }
         if let Some(s) = status {
             count_sql = count_sql.bind(s);
-            param_idx += 1;
         }
         if let Some(st) = signal_type {
             count_sql = count_sql.bind(st);
+        }
+        if let Some(actor) = actor_login {
+            count_sql = count_sql.bind(actor);
         }
 
         let count_row = count_sql
@@ -779,8 +1161,19 @@ impl Database {
         let data_query = format!(
             "SELECT ns.id::text, ns.org_id::text, ns.repo_id::text, ns.github_event_id::text, ns.client_event_id::text, \
              ns.signal_type, ns.confidence, ns.actor_login, ns.branch, ns.commit_sha, ns.evidence, ns.context, \
-             ns.status, ns.investigated_by, ns.investigated_at, ns.investigation_notes, ns.created_at \
-             FROM noncompliance_signals ns{} ORDER BY ns.created_at DESC LIMIT ${} OFFSET ${}",
+             COALESCE(sd.decision, ns.status) as status, \
+             COALESCE(sd.decided_by, ns.investigated_by) as investigated_by, \
+             COALESCE(sd.created_at, ns.investigated_at) as investigated_at, \
+             COALESCE(sd.notes, ns.investigation_notes) as investigation_notes, \
+             ns.created_at \
+             FROM noncompliance_signals ns \
+             LEFT JOIN LATERAL ( \
+                SELECT decision, decided_by, notes, created_at \
+                FROM signal_decisions \
+                WHERE signal_id = ns.id \
+                ORDER BY created_at DESC \
+                LIMIT 1 \
+             ) sd ON true{} ORDER BY ns.created_at DESC LIMIT ${} OFFSET ${}",
             where_clause, param_count, param_count + 1
         );
 
@@ -797,6 +1190,9 @@ impl Database {
         }
         if let Some(st) = signal_type {
             data_sql = data_sql.bind(st);
+        }
+        if let Some(actor) = actor_login {
+            data_sql = data_sql.bind(actor);
         }
         data_sql = data_sql.bind(limit).bind(offset);
 
@@ -840,34 +1236,105 @@ impl Database {
         &self,
         signal_id: &str,
         status: &str,
+        decided_by: &str,
         notes: Option<&str>,
     ) -> Result<(), DbError> {
-        sqlx::query(
+        // Preferred path (append-only): record a decision in signal_decisions.
+        // This works with schemas that forbid UPDATE on noncompliance_signals.
+        let decision_insert = sqlx::query(
             r#"
-            UPDATE noncompliance_signals 
-            SET status = $2, 
-                investigation_notes = $3,
-                investigated_at = NOW()
-            WHERE id = $1::uuid
+            INSERT INTO signal_decisions (id, signal_id, decision, decided_by, notes, created_at)
+            VALUES ($1::uuid, $2::uuid, $3, $4, $5, NOW())
             "#,
         )
+        .bind(&uuid::Uuid::new_v4().to_string())
         .bind(signal_id)
         .bind(status)
+        .bind(decided_by)
         .bind(notes)
         .execute(&self.pool)
-        .await
-        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        .await;
 
-        Ok(())
+        match decision_insert {
+            Ok(_) => {
+                // Legacy compatibility: if schema still allows mutable fields, mirror latest status.
+                // Ignore failures here because append-only schemas intentionally reject UPDATE.
+                if let Err(e) = sqlx::query(
+                    r#"
+                    UPDATE noncompliance_signals 
+                    SET status = $2, 
+                        investigated_by = $3,
+                        investigation_notes = $4,
+                        investigated_at = NOW()
+                    WHERE id = $1::uuid
+                    "#,
+                )
+                .bind(signal_id)
+                .bind(status)
+                .bind(decided_by)
+                .bind(notes)
+                .execute(&self.pool)
+                .await
+                {
+                    tracing::debug!(
+                        signal_id = %signal_id,
+                        error = %e,
+                        "Legacy noncompliance_signals update skipped after decision insert"
+                    );
+                }
+
+                Ok(())
+            }
+            Err(insert_err) => {
+                let insert_err_msg = insert_err.to_string();
+
+                // Fallback for older schemas without signal_decisions table.
+                if insert_err_msg.contains("signal_decisions") && insert_err_msg.contains("does not exist") {
+                    sqlx::query(
+                        r#"
+                        UPDATE noncompliance_signals 
+                        SET status = $2, 
+                            investigated_by = $3,
+                            investigation_notes = $4,
+                            investigated_at = NOW()
+                        WHERE id = $1::uuid
+                        "#,
+                    )
+                    .bind(signal_id)
+                    .bind(status)
+                    .bind(decided_by)
+                    .bind(notes)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+                    return Ok(());
+                }
+
+                Err(DbError::DatabaseError(insert_err_msg))
+            }
+        }
     }
 
     pub async fn get_signal_by_id(&self, signal_id: &str) -> Result<Option<NoncomplianceSignal>, DbError> {
         let result = sqlx::query(
             r#"
-            SELECT id::text, org_id::text, repo_id::text, github_event_id::text, client_event_id::text,
-                   signal_type, confidence, actor_login, branch, commit_sha, evidence, context,
-                   status, investigated_by, investigated_at, investigation_notes, created_at
-            FROM noncompliance_signals WHERE id = $1::uuid
+            SELECT ns.id::text, ns.org_id::text, ns.repo_id::text, ns.github_event_id::text, ns.client_event_id::text,
+                   ns.signal_type, ns.confidence, ns.actor_login, ns.branch, ns.commit_sha, ns.evidence, ns.context,
+                   COALESCE(sd.decision, ns.status) as status,
+                   COALESCE(sd.decided_by, ns.investigated_by) as investigated_by,
+                   COALESCE(sd.created_at, ns.investigated_at) as investigated_at,
+                   COALESCE(sd.notes, ns.investigation_notes) as investigation_notes,
+                   ns.created_at
+            FROM noncompliance_signals ns
+            LEFT JOIN LATERAL (
+                SELECT decision, decided_by, notes, created_at
+                FROM signal_decisions
+                WHERE signal_id = ns.id
+                ORDER BY created_at DESC
+                LIMIT 1
+            ) sd ON true
+            WHERE ns.id = $1::uuid
             "#,
         )
         .bind(signal_id)
@@ -1337,7 +1804,7 @@ impl Database {
     pub async fn complete_job(&self, job_id: &str) -> Result<(), DbError> {
         let start = std::time::Instant::now();
 
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE jobs 
             SET status = 'completed', 
@@ -1350,6 +1817,10 @@ impl Database {
         .execute(&self.pool)
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("Job not found: {}", job_id)));
+        }
 
         tracing::info!(
             job_id = %job_id,
@@ -1419,6 +1890,7 @@ impl Database {
             }
             None => {
                 tracing::error!(job_id = %job_id, "Job not found for failure update");
+                return Err(DbError::NotFound(format!("Job not found: {}", job_id)));
             }
         }
 
@@ -1585,7 +2057,7 @@ impl Database {
 
     /// Retry a dead job (manual intervention).
     pub async fn retry_dead_job(&self, job_id: &str) -> Result<(), DbError> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE jobs 
             SET status = 'pending',
@@ -1599,6 +2071,10 @@ impl Database {
         .execute(&self.pool)
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("Dead job not found: {}", job_id)));
+        }
 
         tracing::info!(job_id = %job_id, "Dead job queued for retry");
         Ok(())
@@ -1618,7 +2094,7 @@ impl Database {
         notes: Option<&str>,
         evidence: Option<serde_json::Value>,
     ) -> Result<String, DbError> {
-        let result = sqlx::query(
+        let function_call = sqlx::query(
             r#"
             SELECT add_violation_decision(
                 $1::uuid,
@@ -1633,12 +2109,47 @@ impl Database {
         .bind(decision_type)
         .bind(decided_by)
         .bind(notes)
-        .bind(evidence.unwrap_or(serde_json::Value::Null))
+        .bind(evidence.clone().unwrap_or(serde_json::Value::Null))
         .fetch_one(&self.pool)
-        .await
-        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        .await;
 
-        let decision_id: String = result.get("decision_id");
+        let decision_id: String = match function_call {
+            Ok(result) => result.get("decision_id"),
+            Err(function_err) => {
+                tracing::warn!(
+                    violation_id = %violation_id,
+                    decision_type = %decision_type,
+                    error = %function_err,
+                    "Falling back to direct violation_decisions upsert"
+                );
+
+                let row = sqlx::query(
+                    r#"
+                    INSERT INTO violation_decisions (
+                        violation_id, decision_type, decided_by, notes, evidence
+                    ) VALUES (
+                        $1::uuid, $2, $3, $4, $5
+                    )
+                    ON CONFLICT (violation_id, decision_type) DO UPDATE SET
+                        decided_by = EXCLUDED.decided_by,
+                        decided_at = NOW(),
+                        notes = EXCLUDED.notes,
+                        evidence = EXCLUDED.evidence
+                    RETURNING id::text as decision_id
+                    "#,
+                )
+                .bind(violation_id)
+                .bind(decision_type)
+                .bind(decided_by)
+                .bind(notes)
+                .bind(evidence.unwrap_or(serde_json::Value::Null))
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+                row.get("decision_id")
+            }
+        };
         
         tracing::info!(
             violation_id = %violation_id,
@@ -1688,6 +2199,25 @@ impl Database {
             .collect();
 
         Ok(decisions)
+    }
+
+    pub async fn get_violation_scope(
+        &self,
+        violation_id: &str,
+    ) -> Result<Option<(Option<String>, Option<String>)>, DbError> {
+        let row = sqlx::query(
+            r#"
+            SELECT org_id::text, user_login
+            FROM violations
+            WHERE id = $1::uuid
+            "#,
+        )
+        .bind(violation_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|r| (r.get("org_id"), r.get("user_login"))))
     }
 }
 

@@ -475,7 +475,7 @@ impl Outbox {
             loop {
                 // Wait with timeout, wakeable by shutdown signal
                 let events_lock = events.lock().unwrap();
-                let (lock, result) = worker_control
+                let (lock, _result) = worker_control
                     .trigger
                     .wait_timeout(events_lock, Duration::from_secs(1))
                     .unwrap();

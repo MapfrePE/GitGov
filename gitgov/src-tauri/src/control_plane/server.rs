@@ -60,11 +60,17 @@ pub struct CombinedEvent {
 #[serde(default)]
 pub struct AuditFilter {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_date: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_date: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_login: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_login: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,7 +78,11 @@ pub struct AuditFilter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_full_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
     pub limit: usize,
     pub offset: usize,
 }
@@ -80,13 +90,18 @@ pub struct AuditFilter {
 impl Default for AuditFilter {
     fn default() -> Self {
         Self {
+            source: None,
             start_date: None,
             end_date: None,
+            user_login: None,
             developer_login: None,
+            event_type: None,
             action: None,
             status: None,
             branch: None,
+            repo_full_name: None,
             repo_name: None,
+            org_name: None,
             limit: 50,
             offset: 0,
         }
@@ -150,6 +165,22 @@ impl ControlPlaneClient {
         }
     }
 
+    fn endpoint_url(&self, segments: &[&str]) -> Result<reqwest::Url, ServerError> {
+        let mut url = reqwest::Url::parse(&self.config.url)
+            .map_err(|e| ServerError::ServerError(format!("Invalid server URL: {}", e)))?;
+
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| ServerError::ServerError("Server URL cannot be used as base URL".to_string()))?;
+        path.pop_if_empty();
+        for segment in segments {
+            path.push(segment);
+        }
+        drop(path);
+
+        Ok(url)
+    }
+
     pub fn send_event(&self, payload: &EventPayload) -> Result<EventResponse, ServerError> {
         let url = format!("{}/events", self.config.url);
 
@@ -178,7 +209,51 @@ impl ControlPlaneClient {
     pub fn get_logs(&self, filter: &AuditFilter) -> Result<Vec<CombinedEvent>, ServerError> {
         let url = format!("{}/logs", self.config.url);
 
-        let mut request = self.client.get(&url).query(filter);
+        let effective_user_login = filter
+            .user_login
+            .as_ref()
+            .or(filter.developer_login.as_ref());
+        let effective_event_type = filter
+            .event_type
+            .as_ref()
+            .or(filter.action.as_ref());
+        let effective_repo_full_name = filter
+            .repo_full_name
+            .as_ref()
+            .or(filter.repo_name.as_ref());
+
+        let mut query_params: Vec<(String, String)> = Vec::new();
+        if let Some(source) = &filter.source {
+            query_params.push(("source".to_string(), source.clone()));
+        }
+        if let Some(start_date) = filter.start_date {
+            query_params.push(("start_date".to_string(), start_date.to_string()));
+        }
+        if let Some(end_date) = filter.end_date {
+            query_params.push(("end_date".to_string(), end_date.to_string()));
+        }
+        if let Some(user_login) = effective_user_login {
+            query_params.push(("user_login".to_string(), user_login.clone()));
+        }
+        if let Some(event_type) = effective_event_type {
+            query_params.push(("event_type".to_string(), event_type.clone()));
+        }
+        if let Some(status) = &filter.status {
+            query_params.push(("status".to_string(), status.clone()));
+        }
+        if let Some(branch) = &filter.branch {
+            query_params.push(("branch".to_string(), branch.clone()));
+        }
+        if let Some(repo_full_name) = effective_repo_full_name {
+            query_params.push(("repo_full_name".to_string(), repo_full_name.clone()));
+        }
+        if let Some(org_name) = &filter.org_name {
+            query_params.push(("org_name".to_string(), org_name.clone()));
+        }
+        query_params.push(("limit".to_string(), filter.limit.to_string()));
+        query_params.push(("offset".to_string(), filter.offset.to_string()));
+
+        let mut request = self.client.get(&url).query(&query_params);
 
         if let Some(ref api_key) = self.config.api_key {
             request = request.header("Authorization", format!("Bearer {}", api_key));
@@ -233,9 +308,9 @@ impl ControlPlaneClient {
     }
 
     pub fn get_policy(&self, repo_name: &str) -> Result<Option<PolicyResponse>, ServerError> {
-        let url = format!("{}/policy/{}", self.config.url, repo_name);
+        let url = self.endpoint_url(&["policy", repo_name])?;
 
-        let mut request = self.client.get(&url);
+        let mut request = self.client.get(url);
 
         if let Some(ref api_key) = self.config.api_key {
             request = request.header("Authorization", format!("Bearer {}", api_key));

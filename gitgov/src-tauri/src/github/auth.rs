@@ -171,68 +171,42 @@ pub fn save_token(username: &str, token: &str, expires_in: Option<i64>) -> Resul
     let json =
         serde_json::to_string(&stored).map_err(|e| AuthError::KeyringError(e.to_string()))?;
 
-    // Try keyring first
-    let keyring_result = (|| {
-        let entry = keyring::Entry::new("gitgov", username)
-            .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+    let entry = keyring::Entry::new("gitgov", username)
+        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
 
-        entry
-            .set_password(&json)
-            .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+    entry
+        .set_password(&json)
+        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
 
-        Ok(())
-    })();
-
-    // Also save to file as backup (more reliable)
-    let file_result = save_token_to_file(username, &json);
-
-    // Log results
-    match (&keyring_result, &file_result) {
-        (Ok(_), Ok(_)) => {
-            tracing::info!(username = %username, "Token saved to keyring and file");
-        }
-        (Ok(_), Err(e)) => {
-            tracing::warn!(username = %username, error = %e, "Token saved to keyring but not to file");
-        }
-        (Err(e), Ok(_)) => {
-            tracing::warn!(username = %username, error = %e, "Token saved to file (keyring failed)");
-        }
-        (Err(ke), Err(fe)) => {
-            tracing::error!(username = %username, keyring_error = %ke, file_error = %fe, "Failed to save token anywhere");
-        }
+    // Cleanup insecure legacy token file if it exists.
+    if let Err(e) = delete_legacy_token_file(username) {
+        tracing::warn!(username = %username, error = %e, "Token saved to keyring but failed to delete legacy token file");
     }
 
-    // Return success if at least one method worked
-    if keyring_result.is_ok() || file_result.is_ok() {
-        Ok(())
-    } else {
-        keyring_result
-    }
-}
-
-fn save_token_to_file(username: &str, json: &str) -> Result<(), AuthError> {
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("gitgov");
-
-    std::fs::create_dir_all(&data_dir)
-        .map_err(|e| AuthError::KeyringError(format!("Failed to create data dir: {}", e)))?;
-
-    let token_file = data_dir.join(format!("{}.token", username));
-    std::fs::write(&token_file, json)
-        .map_err(|e| AuthError::KeyringError(format!("Failed to write token file: {}", e)))?;
-
+    tracing::info!(username = %username, "Token saved to keyring");
     Ok(())
 }
 
-fn load_token_from_file(username: &str) -> Result<String, AuthError> {
+fn legacy_token_file_path(username: &str) -> std::path::PathBuf {
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("gitgov");
+    data_dir.join(format!("{}.token", username))
+}
 
-    let token_file = data_dir.join(format!("{}.token", username));
+fn load_legacy_token_from_file(username: &str) -> Result<String, AuthError> {
+    let token_file = legacy_token_file_path(username);
     std::fs::read_to_string(&token_file)
         .map_err(|e| AuthError::KeyringError(format!("Failed to read token file: {}", e)))
+}
+
+fn delete_legacy_token_file(username: &str) -> Result<(), AuthError> {
+    let token_file = legacy_token_file_path(username);
+    if !token_file.exists() {
+        return Ok(());
+    }
+    std::fs::remove_file(&token_file)
+        .map_err(|e| AuthError::KeyringError(format!("Failed to delete token file: {}", e)))
 }
 
 pub fn load_token(username: &str) -> Result<String, AuthError> {
@@ -256,44 +230,58 @@ pub fn load_token(username: &str) -> Result<String, AuthError> {
         Ok(json)
     })();
 
-    // If keyring fails, try file
+    // If keyring fails, try one-time migration from legacy file (insecure old behavior).
     let json = match keyring_result {
         Ok(json) => json,
         Err(keyring_err) => {
-            tracing::warn!(username = %username, keyring_error = %keyring_err, "Keyring failed, trying file");
-            load_token_from_file(username)?
+            tracing::warn!(username = %username, keyring_error = %keyring_err, "Keyring failed, trying legacy token file migration");
+            let legacy_json = load_legacy_token_from_file(username)?;
+            tracing::warn!(username = %username, "Legacy token file detected. Migrating token to keyring and deleting file.");
+            legacy_json
         }
     };
 
     // Try to parse as StoredToken (new format)
     if let Ok(stored) = serde_json::from_str::<StoredToken>(&json) {
         if stored.is_expired() {
+            let _ = delete_legacy_token_file(username);
             return Err(AuthError::TokenExpired);
         }
+        // If source was legacy file, this re-saves to keyring and deletes file.
+        let _ = save_token(username, &stored.access_token, Some(stored.expires_at - stored.created_at));
         tracing::info!(username = %username, "Token loaded and valid");
         return Ok(stored.access_token);
     }
 
     // Fallback: old format (plain token)
+    let _ = save_token(username, &json, None);
     tracing::info!(username = %username, "Token loaded (plain format)");
     Ok(json)
 }
 
 pub fn load_token_with_expiry(username: &str) -> Result<StoredToken, AuthError> {
-    let entry = keyring::Entry::new("gitgov", username)
-        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
-
-    let json = entry
-        .get_password()
-        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+    let json = match keyring::Entry::new("gitgov", username)
+        .map_err(|e| AuthError::KeyringError(e.to_string()))
+        .and_then(|entry| entry.get_password().map_err(|e| AuthError::KeyringError(e.to_string())))
+    {
+        Ok(json) => json,
+        Err(keyring_err) => {
+            tracing::warn!(username = %username, keyring_error = %keyring_err, "Keyring token unavailable, attempting legacy token migration");
+            let legacy_json = load_legacy_token_from_file(username)?;
+            legacy_json
+        }
+    };
 
     // Try to parse as StoredToken (new format)
     if let Ok(stored) = serde_json::from_str::<StoredToken>(&json) {
+        let _ = save_token(username, &stored.access_token, Some(stored.expires_at - stored.created_at));
         return Ok(stored);
     }
 
     // Fallback: old format (plain token) - assume no expiration
-    Ok(StoredToken::new(json, None))
+    let stored = StoredToken::new(json, None);
+    let _ = save_token(username, &stored.access_token, Some(stored.expires_at - stored.created_at));
+    Ok(stored)
 }
 
 pub fn check_token_valid(username: &str) -> Result<TokenStatus, AuthError> {
@@ -314,12 +302,29 @@ pub struct TokenStatus {
 }
 
 pub fn delete_token(username: &str) -> Result<(), AuthError> {
-    let entry = keyring::Entry::new("gitgov", username)
-        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+    let mut keyring_error: Option<AuthError> = None;
 
-    entry
-        .delete_credential()
-        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+    match keyring::Entry::new("gitgov", username) {
+        Ok(entry) => {
+            if let Err(e) = entry.delete_credential() {
+                tracing::warn!(username = %username, error = %e, "Failed to delete token from keyring");
+                keyring_error = Some(AuthError::KeyringError(e.to_string()));
+            }
+        }
+        Err(e) => {
+            tracing::warn!(username = %username, error = %e, "Failed to open keyring entry for deletion");
+            keyring_error = Some(AuthError::KeyringError(e.to_string()));
+        }
+    }
 
-    Ok(())
+    let file_delete_result = delete_legacy_token_file(username);
+    if let Err(e) = &file_delete_result {
+        tracing::warn!(username = %username, error = %e, "Failed to delete legacy token file");
+    }
+
+    match (keyring_error, file_delete_result) {
+        (None, _) => Ok(()),
+        (Some(_), Ok(())) => Ok(()),
+        (Some(err), Err(_)) => Err(err),
+    }
 }

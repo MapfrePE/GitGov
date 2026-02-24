@@ -4,16 +4,22 @@ mod handlers;
 mod models;
 
 use axum::{
+    body::Body,
+    extract::State,
+    http::{header::RETRY_AFTER, HeaderMap, HeaderValue, Request, StatusCode},
     middleware,
+    middleware::Next,
+    response::{IntoResponse, Response},
     routing::{get, post, put},
     Router,
 };
 use clap::Parser;
 use dotenvy::dotenv;
 use sha2::Digest;
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -31,6 +37,161 @@ struct Args {
 const JOB_WORKER_TTL_SECS: u64 = 300;
 const JOB_POLL_INTERVAL_SECS: u64 = 5;
 const JOB_ERROR_BACKOFF_SECS: u64 = 10;
+
+#[derive(Debug)]
+struct RateBucket {
+    window_start: Instant,
+    count: u32,
+}
+
+#[derive(Clone)]
+struct InMemoryRateLimiter {
+    name: &'static str,
+    limit: u32,
+    window: Duration,
+    buckets: Arc<Mutex<HashMap<String, RateBucket>>>,
+}
+
+#[derive(Debug)]
+struct RateLimitDecision {
+    allowed: bool,
+    retry_after_secs: u64,
+}
+
+impl InMemoryRateLimiter {
+    fn new(name: &'static str, limit: u32, window: Duration) -> Self {
+        Self {
+            name,
+            limit,
+            window,
+            buckets: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn check(&self, key: &str) -> RateLimitDecision {
+        if self.limit == 0 {
+            return RateLimitDecision {
+                allowed: true,
+                retry_after_secs: 0,
+            };
+        }
+
+        let now = Instant::now();
+        let mut buckets = match self.buckets.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                // Fail-open to avoid breaking ingestion on poisoned lock.
+                tracing::warn!(limiter = self.name, "Rate limiter lock poisoned; allowing request");
+                return RateLimitDecision {
+                    allowed: true,
+                    retry_after_secs: 0,
+                };
+            }
+        };
+
+        // Opportunistic cleanup to prevent unbounded growth.
+        if buckets.len() > 10_000 {
+            let stale_after = self.window + self.window;
+            buckets.retain(|_, bucket| now.duration_since(bucket.window_start) <= stale_after);
+        }
+
+        let bucket = buckets.entry(key.to_string()).or_insert(RateBucket {
+            window_start: now,
+            count: 0,
+        });
+
+        if now.duration_since(bucket.window_start) >= self.window {
+            bucket.window_start = now;
+            bucket.count = 0;
+        }
+
+        if bucket.count >= self.limit {
+            let elapsed = now.duration_since(bucket.window_start);
+            let retry_after = self.window.saturating_sub(elapsed).as_secs().max(1);
+            return RateLimitDecision {
+                allowed: false,
+                retry_after_secs: retry_after,
+            };
+        }
+
+        bucket.count += 1;
+        RateLimitDecision {
+            allowed: true,
+            retry_after_secs: 0,
+        }
+    }
+}
+
+fn parse_u32_env(key: &str, default: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|h| h.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+        })
+        .unwrap_or("unknown");
+
+    let auth_fingerprint = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .map(|auth| {
+            let digest = sha2::Sha256::digest(auth.as_bytes());
+            format!("{:x}", digest)[..12].to_string()
+        })
+        .unwrap_or_else(|| "noauth".to_string());
+
+    format!("{}:{}", ip, auth_fingerprint)
+}
+
+async fn rate_limit_middleware(
+    State(limiter): State<Arc<InMemoryRateLimiter>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let key = rate_limit_key_from_headers(req.headers());
+    let decision = limiter.check(&key);
+
+    if decision.allowed {
+        return next.run(req).await;
+    }
+
+    tracing::warn!(
+        limiter = limiter.name,
+        key = %key,
+        retry_after_secs = decision.retry_after_secs,
+        "Request rate limited"
+    );
+
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        axum::Json(serde_json::json!({
+            "error": "Too many requests",
+            "code": "RATE_LIMITED",
+            "retry_after_seconds": decision.retry_after_secs
+        })),
+    )
+        .into_response();
+
+    if let Ok(value) = HeaderValue::from_str(&decision.retry_after_secs.to_string()) {
+        response.headers_mut().insert(RETRY_AFTER, value);
+    }
+
+    response
+}
 
 #[tokio::main]
 async fn main() {
@@ -254,6 +415,23 @@ async fn main() {
     
     let worker_id_for_log = worker_id_clone;
 
+    let events_rate_limit = Arc::new(InMemoryRateLimiter::new(
+        "events",
+        parse_u32_env("GITGOV_RATE_LIMIT_EVENTS_PER_MIN", 240),
+        Duration::from_secs(60),
+    ));
+    let audit_stream_rate_limit = Arc::new(InMemoryRateLimiter::new(
+        "audit_stream",
+        parse_u32_env("GITGOV_RATE_LIMIT_AUDIT_STREAM_PER_MIN", 60),
+        Duration::from_secs(60),
+    ));
+
+    tracing::info!(
+        events_per_min = events_rate_limit.limit,
+        audit_stream_per_min = audit_stream_rate_limit.limit,
+        "Basic rate limiting enabled for ingestion endpoints"
+    );
+
     let auth_routes = Router::new()
         .route("/logs", get(handlers::get_logs))
         .route("/stats", get(handlers::get_stats))
@@ -270,8 +448,20 @@ async fn main() {
         .route("/policy/{repo_name}/override", put(handlers::override_policy))
         .route("/export", post(handlers::export_events))
         .route("/api-keys", post(handlers::create_api_key))
-        .route("/events", post(handlers::ingest_client_events))
-        .route("/audit-stream/github", post(handlers::ingest_audit_stream))
+        .route(
+            "/events",
+            post(handlers::ingest_client_events).layer(middleware::from_fn_with_state(
+                Arc::clone(&events_rate_limit),
+                rate_limit_middleware,
+            )),
+        )
+        .route(
+            "/audit-stream/github",
+            post(handlers::ingest_audit_stream).layer(middleware::from_fn_with_state(
+                Arc::clone(&audit_stream_rate_limit),
+                rate_limit_middleware,
+            )),
+        )
         .route("/governance-events", get(handlers::get_governance_events))
         .route("/jobs/metrics", get(handlers::get_job_metrics))
         .route("/jobs/dead", get(handlers::get_dead_jobs))
