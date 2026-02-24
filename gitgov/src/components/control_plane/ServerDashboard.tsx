@@ -100,26 +100,30 @@ function buildDashboardRows(logs: CombinedEvent[]): DashboardRow[] {
       continue
     }
 
+    // Dashboard principal estilo "Commits": ocultar eventos técnicos de pipeline
+    // (attempt_push / successful_push / blocked_push / push_failed).
+    if (log.event_type !== 'commit') {
+      continue
+    }
+
     let attachedFiles: string[] = []
 
-    if (log.event_type === 'commit') {
-      for (let j = i + 1; j < logs.length; j++) {
-        const candidate = logs[j]
-        if (candidate.event_type !== 'stage_files') continue
-        if (consumedStageFileIds.has(candidate.id)) continue
-        if ((candidate.user_login ?? '') !== (log.user_login ?? '')) continue
+    for (let j = i + 1; j < logs.length; j++) {
+      const candidate = logs[j]
+      if (candidate.event_type !== 'stage_files') continue
+      if (consumedStageFileIds.has(candidate.id)) continue
+      if ((candidate.user_login ?? '') !== (log.user_login ?? '')) continue
 
-        const deltaMs = log.created_at - candidate.created_at
-        if (deltaMs < 0) continue
-        if (deltaMs > 10 * 60 * 1000) break
+      const deltaMs = log.created_at - candidate.created_at
+      if (deltaMs < 0) continue
+      if (deltaMs > 10 * 60 * 1000) break
 
-        const files = readDetailFiles(candidate)
-        if (files.length > 0) {
-          attachedFiles = files
-          consumedStageFileIds.add(candidate.id)
-        }
-        break
+      const files = readDetailFiles(candidate)
+      if (files.length > 0) {
+        attachedFiles = files
+        consumedStageFileIds.add(candidate.id)
       }
+      break
     }
 
     rows.push({ log, attachedFiles })
@@ -279,7 +283,7 @@ export function ServerDashboard() {
           </div>
 
           <div className="card">
-            <h3 className="text-sm font-medium text-white mb-3">Eventos Recientes</h3>
+            <h3 className="text-sm font-medium text-white mb-3">Commits Recientes</h3>
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
