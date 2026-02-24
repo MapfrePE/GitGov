@@ -171,20 +171,50 @@ pub fn save_token(username: &str, token: &str, expires_in: Option<i64>) -> Resul
     let json =
         serde_json::to_string(&stored).map_err(|e| AuthError::KeyringError(e.to_string()))?;
 
-    let entry = keyring::Entry::new("gitgov", username)
-        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+    // Compatibility hotfix:
+    // Keep a local backup file in addition to keyring so existing Windows setups do not lose push
+    // capability if the keyring backend is unavailable/intermittent.
+    let keyring_result: Result<(), AuthError> = (|| {
+        let entry = keyring::Entry::new("gitgov", username)
+            .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+        entry
+            .set_password(&json)
+            .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+        Ok(())
+    })();
 
-    entry
-        .set_password(&json)
-        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+    let file_result = save_legacy_token_to_file(username, &json);
 
-    // Cleanup insecure legacy token file if it exists.
-    if let Err(e) = delete_legacy_token_file(username) {
-        tracing::warn!(username = %username, error = %e, "Token saved to keyring but failed to delete legacy token file");
+    match (&keyring_result, &file_result) {
+        (Ok(_), Ok(_)) => {
+            tracing::info!(username = %username, "Token saved to keyring and local backup file");
+        }
+        (Ok(_), Err(e)) => {
+            tracing::warn!(username = %username, error = %e, "Token saved to keyring, but local backup file save failed");
+        }
+        (Err(e), Ok(_)) => {
+            tracing::warn!(username = %username, error = %e, "Token saved to local backup file (keyring save failed)");
+        }
+        (Err(ke), Err(fe)) => {
+            tracing::error!(username = %username, keyring_error = %ke, file_error = %fe, "Failed to save token to keyring and local backup file");
+        }
     }
 
-    tracing::info!(username = %username, "Token saved to keyring");
-    Ok(())
+    if keyring_result.is_ok() || file_result.is_ok() {
+        Ok(())
+    } else {
+        Err(keyring_result.unwrap_err())
+    }
+}
+
+fn save_legacy_token_to_file(username: &str, json: &str) -> Result<(), AuthError> {
+    let token_file = legacy_token_file_path(username);
+    if let Some(parent) = token_file.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AuthError::KeyringError(format!("Failed to create token dir: {}", e)))?;
+    }
+    std::fs::write(&token_file, json)
+        .map_err(|e| AuthError::KeyringError(format!("Failed to write token file: {}", e)))
 }
 
 fn legacy_token_file_path(username: &str) -> std::path::PathBuf {
@@ -230,24 +260,43 @@ pub fn load_token(username: &str) -> Result<String, AuthError> {
         Ok(json)
     })();
 
-    // If keyring fails, try one-time migration from legacy file (insecure old behavior).
-    let json = match keyring_result {
-        Ok(json) => json,
+    // If keyring fails, fall back to the local backup file (compatibility path).
+    let (json, from_keyring) = match keyring_result {
+        Ok(json) => (json, true),
         Err(keyring_err) => {
             tracing::warn!(username = %username, keyring_error = %keyring_err, "Keyring failed, trying legacy token file migration");
             let legacy_json = load_legacy_token_from_file(username)?;
-            tracing::warn!(username = %username, "Legacy token file detected. Migrating token to keyring and deleting file.");
-            legacy_json
+            tracing::warn!(username = %username, "Legacy/local token file detected. Rehydrating keyring from backup file.");
+            (legacy_json, false)
         }
     };
 
     // Try to parse as StoredToken (new format)
     if let Ok(stored) = serde_json::from_str::<StoredToken>(&json) {
         if stored.is_expired() {
-            let _ = delete_legacy_token_file(username);
+            if from_keyring {
+                if let Ok(fallback_json) = load_legacy_token_from_file(username) {
+                    if let Ok(fallback_stored) = serde_json::from_str::<StoredToken>(&fallback_json) {
+                        if !fallback_stored.is_expired() {
+                            let _ = save_token(
+                                username,
+                                &fallback_stored.access_token,
+                                Some(fallback_stored.expires_at - fallback_stored.created_at),
+                            );
+                            tracing::warn!(username = %username, "Keyring token expired; recovered valid token from local backup file");
+                            return Ok(fallback_stored.access_token);
+                        }
+                    } else if !fallback_json.trim().is_empty() {
+                        let plain = fallback_json.trim().to_string();
+                        let _ = save_token(username, &plain, None);
+                        tracing::warn!(username = %username, "Keyring token expired; recovered plain token from local backup file");
+                        return Ok(plain);
+                    }
+                }
+            }
             return Err(AuthError::TokenExpired);
         }
-        // If source was legacy file, this re-saves to keyring and deletes file.
+        // If source was backup file, re-save to keyring (and keep backup for compatibility).
         let _ = save_token(username, &stored.access_token, Some(stored.expires_at - stored.created_at));
         tracing::info!(username = %username, "Token loaded and valid");
         return Ok(stored.access_token);
@@ -260,20 +309,42 @@ pub fn load_token(username: &str) -> Result<String, AuthError> {
 }
 
 pub fn load_token_with_expiry(username: &str) -> Result<StoredToken, AuthError> {
-    let json = match keyring::Entry::new("gitgov", username)
+    let (json, from_keyring) = match keyring::Entry::new("gitgov", username)
         .map_err(|e| AuthError::KeyringError(e.to_string()))
         .and_then(|entry| entry.get_password().map_err(|e| AuthError::KeyringError(e.to_string())))
     {
-        Ok(json) => json,
+        Ok(json) => (json, true),
         Err(keyring_err) => {
             tracing::warn!(username = %username, keyring_error = %keyring_err, "Keyring token unavailable, attempting legacy token migration");
             let legacy_json = load_legacy_token_from_file(username)?;
-            legacy_json
+            (legacy_json, false)
         }
     };
 
     // Try to parse as StoredToken (new format)
     if let Ok(stored) = serde_json::from_str::<StoredToken>(&json) {
+        if from_keyring && stored.is_expired() {
+            if let Ok(fallback_json) = load_legacy_token_from_file(username) {
+                if let Ok(fallback_stored) = serde_json::from_str::<StoredToken>(&fallback_json) {
+                    if !fallback_stored.is_expired() {
+                        let _ = save_token(
+                            username,
+                            &fallback_stored.access_token,
+                            Some(fallback_stored.expires_at - fallback_stored.created_at),
+                        );
+                        return Ok(fallback_stored);
+                    }
+                } else if !fallback_json.trim().is_empty() {
+                    let fallback_stored = StoredToken::new(fallback_json.trim().to_string(), None);
+                    let _ = save_token(
+                        username,
+                        &fallback_stored.access_token,
+                        Some(fallback_stored.expires_at - fallback_stored.created_at),
+                    );
+                    return Ok(fallback_stored);
+                }
+            }
+        }
         let _ = save_token(username, &stored.access_token, Some(stored.expires_at - stored.created_at));
         return Ok(stored);
     }
