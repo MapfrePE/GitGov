@@ -42,6 +42,8 @@ Antes de tocar auth, outbox, dashboard o endpoints del server, asumir que este f
 
 **Checklist operativa:** `docs/GOLDEN_PATH_CHECKLIST.md`
 
+**Advertencia local (muy importante):** en desarrollo local usar **una sola URL canónica** para el Control Plane (`http://127.0.0.1:3000`). No mezclar `localhost` y `127.0.0.1` si Docker/WSL también están levantados, porque puedes terminar enviando eventos del Desktop a un server y viendo el Dashboard en otro (split-brain local).
+
 ### Pendiente
 
 | Componente | Prioridad |
@@ -180,7 +182,7 @@ Campos: id, source ("github" | "client"), event_type, created_at (timestamp ms),
 ## Variables de Entorno
 
 **Desktop (.env):**
-- VITE_SERVER_URL=http://localhost:3000
+- VITE_SERVER_URL=http://127.0.0.1:3000
 - VITE_API_KEY=(tu api key)
 
 **Server (.env):**

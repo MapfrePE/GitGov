@@ -149,6 +149,41 @@ Forzar un flush manual puede ayudar a diagnosticar. Si funciona manualmente, el 
 
 ---
 
+### Error: El commit/push se hizo desde GitGov pero no aparece en Control Plane (localhost vs 127.0.0.1)
+
+**Qué verás:**
+- Haces commit/push desde la app GitGov y GitHub sí recibe el commit
+- El dashboard de GitGov no muestra ese commit
+- En otro momento sí aparecen commits normalmente
+
+**Por qué pasa (causa real frecuente en local):**
+
+Estás corriendo **dos servidores distintos** en `:3000` (por ejemplo, server local + Docker/WSL), y:
+- el Desktop/outbox envía a `http://localhost:3000`
+- el Dashboard/Control Plane consulta `http://127.0.0.1:3000`
+
+En algunas máquinas `localhost` puede resolver por IPv6 (`::1`) y terminar pegándole a otro proceso diferente.
+
+**Cómo verificar rápido:**
+
+1. Consultar stats en ambas URLs:
+   - `http://127.0.0.1:3000/stats`
+   - `http://localhost:3000/stats`
+2. Si los totales (`client_events.total`) son distintos, tienes split-brain local.
+
+**Solución (recomendada):**
+
+1. Usar una sola URL canónica en todo el proyecto local: `http://127.0.0.1:3000`
+2. Verificar `src-tauri/.env` y configuración del Control Plane
+3. Reiniciar la app Desktop para que el outbox tome la URL nueva
+4. Evitar correr dos instancias de GitGov server en el mismo puerto `3000`
+
+**Prevención:**
+- Si usas Docker y server local a la vez, mueve uno a otro puerto (ej. `3001`)
+- No mezclar `localhost` y `127.0.0.1` en configuración
+
+---
+
 ## Problemas de Base de Datos
 
 ### Error: invalid type: null, expected a map
