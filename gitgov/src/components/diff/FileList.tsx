@@ -4,7 +4,7 @@ import { useRepoStore } from '@/store/useRepoStore'
 import { useAuthStore } from '@/store/useAuthStore'
 import type { FileChange } from '@/lib/types'
 import { FILE_STATUS_COLORS } from '@/lib/constants'
-import { FileText, RefreshCw, AlertCircle, CheckSquare, Plus, FileCode } from 'lucide-react'
+import { FileText, AlertCircle, CheckSquare, Plus, FileCode } from 'lucide-react'
 
 interface FileItemProps {
   file: FileChange

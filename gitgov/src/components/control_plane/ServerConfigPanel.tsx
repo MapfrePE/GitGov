@@ -1,12 +1,18 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Button } from '@/components/shared/Button'
 import { Server, Link, Unlink, RefreshCw } from 'lucide-react'
 
 export function ServerConfigPanel() {
   const { serverConfig, isConnected, isLoading, error, setServerConfig, checkConnection, disconnect } = useControlPlaneStore()
-  const [url, setUrl] = useState(serverConfig?.url || 'http://localhost:3000')
+  const [url, setUrl] = useState(serverConfig?.url || 'http://127.0.0.1:3000')
   const [apiKey, setApiKey] = useState(serverConfig?.api_key || '')
+
+  useEffect(() => {
+    if (!serverConfig) return
+    setUrl(serverConfig.url)
+    setApiKey(serverConfig.api_key || '')
+  }, [serverConfig])
 
   const handleConnect = () => {
     setServerConfig({
@@ -62,7 +68,7 @@ export function ServerConfigPanel() {
             type="text"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
-            placeholder="http://localhost:3000"
+            placeholder="http://127.0.0.1:3000"
             className="input"
           />
         </div>

@@ -128,6 +128,7 @@ interface ControlPlaneState {
   jiraTicketDetailLoading: Record<string, boolean>
   isConnected: boolean
   isLoading: boolean
+  isRefreshingDashboard: boolean
   error: string | null
 }
 
@@ -135,6 +136,7 @@ interface ControlPlaneActions {
   initFromEnv: () => Promise<void>
   setServerConfig: (config: ServerConfig) => void
   checkConnection: () => Promise<void>
+  refreshDashboardData: (params?: { logLimit?: number }) => Promise<void>
   loadStats: () => Promise<void>
   loadLogs: (limit?: number) => Promise<void>
   loadJenkinsCorrelations: (limit?: number) => Promise<void>
@@ -153,6 +155,23 @@ const JIRA_TICKET_DETAIL_TTL_MS = 2 * 60 * 1000
 // Compatibility fallback: existing desktop setups relied on this default key.
 // Keep it as last-resort fallback so the dashboard/logs continue working.
 const LEGACY_DEFAULT_API_KEY = '57f1ed59-371d-46ef-9fdf-508f59bc4963'
+
+function normalizeLoopbackUrl(url: string): string {
+  const trimmed = url.trim()
+  if (!trimmed) return trimmed
+
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.hostname === 'localhost') {
+      parsed.hostname = '127.0.0.1'
+      return parsed.toString().replace(/\/$/, parsed.pathname === '/' && !trimmed.endsWith('/') ? '' : '/')
+    }
+  } catch {
+    // Ignore invalid URLs here; validation happens later in Tauri/server calls.
+  }
+
+  return trimmed
+}
 
 function readStoredServerConfig(): ServerConfig | null {
   try {
@@ -207,11 +226,11 @@ function persistJiraCoverageFilters(filters: JiraCoverageFilters) {
 function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: ServerConfig | null): ServerConfig {
   const stored = readStoredServerConfig()
   const url =
-    input?.url?.trim() ||
-    previous?.url?.trim() ||
-    stored?.url?.trim() ||
+    normalizeLoopbackUrl(input?.url ?? '') ||
+    normalizeLoopbackUrl(previous?.url ?? '') ||
+    normalizeLoopbackUrl(stored?.url ?? '') ||
     import.meta.env.VITE_SERVER_URL ||
-    'http://localhost:3000'
+    'http://127.0.0.1:3000'
 
   const apiKey =
     input?.api_key?.trim() ||
@@ -221,7 +240,7 @@ function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: Se
     LEGACY_DEFAULT_API_KEY
 
   return {
-    url,
+    url: normalizeLoopbackUrl(url),
     api_key: apiKey || undefined,
   }
 }
@@ -238,6 +257,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   jiraTicketDetailLoading: {},
   isConnected: false,
   isLoading: false,
+  isRefreshingDashboard: false,
   error: null,
 
   initFromEnv: async () => {
@@ -263,18 +283,29 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     try {
       const healthy = await tauriInvoke<boolean>('cmd_server_health', { config: serverConfig })
       set({ isConnected: healthy, isLoading: false })
-      if (healthy) {
-        get().loadStats()
-        get().loadJenkinsCorrelations(50)
-        const { jiraCoverageFilters } = get()
-        get().loadTicketCoverage({
-          hours: jiraCoverageFilters.hours,
-          repo_full_name: jiraCoverageFilters.repo_full_name || undefined,
-          branch: jiraCoverageFilters.branch || undefined,
-        })
-      }
     } catch (e) {
       set({ error: parseCommandError(String(e)).message, isLoading: false, isConnected: false })
+    }
+  },
+
+  refreshDashboardData: async (params) => {
+    const { serverConfig, jiraCoverageFilters } = get()
+    if (!serverConfig) return
+
+    set({ isRefreshingDashboard: true })
+    try {
+      await Promise.all([
+        get().loadStats(),
+        get().loadLogs(params?.logLimit ?? 50),
+        get().loadJenkinsCorrelations(50),
+        get().loadTicketCoverage({
+          hours: jiraCoverageFilters.hours,
+          repo_full_name: jiraCoverageFilters.repo_full_name.trim() || undefined,
+          branch: jiraCoverageFilters.branch.trim() || undefined,
+        }),
+      ])
+    } finally {
+      set({ isRefreshingDashboard: false })
     }
   },
 
@@ -293,16 +324,14 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   loadLogs: async (limit = 100) => {
     const { serverConfig } = get()
     if (!serverConfig) return
-
-    set({ isLoading: true })
     try {
       const logs = await tauriInvoke<CombinedEvent[]>('cmd_server_get_logs', {
         config: serverConfig,
         filter: { limit, offset: 0 },
       })
-      set({ serverLogs: logs, isLoading: false })
+      set({ serverLogs: logs })
     } catch (e) {
-      set({ error: parseCommandError(String(e)).message, isLoading: false })
+      set({ error: parseCommandError(String(e)).message })
     }
   },
 
@@ -454,6 +483,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       jiraTicketDetails: {},
       jiraTicketDetailFetchedAt: {},
       jiraTicketDetailLoading: {},
+      isRefreshingDashboard: false,
       error: null,
     })
   },

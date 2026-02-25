@@ -188,11 +188,9 @@ export function ServerDashboard() {
     jiraTicketDetails,
     jiraTicketDetailLoading,
     isConnected,
-    isLoading,
-    loadStats,
+    isRefreshingDashboard,
+    refreshDashboardData,
     loadLogs,
-    loadJenkinsCorrelations,
-    loadTicketCoverage,
     applyTicketCoverageFilters,
     correlateJiraTickets,
     loadJiraTicketDetail,
@@ -207,34 +205,17 @@ export function ServerDashboard() {
   const [ticketPanelExpanded, setTicketPanelExpanded] = useState(false)
 
   useEffect(() => {
-    if (isConnected && autoRefresh) {
-      loadStats()
-      loadLogs(50)
-      loadJenkinsCorrelations(50)
-      loadTicketCoverage({
-        hours: jiraCoverageFilters.hours,
-        repo_full_name: jiraCoverageFilters.repo_full_name.trim() || undefined,
-        branch: jiraCoverageFilters.branch.trim() || undefined,
-      })
-    }
-  }, [isConnected, autoRefresh, loadStats, loadLogs, loadJenkinsCorrelations, loadTicketCoverage, jiraCoverageFilters])
+    if (!isConnected) return
 
-  useEffect(() => {
-    if (!isConnected || !autoRefresh) return
+    void refreshDashboardData({ logLimit: 50 })
 
+    if (!autoRefresh) return
     const interval = setInterval(() => {
-      loadStats()
-      loadLogs(50)
-      loadJenkinsCorrelations(50)
-      loadTicketCoverage({
-        hours: jiraCoverageFilters.hours,
-        repo_full_name: jiraCoverageFilters.repo_full_name.trim() || undefined,
-        branch: jiraCoverageFilters.branch.trim() || undefined,
-      })
+      void refreshDashboardData({ logLimit: 50 })
     }, 30000)
 
     return () => clearInterval(interval)
-  }, [isConnected, autoRefresh, loadStats, loadLogs, loadJenkinsCorrelations, loadTicketCoverage, jiraCoverageFilters])
+  }, [isConnected, autoRefresh, refreshDashboardData])
 
   useEffect(() => {
     setTicketHours(jiraCoverageFilters.hours)
@@ -309,14 +290,7 @@ export function ServerDashboard() {
   }
 
   const refreshAll = () => {
-    loadStats()
-    loadLogs(50)
-    loadJenkinsCorrelations(50)
-    loadTicketCoverage({
-      hours: jiraCoverageFilters.hours,
-      repo_full_name: jiraCoverageFilters.repo_full_name.trim() || undefined,
-      branch: jiraCoverageFilters.branch.trim() || undefined,
-    })
+    void refreshDashboardData({ logLimit: 50 })
   }
 
   return (
@@ -337,7 +311,7 @@ export function ServerDashboard() {
             />
             Auto-refresh
           </label>
-          <Button variant="ghost" size="sm" onClick={refreshAll} loading={isLoading}>
+          <Button variant="ghost" size="sm" onClick={refreshAll} loading={isRefreshingDashboard}>
             Actualizar
           </Button>
         </div>

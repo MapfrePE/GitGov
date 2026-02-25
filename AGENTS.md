@@ -26,7 +26,7 @@ GitGov es un sistema de gobernanza de Git distribuido que audita y controla oper
 | Autenticación | GitHub OAuth + API Keys |
 | Outbox | Envía eventos con backoff |
 | Dashboard | Muestra estadísticas y eventos |
-| Pipeline E2E | Desktop → Server → PostgreSQL → Dashboard |
+| Pipeline E2E | Desktop → Server → PostgreSQL → Dashboard |    
 
 ### Golden Path (NO ROMPER)
 
