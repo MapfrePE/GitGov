@@ -858,7 +858,7 @@ impl Database {
                 $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8,
                 $9, $10, $11::jsonb, $12::jsonb, $13::jsonb, $14
             )
-            ON CONFLICT (pipeline_id, job_name, COALESCE(commit_sha, ''), ingested_at) DO NOTHING
+            ON CONFLICT (pipeline_id, job_name, (COALESCE(commit_sha, '')), ingested_at) DO NOTHING
             RETURNING id::text
             "#,
         )
