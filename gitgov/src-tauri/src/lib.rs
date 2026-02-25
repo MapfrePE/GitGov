@@ -11,6 +11,25 @@ use outbox::Outbox;
 use std::sync::Arc;
 use tauri::Emitter;
 
+fn normalize_loopback_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let Ok(mut parsed) = reqwest::Url::parse(trimmed) else {
+        return trimmed.to_string();
+    };
+
+    if parsed.host_str() == Some("localhost") {
+        if parsed.set_host(Some("127.0.0.1")).is_ok() {
+            return parsed.to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Load .env file if present
@@ -38,7 +57,9 @@ pub fn run() {
         }
     };
 
-    let server_url = std::env::var("GITGOV_SERVER_URL").ok();
+    let server_url = std::env::var("GITGOV_SERVER_URL")
+        .ok()
+        .map(|u| normalize_loopback_url(&u));
     let api_key = std::env::var("GITGOV_API_KEY").ok();
 
     let server_configured = server_url.is_some();
