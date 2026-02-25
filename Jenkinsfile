@@ -23,7 +23,7 @@ pipeline {
     stage('Policy Check (Advisory)') {
       steps {
         script {
-          def repoName = env.GIT_URL ? env.GIT_URL.replaceFirst(/^.*github.com[/:]/, '').replaceFirst(/\.git$/, '') : ''
+          def repoName = env.GIT_URL ? env.GIT_URL.replaceFirst('^.*github\\.com[/:]', '').replaceFirst('\\.git$', '') : ''
           def branchName = env.BRANCH_NAME ?: env.GIT_BRANCH ?: 'unknown'
           def commitSha = env.GIT_COMMIT ?: sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
 
@@ -73,7 +73,7 @@ pipeline {
 }
 
 def notifyGitGov(String status) {
-  def repoName = env.GIT_URL ? env.GIT_URL.replaceFirst(/^.*github.com[/:]/, '').replaceFirst(/\.git$/, '') : ''
+  def repoName = env.GIT_URL ? env.GIT_URL.replaceFirst('^.*github\\.com[/:]', '').replaceFirst('\\.git$', '') : ''
   def branchName = env.BRANCH_NAME ?: env.GIT_BRANCH ?: 'unknown'
   def commitSha = env.GIT_COMMIT ?: sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
   def durationMs = currentBuild.duration ?: 0
