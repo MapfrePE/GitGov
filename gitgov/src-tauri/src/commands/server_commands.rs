@@ -1,5 +1,7 @@
 use crate::control_plane::{
-    AuditFilter, CombinedEvent, ControlPlaneClient, EventPayload, ServerConfig, ServerStats,
+    AuditFilter, CombinedEvent, CommitPipelineCorrelation, ControlPlaneClient, EventPayload,
+    JenkinsCorrelationFilter, JiraCorrelateRequest, JiraCorrelateResponse, ServerConfig, ServerStats,
+    TicketCoverageQuery, TicketCoverageResponse, JiraTicketDetailResponse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -80,5 +82,65 @@ pub fn cmd_server_get_stats(config: ServerConnectionConfig) -> Result<ServerStat
 
     client
         .get_stats()
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_get_jenkins_correlations(
+    config: ServerConnectionConfig,
+    filter: JenkinsCorrelationFilter,
+) -> Result<Vec<CommitPipelineCorrelation>, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .get_jenkins_correlations(&filter)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_get_jira_ticket_coverage(
+    config: ServerConnectionConfig,
+    query: TicketCoverageQuery,
+) -> Result<TicketCoverageResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .get_jira_ticket_coverage(&query)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_correlate_jira_tickets(
+    config: ServerConnectionConfig,
+    request: JiraCorrelateRequest,
+) -> Result<JiraCorrelateResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .correlate_jira_tickets(&request)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_get_jira_ticket_detail(
+    config: ServerConnectionConfig,
+    ticket_id: String,
+) -> Result<JiraTicketDetailResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .get_jira_ticket_detail(&ticket_id)
         .map_err(|e| to_command_error(e, "SERVER_ERROR"))
 }

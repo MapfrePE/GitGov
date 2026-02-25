@@ -113,6 +113,8 @@ pub struct ServerStats {
     pub github_events: GitHubEventStats,
     pub client_events: ClientEventStats,
     pub violations: ViolationStats,
+    #[serde(default)]
+    pub pipeline: PipelineHealthStats,
     pub active_devs_week: i64,
     pub active_repos: i64,
 }
@@ -144,12 +146,124 @@ pub struct ViolationStats {
     pub critical: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PipelineHealthStats {
+    pub total_7d: i64,
+    pub success_7d: i64,
+    pub failure_7d: i64,
+    pub aborted_7d: i64,
+    pub unstable_7d: i64,
+    pub avg_duration_ms_7d: i64,
+    pub repos_with_failures_7d: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyResponse {
     pub version: String,
     pub checksum: String,
     pub config: GitGovConfig,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct JenkinsCorrelationFilter {
+    pub org_name: Option<String>,
+    pub repo_full_name: Option<String>,
+    pub branch: Option<String>,
+    pub user_login: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitPipelineRun {
+    pub pipeline_event_id: String,
+    pub pipeline_id: String,
+    pub job_name: String,
+    pub status: String,
+    pub duration_ms: Option<i64>,
+    pub triggered_by: Option<String>,
+    pub ingested_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitPipelineCorrelation {
+    pub commit_event_id: String,
+    pub commit_sha: String,
+    pub commit_message: Option<String>,
+    pub commit_created_at: i64,
+    pub user_login: String,
+    pub branch: Option<String>,
+    pub repo_name: Option<String>,
+    pub pipeline: Option<CommitPipelineRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct TicketCoverageQuery {
+    pub org_name: Option<String>,
+    pub repo_full_name: Option<String>,
+    pub branch: Option<String>,
+    pub hours: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JiraCorrelateRequest {
+    pub org_name: Option<String>,
+    pub repo_full_name: Option<String>,
+    pub hours: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JiraCorrelateResponse {
+    pub scanned_commits: i64,
+    pub correlations_created: i64,
+    #[serde(default)]
+    pub correlated_tickets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TicketCoverageResponse {
+    pub org: String,
+    pub period: String,
+    pub total_commits: i64,
+    pub commits_with_ticket: i64,
+    pub coverage_percentage: f64,
+    #[serde(default)]
+    pub commits_without_ticket: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub tickets_without_commits: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectTicket {
+    pub id: String,
+    pub org_id: Option<String>,
+    pub ticket_id: String,
+    pub ticket_url: Option<String>,
+    pub title: Option<String>,
+    pub status: Option<String>,
+    pub assignee: Option<String>,
+    pub reporter: Option<String>,
+    pub priority: Option<String>,
+    pub ticket_type: Option<String>,
+    #[serde(default)]
+    pub related_commits: Vec<String>,
+    #[serde(default)]
+    pub related_prs: Vec<String>,
+    #[serde(default)]
+    pub related_branches: Vec<String>,
+    pub created_at: Option<i64>,
+    pub updated_at: Option<i64>,
+    pub ingested_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JiraTicketDetailResponse {
+    pub found: bool,
+    pub ticket: Option<ProjectTicket>,
 }
 
 pub struct ControlPlaneClient {
@@ -369,6 +483,152 @@ impl ControlPlaneClient {
             .map_err(|e| ServerError::NetworkError(e.to_string()))?;
 
         Ok(response.status().is_success())
+    }
+
+    pub fn get_jenkins_correlations(
+        &self,
+        filter: &JenkinsCorrelationFilter,
+    ) -> Result<Vec<CommitPipelineCorrelation>, ServerError> {
+        let url = format!("{}/integrations/jenkins/correlations", self.config.url);
+
+        let mut query_params: Vec<(String, String)> = Vec::new();
+        if let Some(org_name) = &filter.org_name {
+            query_params.push(("org_name".to_string(), org_name.clone()));
+        }
+        if let Some(repo_full_name) = &filter.repo_full_name {
+            query_params.push(("repo_full_name".to_string(), repo_full_name.clone()));
+        }
+        if let Some(branch) = &filter.branch {
+            query_params.push(("branch".to_string(), branch.clone()));
+        }
+        if let Some(user_login) = &filter.user_login {
+            query_params.push(("user_login".to_string(), user_login.clone()));
+        }
+        query_params.push(("limit".to_string(), filter.limit.to_string()));
+        query_params.push(("offset".to_string(), filter.offset.to_string()));
+
+        let mut request = self.client.get(&url).query(&query_params);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct CorrelationsResponse {
+            correlations: Vec<CommitPipelineCorrelation>,
+        }
+
+        let result: CorrelationsResponse = response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))?;
+
+        Ok(result.correlations)
+    }
+
+    pub fn get_jira_ticket_coverage(
+        &self,
+        query: &TicketCoverageQuery,
+    ) -> Result<TicketCoverageResponse, ServerError> {
+        let url = format!("{}/integrations/jira/ticket-coverage", self.config.url);
+
+        let mut query_params: Vec<(String, String)> = Vec::new();
+        if let Some(org_name) = &query.org_name {
+            query_params.push(("org_name".to_string(), org_name.clone()));
+        }
+        if let Some(repo_full_name) = &query.repo_full_name {
+            query_params.push(("repo_full_name".to_string(), repo_full_name.clone()));
+        }
+        if let Some(branch) = &query.branch {
+            query_params.push(("branch".to_string(), branch.clone()));
+        }
+        if let Some(hours) = query.hours {
+            query_params.push(("hours".to_string(), hours.to_string()));
+        }
+
+        let mut request = self.client.get(&url).query(&query_params);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn correlate_jira_tickets(
+        &self,
+        request_body: &JiraCorrelateRequest,
+    ) -> Result<JiraCorrelateResponse, ServerError> {
+        let url = format!("{}/integrations/jira/correlate", self.config.url);
+
+        let mut request = self.client.post(&url).json(request_body);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn get_jira_ticket_detail(
+        &self,
+        ticket_id: &str,
+    ) -> Result<JiraTicketDetailResponse, ServerError> {
+        let url = self.endpoint_url(&["integrations", "jira", "tickets", ticket_id])?;
+        let mut request = self.client.get(url);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+
+        if response.status().as_u16() == 404 {
+            return Ok(JiraTicketDetailResponse { found: false, ticket: None });
+        }
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
     }
 }
 

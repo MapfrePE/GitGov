@@ -5,7 +5,7 @@ mod models;
 
 use axum::{
     body::Body,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{header::RETRY_AFTER, HeaderMap, HeaderValue, Request, StatusCode},
     middleware,
     middleware::Next,
@@ -129,6 +129,13 @@ fn parse_u32_env(key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+fn parse_usize_env(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
 fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
     let ip = headers
         .get("x-forwarded-for")
@@ -214,6 +221,8 @@ async fn main() {
         .unwrap_or_else(|_| "gitgov-secret-key-change-in-production".to_string());
 
     let github_webhook_secret = std::env::var("GITHUB_WEBHOOK_SECRET").ok();
+    let jenkins_webhook_secret = std::env::var("JENKINS_WEBHOOK_SECRET").ok();
+    let jira_webhook_secret = std::env::var("JIRA_WEBHOOK_SECRET").ok();
 
     let db = match db::Database::new(&database_url).await {
         Ok(db) => Arc::new(db),
@@ -409,6 +418,8 @@ async fn main() {
         db: Arc::clone(&db),
         jwt_secret,
         github_webhook_secret,
+        jenkins_webhook_secret,
+        jira_webhook_secret,
         start_time: Instant::now(),
         worker_id: worker_id_clone.clone(),
     });
@@ -425,10 +436,32 @@ async fn main() {
         parse_u32_env("GITGOV_RATE_LIMIT_AUDIT_STREAM_PER_MIN", 60),
         Duration::from_secs(60),
     ));
+    let jenkins_rate_limit = Arc::new(InMemoryRateLimiter::new(
+        "jenkins_integrations",
+        parse_u32_env("GITGOV_RATE_LIMIT_JENKINS_PER_MIN", 120),
+        Duration::from_secs(60),
+    ));
+    let jira_rate_limit = Arc::new(InMemoryRateLimiter::new(
+        "jira_integrations",
+        parse_u32_env("GITGOV_RATE_LIMIT_JIRA_PER_MIN", 120),
+        Duration::from_secs(60),
+    ));
+    let jenkins_body_limit_bytes = parse_usize_env(
+        "GITGOV_JENKINS_MAX_BODY_BYTES",
+        256 * 1024,
+    );
+    let jira_body_limit_bytes = parse_usize_env(
+        "GITGOV_JIRA_MAX_BODY_BYTES",
+        512 * 1024,
+    );
 
     tracing::info!(
         events_per_min = events_rate_limit.limit,
         audit_stream_per_min = audit_stream_rate_limit.limit,
+        jenkins_per_min = jenkins_rate_limit.limit,
+        jira_per_min = jira_rate_limit.limit,
+        jenkins_body_limit_bytes,
+        jira_body_limit_bytes,
         "Basic rate limiting enabled for ingestion endpoints"
     );
 
@@ -436,6 +469,30 @@ async fn main() {
         .route("/logs", get(handlers::get_logs))
         .route("/stats", get(handlers::get_stats))
         .route("/dashboard", get(handlers::get_dashboard))
+        .route(
+            "/integrations/jenkins",
+            post(handlers::ingest_jenkins_pipeline_event)
+                .layer(DefaultBodyLimit::max(jenkins_body_limit_bytes))
+                .layer(middleware::from_fn_with_state(
+                    Arc::clone(&jenkins_rate_limit),
+                    rate_limit_middleware,
+                )),
+        )
+        .route("/integrations/jenkins/status", get(handlers::get_jenkins_integration_status))
+        .route("/integrations/jenkins/correlations", get(handlers::get_jenkins_commit_correlations))
+        .route(
+            "/integrations/jira",
+            post(handlers::ingest_jira_webhook)
+                .layer(DefaultBodyLimit::max(jira_body_limit_bytes))
+                .layer(middleware::from_fn_with_state(
+                    Arc::clone(&jira_rate_limit),
+                    rate_limit_middleware,
+                )),
+        )
+        .route("/integrations/jira/status", get(handlers::get_jira_integration_status))
+        .route("/integrations/jira/tickets/{ticket_id}", get(handlers::get_jira_ticket_detail))
+        .route("/integrations/jira/correlate", post(handlers::correlate_jira_tickets))
+        .route("/integrations/jira/ticket-coverage", get(handlers::get_jira_ticket_coverage))
         .route("/compliance/{org_name}", get(handlers::get_compliance_dashboard))
         .route("/signals", get(handlers::get_signals))
         .route("/signals/{signal_id}", post(handlers::update_signal))
@@ -444,6 +501,7 @@ async fn main() {
         .route("/violations/{violation_id}/decisions", get(handlers::get_violation_decisions))
         .route("/violations/{violation_id}/decisions", post(handlers::add_violation_decision))
         .route("/policy/{repo_name}", get(handlers::get_policy))
+        .route("/policy/check", post(handlers::policy_check))
         .route("/policy/{repo_name}/history", get(handlers::get_policy_history))
         .route("/policy/{repo_name}/override", put(handlers::override_policy))
         .route("/export", post(handlers::export_events))
@@ -494,6 +552,14 @@ async fn main() {
     tracing::info!("  GET  /logs                      - Query events (auth, dev: own only)");
     tracing::info!("  GET  /stats                     - Statistics (admin)");
     tracing::info!("  GET  /dashboard                 - Dashboard (admin)");
+    tracing::info!("  POST /integrations/jenkins      - Jenkins pipeline ingest (admin)");
+    tracing::info!("  GET  /integrations/jenkins/status - Jenkins integration health (admin)");
+    tracing::info!("  GET  /integrations/jenkins/correlations - Commit->pipeline correlations (admin)");
+    tracing::info!("  POST /integrations/jira         - Jira webhook ingest (admin)");
+    tracing::info!("  GET  /integrations/jira/status  - Jira integration health (admin)");
+    tracing::info!("  GET  /integrations/jira/tickets/:ticket_id - Jira ticket detail (admin)");
+    tracing::info!("  POST /integrations/jira/correlate - Build commit<->ticket correlations (admin)");
+    tracing::info!("  GET  /integrations/jira/ticket-coverage - Ticket coverage metrics (admin)");
     tracing::info!("  GET  /compliance/:org           - Compliance (admin)");
     tracing::info!("  GET  /signals                   - Signals (auth)");
     tracing::info!("  POST /signals/:id               - Update signal (auth)");
@@ -503,11 +569,14 @@ async fn main() {
     tracing::info!("  GET  /violations/:id/decisions  - Get decision history (auth)");
     tracing::info!("  POST /violations/:id/decisions  - Add decision (admin)");
     tracing::info!("  GET  /policy/:repo              - Get policy (auth)");
+    tracing::info!("  POST /policy/check              - Policy check (advisory, admin)");
     tracing::info!("  PUT  /policy/:repo/override     - Override policy (admin)");
     tracing::info!("  GET  /policy/:repo/history      - History (auth)");
     tracing::info!("  POST /export                    - Export (auth)");
     tracing::info!("  POST /api-keys                  - Create API key (admin)");
     tracing::info!("  POST /audit-stream/github       - GitHub audit log stream (admin)");
+    tracing::info!("  (opt) JENKINS_WEBHOOK_SECRET    - Extra shared secret header x-gitgov-jenkins-secret");
+    tracing::info!("  (opt) JIRA_WEBHOOK_SECRET       - Extra shared secret header x-gitgov-jira-secret");
     tracing::info!("  GET  /governance-events         - Query governance events (auth)");
     tracing::info!("  --- Job Queue Management ---");
     tracing::info!("  GET  /jobs/metrics              - Job queue metrics (admin)");

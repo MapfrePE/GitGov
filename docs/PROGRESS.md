@@ -1,5 +1,191 @@
 # GitGov - Registro de Progreso
 
+## Actualización Reciente (2026-02-24)
+
+### Resumen Ejecutivo
+
+GitGov avanzó de un estado "funcional mínimo" a una base mucho más sólida y demoable:
+
+- Se endureció el sistema sin romper el flujo core (`Desktop -> commit/push -> server -> dashboard`)
+- Se mejoró la UX del dashboard para mostrar commits de forma más estándar (estilo GitHub)
+- Se implementó **V1.2-A (Jenkins-first MVP)** de forma funcional
+- Se implementó un **preview fuerte de V1.2-B (Jira + ticket coverage)** con backend, UI y pruebas
+
+### Golden Path (NO ROMPER) - Estado
+
+El flujo base se mantiene operativo y protegido:
+
+1. Desktop detecta cambios
+2. Commit desde la app
+3. Push desde la app
+4. Server recibe eventos en `/events`
+5. Dashboard muestra commits y logs
+
+Documentos de soporte:
+- `docs/GOLDEN_PATH_CHECKLIST.md`
+- `docs/V1.2-A_DEMO.md`
+
+---
+
+## Avances Técnicos Implementados (2026-02-24)
+
+### 1. Hardening y estabilización del core (post-auditoría)
+
+**Seguridad backend**
+- Scoping real en endpoints sensibles (`signals`, `export`, `governance-events`)
+- Mejoras de autorización en decisiones/violations/signals
+- `/events` endurecido para evitar spoofing en no-admin
+- Validación HMAC de GitHub corregida usando body raw real
+- Sanitización de errores en middleware de auth
+
+**Integridad de datos / DB**
+- Alineación parcial backend ↔ modelo append-only (`signals` / `signal_decisions`)
+- Fallback en decisiones de violations cuando la función SQL legacy falla por triggers
+- Hotfix schema adicional (`supabase_schema_v4.sql`) para comportamiento append-only
+
+**Rendimiento / robustez**
+- Correcciones de paginación y filtros en queries de eventos
+- Optimización conservadora de `insert_client_events_batch()` (dedupe + transacción + fallback)
+- Rate limiting básico para `/events`, `/audit-stream/github`, `/integrations/jenkins`, `/integrations/jira`
+- Body limits en endpoints de integraciones
+
+---
+
+### 2. Dashboard y UX (Control Plane)
+
+**Commits Recientes (reorganización)**
+- La vista principal ahora muestra **una fila por commit**
+- Se ocultaron eventos técnicos (`attempt_push`, `successful_push`, etc.) en la tabla principal
+- `stage_files` se asocia al commit como detalle (`Ver archivos`)
+- Se muestra:
+  - mensaje de commit
+  - hash corto
+  - badge `ci:<status>` si hay correlación Jenkins
+  - badges de tickets (`PROJ-123`) detectados en commit/rama
+
+**Jira Ticket Coverage UI**
+- Widget `Ticket Coverage (Jira)` con:
+  - cobertura %
+  - commits con/sin ticket
+  - tickets huérfanos
+- Botón manual `Correlacionar`
+- Filtros UI:
+  - repo
+  - rama
+  - horas
+- Botón `Aplicar filtros`
+- Persistencia local de filtros Jira (localStorage)
+
+**Panel de detalle de ticket**
+- Click en badge de ticket (`PROJ-123`) abre panel de detalle
+- Carga detalle real desde backend (`GET /integrations/jira/tickets/{ticket_id}`)
+- Muestra:
+  - status
+  - assignee
+  - summary/title
+  - link al ticket
+- Spinner / estado de carga
+- Cache TTL (2 min) para detalle de tickets Jira
+- Panel expandible con relaciones:
+  - branches relacionadas
+  - commits relacionados
+  - PRs relacionadas (si existen)
+
+---
+
+### 3. V1.2-A (Jenkins-first MVP) - Implementado
+
+**Base de datos / schema**
+- `supabase_schema_v5.sql`:
+  - `pipeline_events` (append-only)
+  - índices para correlación por `commit_sha`
+  - dedupe inicial v1
+
+**Backend Jenkins**
+- `POST /integrations/jenkins`
+- `GET /integrations/jenkins/status`
+- `GET /integrations/jenkins/correlations`
+- Hardening compatible:
+  - `JENKINS_WEBHOOK_SECRET` (opcional)
+  - rate limit específico
+  - body limit específico
+
+**Correlación commit -> pipeline**
+- Correlación básica por `commit_sha` (exact match y prefijo short/full)
+
+**Stats / Dashboard**
+- `/stats` incluye `pipeline`
+- Widget `Pipeline Health (7 días)` en dashboard
+
+**Policy advisory**
+- `POST /policy/check` implementado en modo advisory (no bloqueante)
+
+**Pruebas / Demo**
+- `gitgov/gitgov-server/tests/jenkins_integration_test.sh`
+- `docs/V1.2-A_DEMO.md`
+
+Estado V1.2-A: **MVP funcional y demoable**
+
+---
+
+### 4. V1.2-B (Jira + Ticket Coverage) - Preview avanzado
+
+**Schema**
+- `supabase_schema_v6.sql`
+  - `project_tickets`
+  - `commit_ticket_correlations` (append-only)
+
+**Backend Jira**
+- `POST /integrations/jira` (ingesta snapshot de issue)
+- `GET /integrations/jira/status`
+- `POST /integrations/jira/correlate` (correlación batch commit↔ticket)
+- `GET /integrations/jira/ticket-coverage`
+- `GET /integrations/jira/tickets/{ticket_id}` (detalle real de ticket)
+
+**Correlación y enriquecimiento**
+- extracción de tickets (`ABC-123`) desde commit message y branch
+- dedupe de correlación por `(commit_sha, ticket_id)`
+- actualización automática de `project_tickets.related_commits` / `related_branches`
+  al crear correlaciones nuevas
+
+**UI / Demo**
+- widget `Ticket Coverage`
+- listas preview:
+  - commits sin ticket
+  - tickets sin commits
+- badges de ticket por commit
+- detalle real de ticket en panel
+
+**Pruebas**
+- `gitgov/gitgov-server/tests/jira_integration_test.sh`
+- tests unitarios de regex/extracción de tickets en `handlers.rs`
+
+Estado V1.2-B: **preview funcional (backend + UI + scripts), listo para iterar**
+
+---
+
+### 5. Documentación y planificación actualizadas
+
+- `docs/GITGOV_ROADMAP_V1.2.md` reestructurado con enfoque realista (`V1.2-A/B/C`)
+- `docs/BACKLOG_V1.2-A.md` creado con tareas/épicas/estimaciones
+- `AGENTS.md` actualizado con sección **Golden Path (NO ROMPER)**
+
+---
+
+## Pendientes Relevantes (actualizados)
+
+### Alta prioridad (siguiente tramo)
+- Endurecer pruebas reales / corrida integral de demo Jenkins + Jira en entorno local completo
+- Pulir correlación de `related_prs` (aún no se puebla automáticamente)
+- Mejorar cobertura de tests automatizados backend (integración Jira/Jenkins)
+
+### Media prioridad
+- Correlation Engine avanzado (GitHub webhooks + desktop + Jira + Jenkins en una sola vista)
+- Drift detection más completo
+- Optimización de queries para datasets grandes
+
+---
+
 ## Documentación del Proyecto
 
 | Documento | Propósito |

@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
 @theme {
   --color-brand-50: #eff6ff;
@@ -57,17 +58,55 @@
   --color-danger-700: #b91c1c;
   --color-danger-800: #991b1b;
   --color-danger-900: #7f1d1d;
+
+  --animate-fade-in: fade-in 0.3s ease-out;
+  --animate-slide-up: slide-up 0.3s ease-out;
+  --animate-scale-in: scale-in 0.2s ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
 }
 
 @layer base {
   html {
-    background-color: var(--color-surface-900);
+    background-color: var(--color-surface-950);
     color: white;
   }
-  
+
   body {
-    font-family: system-ui, -apple-system, sans-serif;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-surface-600);
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-surface-500);
   }
 }
 
@@ -79,37 +118,60 @@
     padding: 0.5rem 1rem;
     border-radius: 0.5rem;
     font-weight: 500;
-    transition: all 0.2s;
+    transition: all 0.15s ease;
   }
-  
+
   .btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
-  
+
   .input {
     width: 100%;
     padding: 0.5rem 0.75rem;
-    background-color: var(--color-surface-800);
+    background-color: var(--color-surface-900);
     border: 1px solid var(--color-surface-700);
     border-radius: 0.5rem;
     color: white;
-    transition: all 0.2s;
+    transition: all 0.15s ease;
   }
-  
+
   .input::placeholder {
     color: var(--color-surface-500);
   }
-  
+
   .input:focus {
     outline: none;
     border-color: var(--color-brand-500);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
   }
-  
+
   .card {
     background-color: var(--color-surface-800);
-    border-radius: 0.5rem;
+    border-radius: 0.75rem;
     border: 1px solid var(--color-surface-700);
-    padding: 1rem;
+    padding: 1.25rem;
+    transition: border-color 0.15s ease;
+  }
+
+  .card:hover {
+    border-color: var(--color-surface-600);
+  }
+
+  .card-header {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--color-surface-300);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding-bottom: 0.75rem;
+    margin-bottom: 0.75rem;
+    border-bottom: 1px solid var(--color-surface-700);
+  }
+
+  .glass {
+    background: rgba(30, 41, 59, 0.8);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
   }
 }

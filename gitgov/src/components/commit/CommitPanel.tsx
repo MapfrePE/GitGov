@@ -71,14 +71,14 @@ export function CommitPanel() {
   }
 
   return (
-    <div className="border-t border-surface-700 bg-surface-800 p-4">
+    <div className="border-t border-surface-700/50 bg-surface-900 px-5 py-4">
       <div className="flex gap-4">
-        <div className="flex-1">
-          <div className="flex gap-2 mb-2">
+        <div className="flex-1 space-y-2.5">
+          <div className="flex gap-2">
             <select
               value={commitType}
               onChange={(e) => setCommitType(e.target.value)}
-              className="px-2 py-2 bg-surface-900 border border-surface-700 rounded-lg text-white text-sm focus:outline-none focus:border-brand-500"
+              className="px-2.5 py-2 bg-surface-800 border border-surface-700 rounded-lg text-white text-sm focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/15 transition-all"
             >
               {COMMIT_TYPES.map((type) => (
                 <option key={type.value} value={type.value}>
@@ -90,23 +90,30 @@ export function CommitPanel() {
               type="text"
               value={message}
               onChange={(e) => setMessage(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && hasStagedFiles && isValidMessage) {
+                  handleCommit()
+                }
+              }}
               placeholder="descripción del cambio"
-              className="flex-1 px-3 py-2 bg-surface-900 border border-surface-700 rounded-lg text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
+              className="flex-1 px-3 py-2 bg-surface-800 border border-surface-700 rounded-lg text-white placeholder-surface-500 focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/15 transition-all"
             />
           </div>
-          
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-surface-500">Vista previa:</span>
+
+          <div className="flex items-center gap-2 text-xs px-0.5">
+            <span className="text-surface-500">Preview:</span>
             <code className={clsx(
-              'px-2 py-0.5 rounded',
-              isValidMessage ? 'bg-success-500/20 text-success-400' : 'bg-surface-700 text-surface-400'
+              'px-2 py-0.5 rounded-md font-mono transition-colors',
+              isValidMessage
+                ? 'bg-success-500/10 text-success-400 ring-1 ring-success-500/20'
+                : 'bg-surface-800 text-surface-500'
             )}>
               {fullMessage || 'mensaje vacío'}
             </code>
           </div>
         </div>
 
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-2 justify-center">
           <div className="flex gap-2">
             <Button
               size="sm"
@@ -117,26 +124,26 @@ export function CommitPanel() {
             >
               <RotateCcw size={14} />
             </Button>
-            
+
             <Button
               size="sm"
               onClick={handleCommit}
               loading={isCommitting}
               disabled={!hasStagedFiles || !isValidMessage}
             >
-              <GitCommit size={14} className="mr-1" />
+              <GitCommit size={14} />
               Commit ({stagedFiles.size})
             </Button>
           </div>
 
           <Button
             size="sm"
-            variant="secondary"
+            variant="outline"
             onClick={handlePush}
             loading={isPushing}
             disabled={!lastCommitHash && !hasUncommittedChanges}
           >
-            <Upload size={14} className="mr-1" />
+            <Upload size={14} />
             Push
           </Button>
         </div>

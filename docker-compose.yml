@@ -1,0 +1,47 @@
+services:
+  gitgov-db:
+    image: postgres:16
+    container_name: gitgov-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gitgov
+      POSTGRES_USER: gitgov
+      POSTGRES_PASSWORD: gitgov_dev_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - gitgov_postgres_data:/var/lib/postgresql/data
+      - ./gitgov/gitgov-server/supabase_schema.sql:/workspace/supabase_schema.sql:ro
+      - ./docker/postgres-init/01_supabase_schema_local.sh:/docker-entrypoint-initdb.d/01_supabase_schema_local.sh:ro
+      - ./gitgov/gitgov-server/supabase_schema_v4.sql:/docker-entrypoint-initdb.d/04_supabase_schema_v4.sql:ro
+      - ./gitgov/gitgov-server/supabase_schema_v5.sql:/docker-entrypoint-initdb.d/05_supabase_schema_v5.sql:ro
+      - ./gitgov/gitgov-server/supabase_schema_v6.sql:/docker-entrypoint-initdb.d/06_supabase_schema_v6.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gitgov -d gitgov"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  gitgov-server:
+    build:
+      context: ./gitgov/gitgov-server
+      dockerfile: Dockerfile
+    container_name: gitgov-server
+    restart: unless-stopped
+    depends_on:
+      gitgov-db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://gitgov:gitgov_dev_password@gitgov-db:5432/gitgov
+      GITGOV_JWT_SECRET: change-me-in-real-env
+      GITGOV_SERVER_ADDR: 0.0.0.0:3000
+      GITGOV_API_KEY: 57f1ed59-371d-46ef-9fdf-508f59bc4963
+      RUST_LOG: info
+      # Optional hardening examples:
+      # JENKINS_WEBHOOK_SECRET: your-jenkins-secret
+      # JIRA_WEBHOOK_SECRET: your-jira-secret
+    ports:
+      - "3000:3000"
+
+volumes:
+  gitgov_postgres_data:

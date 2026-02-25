@@ -5,6 +5,7 @@ import { FileList } from '@/components/diff/FileList'
 import { DiffViewer } from '@/components/diff/DiffViewer'
 import { CommitPanel } from '@/components/commit/CommitPanel'
 import { Button } from '@/components/shared/Button'
+import { FolderSync } from 'lucide-react'
 
 export function DashboardPage() {
   const { repoPath, refreshStatus, refreshBranches, setRepoPath } = useRepoStore()
@@ -30,9 +31,10 @@ export function DashboardPage() {
   }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col bg-surface-950">
       <Header>
         <Button variant="ghost" size="sm" onClick={handleChangeRepo}>
+          <FolderSync size={14} />
           Cambiar repo
         </Button>
       </Header>
@@ -42,7 +44,7 @@ export function DashboardPage() {
           <FileList />
         </div>
 
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 flex flex-col bg-surface-900">
           <DiffViewer />
           <CommitPanel />
         </div>

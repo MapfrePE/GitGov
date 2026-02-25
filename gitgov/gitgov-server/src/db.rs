@@ -836,6 +836,689 @@ impl Database {
     }
 
     // ========================================================================
+    // PIPELINE EVENTS (V1.2-A Jenkins Integration)
+    // ========================================================================
+
+    pub async fn insert_pipeline_event(&self, event: &PipelineEvent) -> Result<String, DbError> {
+        let stages_json = serde_json::to_value(&event.stages)
+            .map_err(|e| DbError::SerializationError(e.to_string()))?;
+        let artifacts_json = serde_json::to_value(&event.artifacts)
+            .map_err(|e| DbError::SerializationError(e.to_string()))?;
+
+        let ingested_at = chrono::DateTime::from_timestamp_millis(event.ingested_at)
+            .ok_or_else(|| DbError::SerializationError("Invalid ingested_at timestamp".to_string()))?;
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO pipeline_events (
+                id, org_id, pipeline_id, job_name, status, commit_sha, branch, repo_full_name,
+                duration_ms, triggered_by, stages, artifacts, payload, ingested_at
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8,
+                $9, $10, $11::jsonb, $12::jsonb, $13::jsonb, $14
+            )
+            ON CONFLICT (pipeline_id, job_name, COALESCE(commit_sha, ''), ingested_at) DO NOTHING
+            RETURNING id::text
+            "#,
+        )
+        .bind(&event.id)
+        .bind(&event.org_id)
+        .bind(&event.pipeline_id)
+        .bind(&event.job_name)
+        .bind(event.status.as_str())
+        .bind(&event.commit_sha)
+        .bind(&event.branch)
+        .bind(&event.repo_full_name)
+        .bind(&event.duration_ms)
+        .bind(&event.triggered_by)
+        .bind(&stages_json)
+        .bind(&artifacts_json)
+        .bind(&event.payload)
+        .bind(ingested_at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        match result {
+            Some(row) => Ok(row.get("id")),
+            None => Err(DbError::Duplicate(format!(
+                "pipeline_id={}, job_name={}, commit_sha={:?}, ingested_at={}",
+                event.pipeline_id, event.job_name, event.commit_sha, event.ingested_at
+            ))),
+        }
+    }
+
+    pub async fn get_jenkins_integration_status(&self) -> Result<JenkinsIntegrationStatusResponse, DbError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                MAX(ingested_at) AS last_ingest_at,
+                COUNT(*) FILTER (WHERE ingested_at >= NOW() - INTERVAL '24 hours')::bigint AS recent_events_24h
+            FROM pipeline_events
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let last_ingest_at = row
+            .get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_ingest_at")
+            .map(|dt| dt.timestamp_millis());
+        let recent_events_24h: i64 = row.get("recent_events_24h");
+
+        Ok(JenkinsIntegrationStatusResponse {
+            ok: true,
+            last_ingest_at,
+            recent_events_24h,
+        })
+    }
+
+    pub async fn upsert_project_ticket(&self, ticket: &ProjectTicket) -> Result<(), DbError> {
+        let ingested_at = chrono::DateTime::from_timestamp_millis(ticket.ingested_at)
+            .ok_or_else(|| DbError::SerializationError("Invalid ingested_at timestamp".to_string()))?;
+        let created_at = ticket
+            .created_at
+            .and_then(chrono::DateTime::from_timestamp_millis);
+        let updated_at = ticket
+            .updated_at
+            .and_then(chrono::DateTime::from_timestamp_millis);
+
+        sqlx::query(
+            r#"
+            INSERT INTO project_tickets (
+                id, org_id, ticket_id, ticket_url, title, status, assignee, reporter, priority, ticket_type,
+                related_commits, related_prs, related_branches, created_at, updated_at, ingested_at
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11::text[], $12::text[], $13::text[], $14, $15, $16
+            )
+            ON CONFLICT (org_id, ticket_id) DO UPDATE SET
+                ticket_url = EXCLUDED.ticket_url,
+                title = EXCLUDED.title,
+                status = EXCLUDED.status,
+                assignee = EXCLUDED.assignee,
+                reporter = EXCLUDED.reporter,
+                priority = EXCLUDED.priority,
+                ticket_type = EXCLUDED.ticket_type,
+                related_commits = EXCLUDED.related_commits,
+                related_prs = EXCLUDED.related_prs,
+                related_branches = EXCLUDED.related_branches,
+                created_at = COALESCE(project_tickets.created_at, EXCLUDED.created_at),
+                updated_at = EXCLUDED.updated_at,
+                ingested_at = EXCLUDED.ingested_at
+            "#,
+        )
+        .bind(&ticket.id)
+        .bind(&ticket.org_id)
+        .bind(&ticket.ticket_id)
+        .bind(&ticket.ticket_url)
+        .bind(&ticket.title)
+        .bind(&ticket.status)
+        .bind(&ticket.assignee)
+        .bind(&ticket.reporter)
+        .bind(&ticket.priority)
+        .bind(&ticket.ticket_type)
+        .bind(&ticket.related_commits)
+        .bind(&ticket.related_prs)
+        .bind(&ticket.related_branches)
+        .bind(created_at)
+        .bind(updated_at)
+        .bind(ingested_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub async fn get_jira_integration_status(&self) -> Result<JiraIntegrationStatusResponse, DbError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                MAX(ingested_at) AS last_ingest_at,
+                COUNT(*) FILTER (WHERE ingested_at >= NOW() - INTERVAL '24 hours')::bigint AS recent_tickets_24h
+            FROM project_tickets
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(JiraIntegrationStatusResponse {
+            ok: true,
+            last_ingest_at: row
+                .get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_ingest_at")
+                .map(|dt| dt.timestamp_millis()),
+            recent_tickets_24h: row.get("recent_tickets_24h"),
+        })
+    }
+
+    pub async fn get_project_ticket_by_ticket_id(
+        &self,
+        ticket_id: &str,
+    ) -> Result<Option<ProjectTicket>, DbError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id::text,
+                org_id::text AS org_id,
+                ticket_id,
+                ticket_url,
+                title,
+                status,
+                assignee,
+                reporter,
+                priority,
+                ticket_type,
+                related_commits,
+                related_prs,
+                related_branches,
+                created_at,
+                updated_at,
+                ingested_at
+            FROM project_tickets
+            WHERE ticket_id = $1
+            ORDER BY ingested_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(ticket_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|row| {
+            let created_at = row
+                .get::<Option<chrono::DateTime<chrono::Utc>>, _>("created_at")
+                .map(|dt| dt.timestamp_millis());
+            let updated_at = row
+                .get::<Option<chrono::DateTime<chrono::Utc>>, _>("updated_at")
+                .map(|dt| dt.timestamp_millis());
+            let ingested_at = row
+                .get::<chrono::DateTime<chrono::Utc>, _>("ingested_at")
+                .timestamp_millis();
+
+            ProjectTicket {
+                id: row.get("id"),
+                org_id: row.get("org_id"),
+                ticket_id: row.get("ticket_id"),
+                ticket_url: row.get("ticket_url"),
+                title: row.get("title"),
+                status: row.get("status"),
+                assignee: row.get("assignee"),
+                reporter: row.get("reporter"),
+                priority: row.get("priority"),
+                ticket_type: row.get("ticket_type"),
+                related_commits: row.get("related_commits"),
+                related_prs: row.get("related_prs"),
+                related_branches: row.get("related_branches"),
+                created_at,
+                updated_at,
+                ingested_at,
+            }
+        }))
+    }
+
+    pub async fn insert_commit_ticket_correlation(
+        &self,
+        correlation: &CommitTicketCorrelation,
+    ) -> Result<bool, DbError> {
+        let created_at = chrono::DateTime::from_timestamp_millis(correlation.created_at)
+            .ok_or_else(|| DbError::SerializationError("Invalid created_at timestamp".to_string()))?;
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO commit_ticket_correlations (
+                id, org_id, commit_sha, ticket_id, correlation_source, confidence, created_at
+            )
+            VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7)
+            ON CONFLICT (commit_sha, ticket_id) DO NOTHING
+            RETURNING id::text
+            "#,
+        )
+        .bind(&correlation.id)
+        .bind(&correlation.org_id)
+        .bind(&correlation.commit_sha)
+        .bind(&correlation.ticket_id)
+        .bind(&correlation.correlation_source)
+        .bind(correlation.confidence)
+        .bind(created_at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(result.is_some())
+    }
+
+    pub async fn append_project_ticket_relations(
+        &self,
+        ticket_id: &str,
+        commit_sha: Option<&str>,
+        branch: Option<&str>,
+    ) -> Result<bool, DbError> {
+        let commit_sha = commit_sha.map(str::trim).filter(|s| !s.is_empty());
+        let branch = branch.map(str::trim).filter(|s| !s.is_empty());
+
+        let result = sqlx::query(
+            r#"
+            UPDATE project_tickets
+            SET
+              related_commits = CASE
+                WHEN $2::text IS NULL THEN related_commits
+                ELSE (
+                  SELECT COALESCE(array_agg(DISTINCT x), '{}'::text[])
+                  FROM unnest(COALESCE(related_commits, '{}'::text[]) || ARRAY[$2::text]) AS x
+                  WHERE x IS NOT NULL AND x <> ''
+                )
+              END,
+              related_branches = CASE
+                WHEN $3::text IS NULL THEN related_branches
+                ELSE (
+                  SELECT COALESCE(array_agg(DISTINCT x), '{}'::text[])
+                  FROM unnest(COALESCE(related_branches, '{}'::text[]) || ARRAY[$3::text]) AS x
+                  WHERE x IS NOT NULL AND x <> ''
+                )
+              END,
+              updated_at = NOW()
+            WHERE ticket_id = $1
+            "#,
+        )
+        .bind(ticket_id)
+        .bind(commit_sha)
+        .bind(branch)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn get_recent_commit_events_for_ticket_correlation(
+        &self,
+        org_name: Option<&str>,
+        repo_full_name: Option<&str>,
+        hours: i64,
+        limit: i64,
+    ) -> Result<Vec<(String, Option<String>, Option<String>, serde_json::Value, Option<String>)>, DbError> {
+        let org_id = if let Some(name) = org_name {
+            self.get_org_by_login(name).await?.map(|o| o.id)
+        } else {
+            None
+        };
+        let repo_id = if let Some(name) = repo_full_name {
+            self.get_repo_by_full_name(name).await?.map(|r| r.id)
+        } else {
+            None
+        };
+
+        if org_name.is_some() && org_id.is_none() {
+            return Ok(vec![]);
+        }
+        if repo_full_name.is_some() && repo_id.is_none() {
+            return Ok(vec![]);
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                c.commit_sha,
+                c.branch,
+                c.org_id::text AS org_id,
+                c.metadata,
+                r.full_name AS repo_name
+            FROM client_events c
+            LEFT JOIN repos r ON r.id = c.repo_id
+            WHERE c.event_type = 'commit'
+              AND c.commit_sha IS NOT NULL
+              AND c.created_at >= NOW() - make_interval(hours => $1)
+              AND ($2::uuid IS NULL OR c.org_id = $2::uuid)
+              AND ($3::uuid IS NULL OR c.repo_id = $3::uuid)
+            ORDER BY c.created_at DESC
+            LIMIT $4
+            "#,
+        )
+        .bind(hours)
+        .bind(&org_id)
+        .bind(&repo_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get("commit_sha"),
+                    row.get("branch"),
+                    row.get("org_id"),
+                    row.get("metadata"),
+                    row.get("repo_name"),
+                )
+            })
+            .collect())
+    }
+
+    pub async fn get_ticket_coverage(
+        &self,
+        org_name: Option<&str>,
+        repo_full_name: Option<&str>,
+        branch: Option<&str>,
+        hours: i64,
+    ) -> Result<TicketCoverageResponse, DbError> {
+        let org_id = if let Some(name) = org_name {
+            self.get_org_by_login(name).await?.map(|o| o.id)
+        } else {
+            None
+        };
+        let repo_id = if let Some(name) = repo_full_name {
+            self.get_repo_by_full_name(name).await?.map(|r| r.id)
+        } else {
+            None
+        };
+        if org_name.is_some() && org_id.is_none() {
+            return Ok(TicketCoverageResponse {
+                org: org_name.unwrap_or_default().to_string(),
+                period: format!("last_{}h", hours),
+                ..Default::default()
+            });
+        }
+        if repo_full_name.is_some() && repo_id.is_none() {
+            return Ok(TicketCoverageResponse {
+                org: org_name.unwrap_or_default().to_string(),
+                period: format!("last_{}h", hours),
+                ..Default::default()
+            });
+        }
+
+        let total_commits_row = sqlx::query(
+            r#"
+            SELECT COUNT(*)::bigint AS total
+            FROM client_events c
+            WHERE c.event_type = 'commit'
+              AND c.commit_sha IS NOT NULL
+              AND c.created_at >= NOW() - make_interval(hours => $1)
+              AND ($2::uuid IS NULL OR c.org_id = $2::uuid)
+              AND ($3::uuid IS NULL OR c.repo_id = $3::uuid)
+              AND ($4::text IS NULL OR c.branch = $4)
+            "#,
+        )
+        .bind(hours)
+        .bind(&org_id)
+        .bind(&repo_id)
+        .bind(branch)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let with_ticket_row = sqlx::query(
+            r#"
+            SELECT COUNT(DISTINCT c.commit_sha)::bigint AS covered
+            FROM client_events c
+            JOIN commit_ticket_correlations ct ON ct.commit_sha = c.commit_sha
+            WHERE c.event_type = 'commit'
+              AND c.commit_sha IS NOT NULL
+              AND c.created_at >= NOW() - make_interval(hours => $1)
+              AND ($2::uuid IS NULL OR c.org_id = $2::uuid)
+              AND ($3::uuid IS NULL OR c.repo_id = $3::uuid)
+              AND ($4::text IS NULL OR c.branch = $4)
+            "#,
+        )
+        .bind(hours)
+        .bind(&org_id)
+        .bind(&repo_id)
+        .bind(branch)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let missing_rows = sqlx::query(
+            r#"
+            SELECT c.commit_sha, c.user_login, c.branch, c.created_at
+            FROM client_events c
+            LEFT JOIN commit_ticket_correlations ct ON ct.commit_sha = c.commit_sha
+            WHERE c.event_type = 'commit'
+              AND c.commit_sha IS NOT NULL
+              AND c.created_at >= NOW() - make_interval(hours => $1)
+              AND ($2::uuid IS NULL OR c.org_id = $2::uuid)
+              AND ($3::uuid IS NULL OR c.repo_id = $3::uuid)
+              AND ($4::text IS NULL OR c.branch = $4)
+              AND ct.id IS NULL
+            ORDER BY c.created_at DESC
+            LIMIT 20
+            "#,
+        )
+        .bind(hours)
+        .bind(&org_id)
+        .bind(&repo_id)
+        .bind(branch)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let orphan_ticket_rows = sqlx::query(
+            r#"
+            SELECT pt.ticket_id, pt.status, pt.updated_at
+            FROM project_tickets pt
+            LEFT JOIN commit_ticket_correlations ct
+              ON ct.ticket_id = pt.ticket_id
+             AND (pt.org_id IS NULL OR ct.org_id = pt.org_id)
+            WHERE pt.ingested_at >= NOW() - make_interval(hours => $1)
+              AND ($2::uuid IS NULL OR pt.org_id = $2::uuid)
+              AND ct.id IS NULL
+            ORDER BY pt.ingested_at DESC
+            LIMIT 20
+            "#,
+        )
+        .bind(hours)
+        .bind(&org_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let total_commits: i64 = total_commits_row.get("total");
+        let commits_with_ticket: i64 = with_ticket_row.get("covered");
+        let coverage_percentage = if total_commits > 0 {
+            (commits_with_ticket as f64 / total_commits as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        Ok(TicketCoverageResponse {
+            org: org_name.unwrap_or("all").to_string(),
+            period: format!("last_{}h", hours),
+            total_commits,
+            commits_with_ticket,
+            coverage_percentage,
+            commits_without_ticket: missing_rows
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "commit_sha": row.get::<String, _>("commit_sha"),
+                        "user_login": row.get::<Option<String>, _>("user_login"),
+                        "branch": row.get::<Option<String>, _>("branch"),
+                        "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at").timestamp_millis(),
+                    })
+                })
+                .collect(),
+            tickets_without_commits: orphan_ticket_rows
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "ticket_id": row.get::<String, _>("ticket_id"),
+                        "status": row.get::<Option<String>, _>("status"),
+                        "updated_at": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("updated_at")
+                            .map(|dt| dt.timestamp_millis()),
+                    })
+                })
+                .collect(),
+        })
+    }
+
+    pub async fn get_commit_pipeline_correlations(
+        &self,
+        filter: &JenkinsCorrelationFilter,
+    ) -> Result<Vec<CommitPipelineCorrelation>, DbError> {
+        let limit = if filter.limit == 0 { 20 } else { filter.limit } as i64;
+        let offset = filter.offset as i64;
+
+        let org_id = if let Some(org_name) = filter.org_name.as_deref() {
+            self.get_org_by_login(org_name).await?.map(|o| o.id)
+        } else {
+            None
+        };
+        let repo_id = if let Some(repo_full_name) = filter.repo_full_name.as_deref() {
+            self.get_repo_by_full_name(repo_full_name).await?.map(|r| r.id)
+        } else {
+            None
+        };
+
+        if filter.org_name.is_some() && org_id.is_none() {
+            return Ok(vec![]);
+        }
+        if filter.repo_full_name.is_some() && repo_id.is_none() {
+            return Ok(vec![]);
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                c.id::text AS commit_event_id,
+                c.commit_sha,
+                c.created_at AS commit_created_at,
+                c.user_login,
+                c.branch,
+                r.full_name AS repo_name,
+                c.metadata AS metadata,
+                p.id::text AS pipeline_event_id,
+                p.pipeline_id,
+                p.job_name,
+                p.status AS pipeline_status,
+                p.duration_ms AS pipeline_duration_ms,
+                p.triggered_by,
+                p.ingested_at AS pipeline_ingested_at
+            FROM client_events c
+            LEFT JOIN repos r ON r.id = c.repo_id
+            LEFT JOIN LATERAL (
+                SELECT pe.*
+                FROM pipeline_events pe
+                WHERE c.commit_sha IS NOT NULL
+                  AND pe.commit_sha IS NOT NULL
+                  AND (
+                    pe.commit_sha = c.commit_sha
+                    OR pe.commit_sha LIKE c.commit_sha || '%'
+                    OR c.commit_sha LIKE pe.commit_sha || '%'
+                  )
+                ORDER BY pe.ingested_at DESC
+                LIMIT 1
+            ) p ON TRUE
+            WHERE c.event_type = 'commit'
+              AND c.commit_sha IS NOT NULL
+              AND ($1::uuid IS NULL OR c.org_id = $1::uuid)
+              AND ($2::uuid IS NULL OR c.repo_id = $2::uuid)
+              AND ($3::text IS NULL OR c.branch = $3)
+              AND ($4::text IS NULL OR c.user_login = $4)
+            ORDER BY c.created_at DESC
+            LIMIT $5 OFFSET $6
+            "#,
+        )
+        .bind(&org_id)
+        .bind(&repo_id)
+        .bind(&filter.branch)
+        .bind(&filter.user_login)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let correlations = rows
+            .into_iter()
+            .map(|row| {
+                let commit_created_at: chrono::DateTime<chrono::Utc> = row.get("commit_created_at");
+                let metadata: serde_json::Value = row.get("metadata");
+                let commit_message = metadata
+                    .as_object()
+                    .and_then(|m| m.get("commit_message"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let pipeline = row
+                    .get::<Option<String>, _>("pipeline_event_id")
+                    .map(|pipeline_event_id| {
+                        let ingested_at = row
+                            .get::<Option<chrono::DateTime<chrono::Utc>>, _>("pipeline_ingested_at")
+                            .map(|dt| dt.timestamp_millis())
+                            .unwrap_or_default();
+
+                        CommitPipelineRun {
+                            pipeline_event_id,
+                            pipeline_id: row.get("pipeline_id"),
+                            job_name: row.get("job_name"),
+                            status: row.get("pipeline_status"),
+                            duration_ms: row.get("pipeline_duration_ms"),
+                            triggered_by: row.get("triggered_by"),
+                            ingested_at,
+                        }
+                    });
+
+                CommitPipelineCorrelation {
+                    commit_event_id: row.get("commit_event_id"),
+                    commit_sha: row.get("commit_sha"),
+                    commit_message,
+                    commit_created_at: commit_created_at.timestamp_millis(),
+                    user_login: row.get("user_login"),
+                    branch: row.get("branch"),
+                    repo_name: row.get("repo_name"),
+                    pipeline,
+                }
+            })
+            .collect();
+
+        Ok(correlations)
+    }
+
+    pub async fn get_pipeline_health_stats(&self) -> Result<PipelineHealthStats, DbError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                COUNT(*) FILTER (WHERE ingested_at >= NOW() - INTERVAL '7 days')::bigint AS total_7d,
+                COUNT(*) FILTER (WHERE ingested_at >= NOW() - INTERVAL '7 days' AND status = 'success')::bigint AS success_7d,
+                COUNT(*) FILTER (WHERE ingested_at >= NOW() - INTERVAL '7 days' AND status = 'failure')::bigint AS failure_7d,
+                COUNT(*) FILTER (WHERE ingested_at >= NOW() - INTERVAL '7 days' AND status = 'aborted')::bigint AS aborted_7d,
+                COUNT(*) FILTER (WHERE ingested_at >= NOW() - INTERVAL '7 days' AND status = 'unstable')::bigint AS unstable_7d,
+                COALESCE(AVG(duration_ms) FILTER (WHERE ingested_at >= NOW() - INTERVAL '7 days' AND duration_ms IS NOT NULL), 0)::bigint AS avg_duration_ms_7d,
+                COUNT(DISTINCT repo_full_name) FILTER (WHERE ingested_at >= NOW() - INTERVAL '7 days' AND status IN ('failure','unstable') AND repo_full_name IS NOT NULL)::bigint AS repos_with_failures_7d
+            FROM pipeline_events
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await;
+
+        match row {
+            Ok(row) => Ok(PipelineHealthStats {
+                total_7d: row.get("total_7d"),
+                success_7d: row.get("success_7d"),
+                failure_7d: row.get("failure_7d"),
+                aborted_7d: row.get("aborted_7d"),
+                unstable_7d: row.get("unstable_7d"),
+                avg_duration_ms_7d: row.get("avg_duration_ms_7d"),
+                repos_with_failures_7d: row.get("repos_with_failures_7d"),
+            }),
+            Err(e) => {
+                // Keep compatibility if migration v5 was not applied yet.
+                if e.to_string().contains("pipeline_events") {
+                    Ok(PipelineHealthStats::default())
+                } else {
+                    Err(DbError::DatabaseError(e.to_string()))
+                }
+            }
+        }
+    }
+
+    // ========================================================================
     // STATS
     // ========================================================================
 

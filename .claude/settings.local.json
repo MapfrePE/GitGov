@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__github__search_repositories",
+      "mcp__github__get_file_contents",
+      "Bash(npx:*)",
+      "mcp__tailwindcss__search_tailwind_docs",
+      "mcp__tailwindcss__get_tailwind_colors"
+    ]
+  }
+}

@@ -31,3 +31,4 @@ hmac = "0.12"
 hex = "0.4"
 clap = { version = "4", features = ["derive"] }
 atty = "0.2"
+regex = "1"

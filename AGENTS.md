@@ -28,6 +28,20 @@ GitGov es un sistema de gobernanza de Git distribuido que audita y controla oper
 | Dashboard | Muestra estadísticas y eventos |
 | Pipeline E2E | Desktop → Server → PostgreSQL → Dashboard |
 
+### Golden Path (NO ROMPER)
+
+Antes de tocar auth, outbox, dashboard o endpoints del server, asumir que este flujo es crítico y debe mantenerse:
+
+1. Desktop detecta archivos cambiados
+2. Usuario puede hacer commit desde la app
+3. Usuario puede hacer push desde la app
+4. Control Plane recibe eventos (`stage_files`, `commit`, `attempt_push`, `successful_push`)
+5. Dashboard muestra logs/commits sin errores `401`
+
+**Regla para agentes:** cualquier cambio en auth/token/API key/frontend dashboard/server handlers debe validar explícitamente este flujo (o dejar documentado por qué no pudo validarlo).
+
+**Checklist operativa:** `docs/GOLDEN_PATH_CHECKLIST.md`
+
 ### Pendiente
 
 | Componente | Prioridad |

@@ -26,6 +26,62 @@ Para un auditor, un CISO, o un cliente enterprise, esto es oro.
 
 ---
 
+## Enfoque de Ejecución Recomendado (Realista)
+
+La visión de V1.2 es correcta, pero para ejecutarla sin romper lo que ya funciona en GitGov se recomienda **dividirla en entregables incrementales**.
+
+### Propuesta: V1.2-A / V1.2-B / V1.2-C
+
+#### V1.2-A — CI Traceability MVP (Jenkins-first)
+**Objetivo:** entregar valor enterprise rápido con trazabilidad `commit -> pipeline`.
+
+Incluye:
+- `pipeline_events` schema + índices + append-only
+- `POST /integrations/jenkins` (ingesta)
+- `GET /integrations/jenkins/status` (admin)
+- Correlación básica por `commit_sha`
+- Widget mínimo de Pipeline Health
+- `policy/check` en modo **advisory** (no bloqueante al inicio)
+- Idempotencia, autenticación y validación de payloads para Jenkins
+
+**No incluye aún:**
+- Enforcement duro de pipeline (fail build por policy)
+- Jira bidireccional
+- Correlation Engine V2 completo
+
+#### V1.2-B — Ticket Coverage (Jira + correlación commit↔ticket)
+**Objetivo:** responder "este commit tiene justificación?" con cobertura de tickets.
+
+Incluye:
+- `project_tickets` + `commit_ticket_correlations`
+- Webhook Jira (ingesta de cambios de tickets)
+- Extracción de tickets desde branch/message/PR (si aplica)
+- `GET /integrations/jira/tickets`
+- `GET /compliance/:org/coverage`
+- Widget de Ticket Coverage
+- Configuración `integrations.jira` en `gitgov.toml`
+- Enforcement en modo `warn` (no bloquear commits todavía)
+
+#### V1.2-C — Correlation Engine V2 + Compliance Signals
+**Objetivo:** cerrar el ciclo completo intención ↔ implementación ↔ resultado.
+
+Incluye:
+- Query/servicio de correlación V2 (no necesariamente una sola query SQL monolítica)
+- Nuevos governance signals (`done_not_deployed`, `commit_no_ticket`, etc.)
+- Timeline de compliance
+- Endurecimiento de performance (índices, materialización/cache si hace falta)
+- `policy/check` en modo bloqueante opcional por org/branch
+
+### Regla de Oro para V1.2
+
+Cada subfase debe preservar el `golden path` actual:
+- Desktop detecta cambios
+- Commit/Push funcionan
+- Eventos llegan al Control Plane
+- Dashboard muestra datos sin regresiones
+
+---
+
 ## V1.2.1 — Jenkins Integration
 
 ### Objetivo
@@ -442,24 +498,88 @@ Antes de implementar V1.2, V1.1 debe estar completo:
 - Credenciales de Jira API en .env
 - Jenkins accesible desde internet para recibir notificaciones (o webhook relay)
 
+**Hardening mínimo (obligatorio antes de exponer integraciones):**
+- Verificación de firma/secreto para webhooks Jenkins/Jira (si aplica)
+- Idempotencia por `delivery_id` / `pipeline_id + timestamp`
+- Rate limiting por endpoint de integración
+- Límites de tamaño de payload (`body size limits`)
+- Logs de auditoría para errores de integración (sin exponer secretos)
+
 ---
 
-## Estimación de Esfuerzo
+## Estimación de Esfuerzo (Revisada)
 
-| Feature | Complejidad | Tiempo estimado |
-|---------|-------------|-----------------|
-| pipeline_events schema + trigger | Baja | 2 horas |
-| POST /integrations/jenkins | Media | 4 horas |
-| POST /policy/check endpoint | Alta | 8 horas |
-| Jenkinsfile snippet + docs | Baja | 2 horas |
-| project_tickets schema | Baja | 2 horas |
-| Jira webhook handler | Media | 6 horas |
-| Ticket extraction logic | Media | 4 horas |
-| Correlation Engine V2 query | Alta | 8 horas |
-| Nuevos governance signals | Media | 6 horas |
-| Dashboard widgets | Media | 8 horas |
-| gitgov.toml integrations section | Baja | 2 horas |
-| **Total** | | **~52 horas** |
+> La estimación original (`~52h`) es útil como referencia de prototipo, pero es optimista para una entrega estable.  
+> Abajo se separa por subfases con hardening y validación.
+
+### V1.2-A — Jenkins-first MVP
+
+| Bloque | Complejidad | Tiempo estimado |
+|--------|-------------|-----------------|
+| `pipeline_events` schema + trigger + migración | Baja | 4-8 horas |
+| `POST /integrations/jenkins` + validaciones + auth | Media | 8-16 horas |
+| Idempotencia + dedupe + tests de integración | Media | 6-12 horas |
+| Correlación básica por `commit_sha` | Media | 6-12 horas |
+| Widget Pipeline Health (MVP) | Media | 6-10 horas |
+| `POST /policy/check` en modo advisory | Alta | 12-24 horas |
+| Docs/snippet Jenkins + ejemplo cliente | Baja | 2-4 horas |
+| **Subtotal V1.2-A** | | **44-86 horas** |
+
+### V1.2-B — Jira + Ticket Coverage
+
+| Bloque | Complejidad | Tiempo estimado |
+|--------|-------------|-----------------|
+| `project_tickets` + `commit_ticket_correlations` | Baja | 4-8 horas |
+| Webhook Jira + validación de payloads | Media | 10-18 horas |
+| Extracción de tickets (regex + tests + edge cases) | Media | 8-14 horas |
+| Correlación ticket↔commit y endpoint tickets | Media | 8-16 horas |
+| `GET /compliance/:org/coverage` + exportable | Media | 8-14 horas |
+| Widget Ticket Coverage + UI | Media | 6-12 horas |
+| Config `gitgov.toml` + enforcement warn | Media | 6-12 horas |
+| **Subtotal V1.2-B** | | **50-94 horas** |
+
+### V1.2-C — Correlation Engine V2 + Signals
+
+| Bloque | Complejidad | Tiempo estimado |
+|--------|-------------|-----------------|
+| Servicio/query de correlación V2 | Alta | 16-32 horas |
+| Nuevos governance signals | Media/Alta | 12-24 horas |
+| Timeline de compliance + widgets finales | Media | 8-16 horas |
+| Optimización (índices/materialización/cache) | Alta | 12-24 horas |
+| Endurecimiento final + pruebas E2E multi-integración | Alta | 12-24 horas |
+| **Subtotal V1.2-C** | | **60-120 horas** |
+
+### Resumen de estimación realista
+
+| Versión | Tiempo estimado |
+|---------|-----------------|
+| V1.2-A (MVP vendible) | **44-86 horas** |
+| V1.2-A + V1.2-B | **94-180 horas** acumuladas |
+| V1.2 completo (A+B+C) | **154-300 horas** acumuladas |
+
+---
+
+## Criterios de Aceptación por Subfase
+
+### Aceptación V1.2-A
+- Jenkins puede enviar un pipeline event válido y GitGov lo persiste sin duplicados.
+- Un commit reciente aparece correlacionado con su pipeline por `commit_sha`.
+- Dashboard muestra métricas básicas de pipelines (success/failure/duración).
+- `policy/check` responde en < 500ms p95 en modo advisory sobre entorno demo.
+- Fallas de Jenkins no rompen el flujo base Desktop → Server → Dashboard.
+
+### Aceptación V1.2-B
+- GitGov identifica tickets en branch/commit message con tests de regex.
+- `coverage` reporta `%` de commits con ticket por período.
+- Webhook Jira actualiza tickets sin duplicados críticos.
+- Commits sin ticket generan signal/warning configurable (sin falsos positivos excesivos).
+- Configuración en `gitgov.toml` puede desactivar Jira por repo/org sin reinicios peligrosos.
+
+### Aceptación V1.2-C
+- Correlation Engine V2 produce señales útiles sobre datos reales (demo org).
+- Query/servicio responde con tiempos aceptables (definir p95 por tamaño de org).
+- Dashboard de compliance muestra timeline y señales sin degradar el dashboard actual.
+- Endurecimiento completo validado: auth, idempotencia, rate limits, payload limits, logs sanitizados.
 
 ---
 

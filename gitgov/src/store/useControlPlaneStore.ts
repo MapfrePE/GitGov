@@ -28,18 +28,104 @@ interface ViolationStats {
   critical: number
 }
 
+interface PipelineHealthStats {
+  total_7d: number
+  success_7d: number
+  failure_7d: number
+  aborted_7d: number
+  unstable_7d: number
+  avg_duration_ms_7d: number
+  repos_with_failures_7d: number
+}
+
 interface ServerStats {
   github_events: GitHubEventStats
   client_events: ClientEventStats
   violations: ViolationStats
+  pipeline?: PipelineHealthStats
   active_devs_week: number
   active_repos: number
+}
+
+interface CommitPipelineRun {
+  pipeline_event_id: string
+  pipeline_id: string
+  job_name: string
+  status: string
+  duration_ms?: number | null
+  triggered_by?: string | null
+  ingested_at: number
+}
+
+interface CommitPipelineCorrelation {
+  commit_event_id: string
+  commit_sha: string
+  commit_message?: string | null
+  commit_created_at: number
+  user_login: string
+  branch?: string | null
+  repo_name?: string | null
+  pipeline?: CommitPipelineRun | null
+}
+
+interface TicketCoverageItem extends Record<string, unknown> {}
+
+interface TicketCoverageStats {
+  org: string
+  period: string
+  total_commits: number
+  commits_with_ticket: number
+  coverage_percentage: number
+  commits_without_ticket: TicketCoverageItem[]
+  tickets_without_commits: TicketCoverageItem[]
+}
+
+interface JiraCorrelateResponse {
+  scanned_commits: number
+  correlations_created: number
+  correlated_tickets: string[]
+}
+
+interface JiraTicketDetail {
+  id: string
+  org_id?: string | null
+  ticket_id: string
+  ticket_url?: string | null
+  title?: string | null
+  status?: string | null
+  assignee?: string | null
+  reporter?: string | null
+  priority?: string | null
+  ticket_type?: string | null
+  related_commits: string[]
+  related_prs: string[]
+  related_branches: string[]
+  created_at?: number | null
+  updated_at?: number | null
+  ingested_at: number
+}
+
+interface JiraTicketDetailResponse {
+  found: boolean
+  ticket?: JiraTicketDetail | null
+}
+
+interface JiraCoverageFilters {
+  hours: number
+  repo_full_name: string
+  branch: string
 }
 
 interface ControlPlaneState {
   serverConfig: ServerConfig | null
   serverStats: ServerStats | null
   serverLogs: CombinedEvent[]
+  jenkinsCorrelations: CommitPipelineCorrelation[]
+  ticketCoverage: TicketCoverageStats | null
+  jiraCoverageFilters: JiraCoverageFilters
+  jiraTicketDetails: Record<string, JiraTicketDetail | null>
+  jiraTicketDetailFetchedAt: Record<string, number>
+  jiraTicketDetailLoading: Record<string, boolean>
   isConnected: boolean
   isLoading: boolean
   error: string | null
@@ -51,11 +137,18 @@ interface ControlPlaneActions {
   checkConnection: () => Promise<void>
   loadStats: () => Promise<void>
   loadLogs: (limit?: number) => Promise<void>
+  loadJenkinsCorrelations: (limit?: number) => Promise<void>
+  loadTicketCoverage: (params?: { hours?: number; repo_full_name?: string; branch?: string; org_name?: string }) => Promise<void>
+  applyTicketCoverageFilters: (filters: Partial<JiraCoverageFilters>) => Promise<void>
+  correlateJiraTickets: (params?: { hours?: number; limit?: number; repo_full_name?: string; org_name?: string }) => Promise<JiraCorrelateResponse | null>
+  loadJiraTicketDetail: (ticketId: string) => Promise<JiraTicketDetail | null>
   clearError: () => void
   disconnect: () => void
 }
 
 const CONTROL_PLANE_CONFIG_STORAGE_KEY = 'gitgov.control_plane_config'
+const JIRA_COVERAGE_FILTERS_STORAGE_KEY = 'gitgov.jira_coverage_filters'
+const JIRA_TICKET_DETAIL_TTL_MS = 2 * 60 * 1000
 
 // Compatibility fallback: existing desktop setups relied on this default key.
 // Keep it as last-resort fallback so the dashboard/logs continue working.
@@ -88,6 +181,29 @@ function persistServerConfig(config: ServerConfig | null) {
   }
 }
 
+function readStoredJiraCoverageFilters(): JiraCoverageFilters {
+  try {
+    const raw = window.localStorage.getItem(JIRA_COVERAGE_FILTERS_STORAGE_KEY)
+    if (!raw) return { hours: 72, repo_full_name: '', branch: '' }
+    const parsed = JSON.parse(raw) as Partial<JiraCoverageFilters>
+    return {
+      hours: typeof parsed.hours === 'number' && Number.isFinite(parsed.hours) ? parsed.hours : 72,
+      repo_full_name: typeof parsed.repo_full_name === 'string' ? parsed.repo_full_name : '',
+      branch: typeof parsed.branch === 'string' ? parsed.branch : '',
+    }
+  } catch {
+    return { hours: 72, repo_full_name: '', branch: '' }
+  }
+}
+
+function persistJiraCoverageFilters(filters: JiraCoverageFilters) {
+  try {
+    window.localStorage.setItem(JIRA_COVERAGE_FILTERS_STORAGE_KEY, JSON.stringify(filters))
+  } catch {
+    // ignore
+  }
+}
+
 function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: ServerConfig | null): ServerConfig {
   const stored = readStoredServerConfig()
   const url =
@@ -114,6 +230,12 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   serverConfig: null,
   serverStats: null,
   serverLogs: [],
+  jenkinsCorrelations: [],
+  ticketCoverage: null,
+  jiraCoverageFilters: readStoredJiraCoverageFilters(),
+  jiraTicketDetails: {},
+  jiraTicketDetailFetchedAt: {},
+  jiraTicketDetailLoading: {},
   isConnected: false,
   isLoading: false,
   error: null,
@@ -143,6 +265,13 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       set({ isConnected: healthy, isLoading: false })
       if (healthy) {
         get().loadStats()
+        get().loadJenkinsCorrelations(50)
+        const { jiraCoverageFilters } = get()
+        get().loadTicketCoverage({
+          hours: jiraCoverageFilters.hours,
+          repo_full_name: jiraCoverageFilters.repo_full_name || undefined,
+          branch: jiraCoverageFilters.branch || undefined,
+        })
       }
     } catch (e) {
       set({ error: parseCommandError(String(e)).message, isLoading: false, isConnected: false })
@@ -177,10 +306,155 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     }
   },
 
+  loadJenkinsCorrelations: async (limit = 50) => {
+    const { serverConfig } = get()
+    if (!serverConfig) return
+
+    try {
+      const correlations = await tauriInvoke<CommitPipelineCorrelation[]>('cmd_server_get_jenkins_correlations', {
+        config: serverConfig,
+        filter: { limit, offset: 0 },
+      })
+      set({ jenkinsCorrelations: correlations })
+    } catch {
+      // Non-fatal for the dashboard core flow; leave existing data as-is.
+    }
+  },
+
+  loadTicketCoverage: async (params) => {
+    const { serverConfig } = get()
+    if (!serverConfig) return
+
+    const hours = params?.hours ?? 72
+    try {
+      const coverage = await tauriInvoke<TicketCoverageStats>('cmd_server_get_jira_ticket_coverage', {
+        config: serverConfig,
+        query: {
+          hours,
+          repo_full_name: params?.repo_full_name,
+          branch: params?.branch,
+          org_name: params?.org_name,
+        },
+      })
+      set({ ticketCoverage: coverage })
+    } catch {
+      // Non-fatal for dashboard core flow
+    }
+  },
+
+  applyTicketCoverageFilters: async (filters) => {
+    const next = {
+      ...get().jiraCoverageFilters,
+      ...filters,
+    }
+    persistJiraCoverageFilters(next)
+    set({ jiraCoverageFilters: next })
+    await get().loadTicketCoverage({
+      hours: next.hours,
+      repo_full_name: next.repo_full_name || undefined,
+      branch: next.branch || undefined,
+    })
+  },
+
+  correlateJiraTickets: async (params) => {
+    const { serverConfig } = get()
+    if (!serverConfig) return null
+
+    try {
+      const response = await tauriInvoke<JiraCorrelateResponse>('cmd_server_correlate_jira_tickets', {
+        config: serverConfig,
+        request: {
+          hours: params?.hours ?? 72,
+          limit: params?.limit ?? 500,
+          repo_full_name: params?.repo_full_name,
+          org_name: params?.org_name,
+        },
+      })
+      await get().loadTicketCoverage({
+        hours: params?.hours ?? 72,
+        repo_full_name: params?.repo_full_name,
+        branch: undefined,
+        org_name: params?.org_name,
+      })
+      return response
+    } catch (e) {
+      set({ error: parseCommandError(String(e)).message })
+      return null
+    }
+  },
+
+  loadJiraTicketDetail: async (ticketId) => {
+    const { serverConfig, jiraTicketDetails, jiraTicketDetailFetchedAt } = get()
+    if (!serverConfig) return null
+    const normalized = ticketId.trim().toUpperCase()
+    if (!normalized) return null
+    const fetchedAt = jiraTicketDetailFetchedAt[normalized] ?? 0
+    const isFresh = Date.now() - fetchedAt < JIRA_TICKET_DETAIL_TTL_MS
+    if (isFresh && Object.prototype.hasOwnProperty.call(jiraTicketDetails, normalized)) {
+      return jiraTicketDetails[normalized] ?? null
+    }
+    set((state) => ({
+      jiraTicketDetailLoading: {
+        ...state.jiraTicketDetailLoading,
+        [normalized]: true,
+      },
+    }))
+    try {
+      const resp = await tauriInvoke<JiraTicketDetailResponse>('cmd_server_get_jira_ticket_detail', {
+        config: serverConfig,
+        ticketId: normalized,
+      })
+      const ticket = resp.found ? resp.ticket ?? null : null
+      set((state) => ({
+        jiraTicketDetails: {
+          ...state.jiraTicketDetails,
+          [normalized]: ticket,
+        },
+        jiraTicketDetailFetchedAt: {
+          ...state.jiraTicketDetailFetchedAt,
+          [normalized]: Date.now(),
+        },
+        jiraTicketDetailLoading: {
+          ...state.jiraTicketDetailLoading,
+          [normalized]: false,
+        },
+      }))
+      return ticket
+    } catch {
+      set((state) => ({
+        jiraTicketDetails: {
+          ...state.jiraTicketDetails,
+          [normalized]: null,
+        },
+        jiraTicketDetailFetchedAt: {
+          ...state.jiraTicketDetailFetchedAt,
+          [normalized]: Date.now(),
+        },
+        jiraTicketDetailLoading: {
+          ...state.jiraTicketDetailLoading,
+          [normalized]: false,
+        },
+      }))
+      return null
+    }
+  },
+
   clearError: () => set({ error: null }),
 
   disconnect: () => {
     persistServerConfig(null)
-    set({ serverConfig: null, isConnected: false, serverStats: null, serverLogs: [], error: null })
+    set({
+      serverConfig: null,
+      isConnected: false,
+      serverStats: null,
+      serverLogs: [],
+      jenkinsCorrelations: [],
+      ticketCoverage: null,
+      jiraCoverageFilters: readStoredJiraCoverageFilters(),
+      jiraTicketDetails: {},
+      jiraTicketDetailFetchedAt: {},
+      jiraTicketDetailLoading: {},
+      error: null,
+    })
   },
 }))

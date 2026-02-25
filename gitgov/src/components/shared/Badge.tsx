@@ -2,17 +2,18 @@ import { forwardRef } from 'react'
 import type { HTMLAttributes } from 'react'
 import clsx from 'clsx'
 
-type BadgeVariant = 'success' | 'warning' | 'danger' | 'neutral'
+type BadgeVariant = 'success' | 'warning' | 'danger' | 'neutral' | 'info'
 
 interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
   variant?: BadgeVariant
 }
 
 const variantClasses: Record<BadgeVariant, string> = {
-  success: 'bg-success-500/20 text-success-400',
-  warning: 'bg-warning-500/20 text-warning-400',
-  danger: 'bg-danger-500/20 text-danger-400',
-  neutral: 'bg-surface-600/50 text-surface-300',
+  success: 'bg-success-500/15 text-success-400 ring-1 ring-success-500/20',
+  warning: 'bg-warning-500/15 text-warning-400 ring-1 ring-warning-500/20',
+  danger: 'bg-danger-500/15 text-danger-400 ring-1 ring-danger-500/20',
+  neutral: 'bg-surface-600/40 text-surface-300 ring-1 ring-surface-500/20',
+  info: 'bg-brand-500/15 text-brand-400 ring-1 ring-brand-500/20',
 }
 
 export const Badge = forwardRef<HTMLSpanElement, BadgeProps>(
@@ -21,7 +22,7 @@ export const Badge = forwardRef<HTMLSpanElement, BadgeProps>(
       <span
         ref={ref}
         className={clsx(
-          'inline-flex items-center px-2 py-0.5 rounded text-xs font-medium',
+          'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium',
           variantClasses[variant],
           className
         )}

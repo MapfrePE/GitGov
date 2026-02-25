@@ -354,6 +354,8 @@ pub struct AuditStats {
     pub github_events: GitHubEventStats,
     pub client_events: ClientEventStats,
     pub violations: ViolationStats,
+    #[serde(default)]
+    pub pipeline: PipelineHealthStats,
     pub active_devs_week: i64,
     pub active_repos: i64,
 }
@@ -383,6 +385,17 @@ pub struct ViolationStats {
     pub total: i64,
     pub unresolved: i64,
     pub critical: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PipelineHealthStats {
+    pub total_7d: i64,
+    pub success_7d: i64,
+    pub failure_7d: i64,
+    pub aborted_7d: i64,
+    pub unstable_7d: i64,
+    pub avg_duration_ms_7d: i64,
+    pub repos_with_failures_7d: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -799,6 +812,294 @@ pub struct AuditStreamResponse {
     pub accepted: i32,
     pub filtered: i32,
     pub errors: Vec<String>,
+}
+
+// ============================================================================
+// PIPELINE EVENTS (V1.2-A Jenkins Integration)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineEvent {
+    pub id: String,
+    pub org_id: Option<String>,
+    pub pipeline_id: String,
+    pub job_name: String,
+    pub status: PipelineStatus,
+    pub commit_sha: Option<String>,
+    pub branch: Option<String>,
+    pub repo_full_name: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub triggered_by: Option<String>,
+    #[serde(default)]
+    pub stages: Vec<PipelineStage>,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    pub ingested_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineStatus {
+    Success,
+    Failure,
+    Aborted,
+    Unstable,
+}
+
+impl PipelineStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PipelineStatus::Success => "success",
+            PipelineStatus::Failure => "failure",
+            PipelineStatus::Aborted => "aborted",
+            PipelineStatus::Unstable => "unstable",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "success" => Some(PipelineStatus::Success),
+            "failure" => Some(PipelineStatus::Failure),
+            "aborted" => Some(PipelineStatus::Aborted),
+            "unstable" => Some(PipelineStatus::Unstable),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineStage {
+    pub name: String,
+    pub status: String,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JenkinsPipelineEventInput {
+    pub pipeline_id: String,
+    pub job_name: String,
+    pub status: String,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub repo_full_name: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+    #[serde(default)]
+    pub triggered_by: Option<String>,
+    #[serde(default)]
+    pub stages: Vec<PipelineStage>,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+    #[serde(default)]
+    pub timestamp: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JenkinsPipelineEventResponse {
+    pub accepted: bool,
+    pub duplicate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JenkinsIntegrationStatusResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub last_ingest_at: Option<i64>,
+    #[serde(default)]
+    pub recent_events_24h: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JenkinsCorrelationFilter {
+    pub org_name: Option<String>,
+    pub repo_full_name: Option<String>,
+    pub branch: Option<String>,
+    pub user_login: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitPipelineCorrelation {
+    pub commit_event_id: String,
+    pub commit_sha: String,
+    pub commit_message: Option<String>,
+    pub commit_created_at: i64,
+    pub user_login: String,
+    pub branch: Option<String>,
+    pub repo_name: Option<String>,
+    pub pipeline: Option<CommitPipelineRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitPipelineRun {
+    pub pipeline_event_id: String,
+    pub pipeline_id: String,
+    pub job_name: String,
+    pub status: String,
+    pub duration_ms: Option<i64>,
+    pub triggered_by: Option<String>,
+    pub ingested_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JenkinsCorrelationsResponse {
+    pub correlations: Vec<CommitPipelineCorrelation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyCheckRequest {
+    pub repo: String,
+    #[serde(default)]
+    pub commit: Option<String>,
+    pub branch: String,
+    #[serde(default)]
+    pub user_login: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicyCheckResponse {
+    pub advisory: bool,
+    pub allowed: bool,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub evaluated_rules: Vec<String>,
+}
+
+// ============================================================================
+// JIRA / TICKET COVERAGE (V1.2-B groundwork)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectTicket {
+    pub id: String,
+    pub org_id: Option<String>,
+    pub ticket_id: String,
+    pub ticket_url: Option<String>,
+    pub title: Option<String>,
+    pub status: Option<String>,
+    pub assignee: Option<String>,
+    pub reporter: Option<String>,
+    pub priority: Option<String>,
+    pub ticket_type: Option<String>,
+    #[serde(default)]
+    pub related_commits: Vec<String>,
+    #[serde(default)]
+    pub related_prs: Vec<String>,
+    #[serde(default)]
+    pub related_branches: Vec<String>,
+    pub created_at: Option<i64>,
+    pub updated_at: Option<i64>,
+    pub ingested_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitTicketCorrelation {
+    pub id: String,
+    pub org_id: Option<String>,
+    pub commit_sha: String,
+    pub ticket_id: String,
+    pub correlation_source: String,
+    pub confidence: f64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JiraWebhookEvent {
+    #[serde(default)]
+    pub webhook_event: Option<String>,
+    #[serde(default)]
+    pub timestamp: Option<i64>,
+    #[serde(default)]
+    pub issue: Option<serde_json::Value>,
+    #[serde(default)]
+    pub user: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JiraWebhookIngestResponse {
+    pub accepted: bool,
+    pub duplicate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JiraIntegrationStatusResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub last_ingest_at: Option<i64>,
+    #[serde(default)]
+    pub recent_tickets_24h: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JiraTicketDetailResponse {
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<ProjectTicket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TicketCoverageResponse {
+    pub org: String,
+    pub period: String,
+    pub total_commits: i64,
+    pub commits_with_ticket: i64,
+    pub coverage_percentage: f64,
+    #[serde(default)]
+    pub commits_without_ticket: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub tickets_without_commits: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JiraCorrelateRequest {
+    #[serde(default)]
+    pub org_name: Option<String>,
+    #[serde(default)]
+    pub repo_full_name: Option<String>,
+    #[serde(default)]
+    pub hours: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JiraCorrelateResponse {
+    pub scanned_commits: i64,
+    pub correlations_created: i64,
+    #[serde(default)]
+    pub correlated_tickets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TicketCoverageQuery {
+    #[serde(default)]
+    pub org_name: Option<String>,
+    #[serde(default)]
+    pub repo_full_name: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub hours: Option<i64>,
 }
 
 pub const RELEVANT_AUDIT_ACTIONS: &[&str] = &[
