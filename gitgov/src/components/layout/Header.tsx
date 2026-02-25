@@ -18,27 +18,28 @@ export function Header({ children }: HeaderProps) {
   }
 
   return (
-    <header className="h-13 glass border-b border-surface-700/50 flex items-center justify-between px-5">
+    <header className="h-12 glass flex items-center justify-between px-5">
       <div className="flex items-center gap-4">
-        <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-surface-800/60">
-          <FolderOpen size={14} className="text-surface-400" />
-          <span className="text-sm text-white font-medium truncate max-w-[200px]">
+        <div className="flex items-center gap-2 text-surface-400">
+          <FolderOpen size={13} strokeWidth={1.5} />
+          <span className="text-xs text-surface-300 font-medium truncate max-w-[200px]">
             {repoPath?.split('/').pop() || 'Repositorio'}
           </span>
         </div>
 
         {currentBranch && user && (
-          <div className="relative">
+          <>
+            <div className="w-px h-4 bg-surface-700/50" />
             <BranchSelector
               userLogin={user.login}
               isAdmin={user.is_admin}
               userGroup={user.group}
             />
-          </div>
+          </>
         )}
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2">
         {children}
 
         <Button
@@ -47,24 +48,27 @@ export function Header({ children }: HeaderProps) {
           onClick={handleRefresh}
           loading={isLoadingStatus}
         >
-          <RefreshCw size={14} />
+          <RefreshCw size={13} strokeWidth={1.5} />
           Actualizar
         </Button>
 
         {user && (
-          <div className="flex items-center gap-2.5 pl-3 border-l border-surface-700/50">
-            <img
-              src={user.avatar_url}
-              alt={user.login}
-              className="w-7 h-7 rounded-full ring-2 ring-surface-600"
-            />
-            <span className="text-sm text-surface-300 font-medium">{user.login}</span>
-            {user.is_admin && (
-              <span className="text-[10px] font-semibold bg-brand-500/15 text-brand-400 px-2 py-0.5 rounded-full ring-1 ring-brand-500/20">
-                Admin
-              </span>
-            )}
-          </div>
+          <>
+            <div className="w-px h-4 bg-surface-700/50 mx-1" />
+            <div className="flex items-center gap-2">
+              <img
+                src={user.avatar_url}
+                alt={user.login}
+                className="w-6 h-6 rounded-full"
+              />
+              <span className="text-xs text-surface-400 font-medium">{user.login}</span>
+              {user.is_admin && (
+                <span className="text-[10px] font-medium bg-brand-500/10 text-brand-400 px-1.5 py-0.5 rounded">
+                  Admin
+                </span>
+              )}
+            </div>
+          </>
         )}
       </div>
     </header>

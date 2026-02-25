@@ -71,14 +71,14 @@ export function CommitPanel() {
   }
 
   return (
-    <div className="border-t border-surface-700/50 bg-surface-900 px-5 py-4">
+    <div className="border-t border-surface-700/30 bg-surface-900/50 px-5 py-4">
       <div className="flex gap-4">
-        <div className="flex-1 space-y-2.5">
+        <div className="flex-1 space-y-2">
           <div className="flex gap-2">
             <select
               value={commitType}
               onChange={(e) => setCommitType(e.target.value)}
-              className="px-2.5 py-2 bg-surface-800 border border-surface-700 rounded-lg text-white text-sm focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/15 transition-all"
+              className="px-2.5 py-2 bg-surface-800 border border-surface-700/50 rounded-lg text-white text-xs focus:outline-none focus:border-brand-500/50 transition-colors"
             >
               {COMMIT_TYPES.map((type) => (
                 <option key={type.value} value={type.value}>
@@ -96,17 +96,17 @@ export function CommitPanel() {
                 }
               }}
               placeholder="descripción del cambio"
-              className="flex-1 px-3 py-2 bg-surface-800 border border-surface-700 rounded-lg text-white placeholder-surface-500 focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/15 transition-all"
+              className="flex-1 px-3 py-2 bg-surface-800 border border-surface-700/50 rounded-lg text-white text-xs placeholder-surface-600 focus:outline-none focus:border-brand-500/50 transition-colors"
             />
           </div>
 
-          <div className="flex items-center gap-2 text-xs px-0.5">
-            <span className="text-surface-500">Preview:</span>
+          <div className="flex items-center gap-2 text-[11px] px-0.5">
+            <span className="text-surface-600">Preview:</span>
             <code className={clsx(
-              'px-2 py-0.5 rounded-md font-mono transition-colors',
+              'px-1.5 py-0.5 rounded mono-data text-[11px] transition-colors',
               isValidMessage
-                ? 'bg-success-500/10 text-success-400 ring-1 ring-success-500/20'
-                : 'bg-surface-800 text-surface-500'
+                ? 'bg-success-500/10 text-success-400'
+                : 'bg-surface-800/50 text-surface-600'
             )}>
               {fullMessage || 'mensaje vacío'}
             </code>
@@ -122,7 +122,7 @@ export function CommitPanel() {
               disabled={!hasStagedFiles}
               title="Limpiar staging"
             >
-              <RotateCcw size={14} />
+              <RotateCcw size={13} strokeWidth={1.5} />
             </Button>
 
             <Button
@@ -131,7 +131,7 @@ export function CommitPanel() {
               loading={isCommitting}
               disabled={!hasStagedFiles || !isValidMessage}
             >
-              <GitCommit size={14} />
+              <GitCommit size={13} strokeWidth={1.5} />
               Commit ({stagedFiles.size})
             </Button>
           </div>
@@ -143,7 +143,7 @@ export function CommitPanel() {
             loading={isPushing}
             disabled={!lastCommitHash && !hasUncommittedChanges}
           >
-            <Upload size={14} />
+            <Upload size={13} strokeWidth={1.5} />
             Push
           </Button>
         </div>

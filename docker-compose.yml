@@ -43,5 +43,32 @@ services:
     ports:
       - "3000:3000"
 
+  jira:
+    image: atlassian/jira-software:latest
+    container_name: gitgov-jira
+    restart: unless-stopped
+    profiles: ["jira"]
+    environment:
+      JVM_MINIMUM_MEMORY: 1024m
+      JVM_MAXIMUM_MEMORY: 2048m
+    ports:
+      - "8095:8080"
+    volumes:
+      - gitgov_jira_data:/var/atlassian/application-data/jira
+
+  jenkins:
+    image: jenkins/jenkins:lts-jdk17
+    container_name: gitgov-jenkins
+    restart: unless-stopped
+    profiles: ["jenkins"]
+    environment:
+      JAVA_OPTS: "-Djenkins.install.runSetupWizard=true"
+    ports:
+      - "8096:8080"
+    volumes:
+      - gitgov_jenkins_data:/var/jenkins_home
+
 volumes:
   gitgov_postgres_data:
+  gitgov_jira_data:
+  gitgov_jenkins_data:

@@ -5,7 +5,10 @@
       "mcp__github__get_file_contents",
       "Bash(npx:*)",
       "mcp__tailwindcss__search_tailwind_docs",
-      "mcp__tailwindcss__get_tailwind_colors"
+      "mcp__tailwindcss__get_tailwind_colors",
+      "Bash(npm run lint)",
+      "Bash(export PATH:*)",
+      "Bash(export PATH=\"/c/Program Files/nodejs:/usr/bin:$PATH\")"
     ]
   }
 }

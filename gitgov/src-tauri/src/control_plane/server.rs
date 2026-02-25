@@ -1,5 +1,6 @@
 use crate::models::{AuditAction, AuditLogEntry, AuditStatus, GitGovConfig};
 use serde::{Deserialize, Serialize};
+use std::{sync::OnceLock, time::Duration};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -271,11 +272,44 @@ pub struct ControlPlaneClient {
     client: reqwest::blocking::Client,
 }
 
+fn shared_http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()
+            .expect("failed to build shared control plane HTTP client")
+    })
+}
+
+fn normalize_loopback_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let Ok(mut parsed) = reqwest::Url::parse(trimmed) else {
+        return trimmed.to_string();
+    };
+
+    if parsed.host_str() == Some("localhost") {
+        if parsed.set_host(Some("127.0.0.1")).is_ok() {
+            return parsed.to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
 impl ControlPlaneClient {
-    pub fn new(config: ServerConfig) -> Self {
+    pub fn new(mut config: ServerConfig) -> Self {
+        config.url = normalize_loopback_url(&config.url);
         Self {
             config,
-            client: reqwest::blocking::Client::new(),
+            client: shared_http_client().clone(),
         }
     }
 

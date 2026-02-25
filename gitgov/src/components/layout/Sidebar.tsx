@@ -14,70 +14,51 @@ export function Sidebar() {
   ]
 
   return (
-    <div className="w-56 bg-surface-900 border-r border-surface-700/50 flex flex-col">
+    <div className="w-14 bg-surface-950 border-r border-white/[0.04] flex flex-col items-center py-3">
       {/* Logo */}
-      <div className="px-4 py-5 border-b border-surface-700/50">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-linear-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-lg shadow-brand-600/20">
-            <FolderGit2 size={18} className="text-white" />
-          </div>
-          <div>
-            <span className="text-sm font-bold text-white tracking-tight">GitGov</span>
-            <span className="block text-[10px] text-surface-500 font-medium">Governance Platform</span>
-          </div>
-        </div>
+      <div className="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center mb-6">
+        <FolderGit2 size={15} className="text-white" />
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-3 py-4 space-y-1">
-        <p className="px-3 mb-2 text-[10px] font-semibold text-surface-500 uppercase tracking-wider">Navegación</p>
+      <nav className="flex-1 flex flex-col items-center gap-1">
         {navItems.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
+            title={item.label}
             className={({ isActive }) =>
               clsx(
-                'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150',
+                'w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-200',
                 isActive
-                  ? 'bg-brand-600/15 text-brand-400'
-                  : 'text-surface-400 hover:bg-surface-800 hover:text-white'
+                  ? 'bg-white/[0.08] text-white'
+                  : 'text-surface-500 hover:text-surface-300 hover:bg-white/[0.04]'
               )
             }
           >
-            <item.icon size={18} />
-            <span>{item.label}</span>
+            <item.icon size={18} strokeWidth={1.5} />
           </NavLink>
         ))}
       </nav>
 
-      {/* User section */}
+      {/* User + Logout */}
       {user && (
-        <div className="px-3 py-4 border-t border-surface-700/50">
-          <div className="flex items-center gap-3 px-3 mb-3">
-            <img
-              src={user.avatar_url}
-              alt={user.login}
-              className="w-8 h-8 rounded-full ring-2 ring-surface-700"
-            />
-            <div className="flex-1 min-w-0">
-              <p className="text-sm text-white font-medium truncate">{user.name || user.login}</p>
-              <p className="text-[11px] text-surface-500 truncate">@{user.login}</p>
-            </div>
-          </div>
+        <div className="flex flex-col items-center gap-2 mt-auto">
+          <img
+            src={user.avatar_url}
+            alt={user.login}
+            title={user.login}
+            className="w-7 h-7 rounded-full opacity-70 hover:opacity-100 transition-opacity"
+          />
           <button
             onClick={logout}
-            className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm text-surface-400 hover:bg-surface-800 hover:text-white transition-all duration-150"
+            title="Cerrar sesión"
+            className="w-9 h-9 flex items-center justify-center rounded-lg text-surface-600 hover:text-surface-400 hover:bg-white/[0.04] transition-all duration-200"
           >
-            <LogOut size={16} />
-            <span>Cerrar sesión</span>
+            <LogOut size={16} strokeWidth={1.5} />
           </button>
         </div>
       )}
-
-      {/* Version */}
-      <div className="px-6 py-2 border-t border-surface-700/50">
-        <p className="text-[10px] text-surface-600">v1.2-A</p>
-      </div>
     </div>
   )
 }

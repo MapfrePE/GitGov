@@ -8,17 +8,17 @@ import { FolderGit2 } from 'lucide-react'
 
 function SplashScreen() {
   return (
-    <div className="min-h-screen bg-surface-950 flex flex-col items-center justify-center">
+    <div className="min-h-[100dvh] bg-surface-950 flex flex-col items-center justify-center">
       <div className="animate-scale-in flex flex-col items-center">
-        <div className="w-16 h-16 rounded-2xl bg-linear-to-br from-brand-500 to-brand-700 flex items-center justify-center mb-5 shadow-xl shadow-brand-600/20">
-          <FolderGit2 size={32} className="text-white" />
+        <div className="w-12 h-12 rounded-xl bg-brand-600 flex items-center justify-center mb-5">
+          <FolderGit2 size={24} className="text-white" />
         </div>
-        <h1 className="text-2xl font-bold text-white mb-1 tracking-tight">GitGov</h1>
-        <p className="text-sm text-surface-500 mb-6">Governance Platform</p>
-        <div className="flex gap-1">
-          <div className="w-2 h-2 rounded-full bg-brand-500 animate-pulse" />
-          <div className="w-2 h-2 rounded-full bg-brand-500/60 animate-pulse [animation-delay:150ms]" />
-          <div className="w-2 h-2 rounded-full bg-brand-500/30 animate-pulse [animation-delay:300ms]" />
+        <h1 className="text-xl font-semibold text-white mb-1 tracking-tight">GitGov</h1>
+        <p className="text-xs text-surface-500 mb-8">Governance Platform</p>
+        <div className="flex gap-1.5">
+          <div className="w-1.5 h-1.5 rounded-full bg-surface-500 animate-pulse" />
+          <div className="w-1.5 h-1.5 rounded-full bg-surface-600 animate-pulse [animation-delay:150ms]" />
+          <div className="w-1.5 h-1.5 rounded-full bg-surface-700 animate-pulse [animation-delay:300ms]" />
         </div>
       </div>
     </div>

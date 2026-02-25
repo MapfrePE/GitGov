@@ -51,6 +51,19 @@ pub struct StoredToken {
     pub expires_at: i64,
 }
 
+fn is_keyring_no_entry_error(error: &keyring::Error) -> bool {
+    match error {
+        #[allow(unreachable_patterns)]
+        keyring::Error::NoEntry => true,
+        _ => {
+            let msg = error.to_string().to_ascii_lowercase();
+            msg.contains("no matching entry found")
+                || msg.contains("no entry")
+                || msg.contains("credential not found")
+        }
+    }
+}
+
 impl StoredToken {
     pub fn new(access_token: String, expires_in: Option<i64>) -> Self {
         let now = chrono::Utc::now().timestamp();
@@ -252,8 +265,13 @@ pub fn load_token(username: &str) -> Result<String, AuthError> {
         let json = entry
             .get_password()
             .map_err(|e| {
-                tracing::error!(username = %username, error = %e, "Failed to get password from keyring");
-                AuthError::KeyringError(format!("Failed to get password: {}", e))
+                if is_keyring_no_entry_error(&e) {
+                    tracing::debug!(username = %username, "No token found in keyring for user");
+                    AuthError::TokenNotFound
+                } else {
+                    tracing::error!(username = %username, error = %e, "Failed to get password from keyring");
+                    AuthError::KeyringError(format!("Failed to get password: {}", e))
+                }
             })?;
 
         tracing::debug!(username = %username, "Token loaded from keyring");
@@ -263,6 +281,14 @@ pub fn load_token(username: &str) -> Result<String, AuthError> {
     // If keyring fails, fall back to the local backup file (compatibility path).
     let (json, from_keyring) = match keyring_result {
         Ok(json) => (json, true),
+        Err(AuthError::TokenNotFound) => {
+            tracing::debug!(username = %username, "Token not present in keyring, trying local backup file");
+            let legacy_json = load_legacy_token_from_file(username)?;
+            if !legacy_json.trim().is_empty() {
+                tracing::info!(username = %username, "Local backup token found. Rehydrating keyring from backup file.");
+            }
+            (legacy_json, false)
+        }
         Err(keyring_err) => {
             tracing::warn!(username = %username, keyring_error = %keyring_err, "Keyring failed, trying legacy token file migration");
             let legacy_json = load_legacy_token_from_file(username)?;
@@ -309,11 +335,25 @@ pub fn load_token(username: &str) -> Result<String, AuthError> {
 }
 
 pub fn load_token_with_expiry(username: &str) -> Result<StoredToken, AuthError> {
-    let (json, from_keyring) = match keyring::Entry::new("gitgov", username)
+    let keyring_load_result = keyring::Entry::new("gitgov", username)
         .map_err(|e| AuthError::KeyringError(e.to_string()))
-        .and_then(|entry| entry.get_password().map_err(|e| AuthError::KeyringError(e.to_string())))
-    {
+        .and_then(|entry| {
+            entry.get_password().map_err(|e| {
+                if is_keyring_no_entry_error(&e) {
+                    AuthError::TokenNotFound
+                } else {
+                    AuthError::KeyringError(e.to_string())
+                }
+            })
+        });
+
+    let (json, from_keyring) = match keyring_load_result {
         Ok(json) => (json, true),
+        Err(AuthError::TokenNotFound) => {
+            tracing::debug!(username = %username, "Token not present in keyring, attempting local backup token");
+            let legacy_json = load_legacy_token_from_file(username)?;
+            (legacy_json, false)
+        }
         Err(keyring_err) => {
             tracing::warn!(username = %username, keyring_error = %keyring_err, "Keyring token unavailable, attempting legacy token migration");
             let legacy_json = load_legacy_token_from_file(username)?;
@@ -378,8 +418,12 @@ pub fn delete_token(username: &str) -> Result<(), AuthError> {
     match keyring::Entry::new("gitgov", username) {
         Ok(entry) => {
             if let Err(e) = entry.delete_credential() {
-                tracing::warn!(username = %username, error = %e, "Failed to delete token from keyring");
-                keyring_error = Some(AuthError::KeyringError(e.to_string()));
+                if is_keyring_no_entry_error(&e) {
+                    tracing::debug!(username = %username, "No keyring token found to delete");
+                } else {
+                    tracing::warn!(username = %username, error = %e, "Failed to delete token from keyring");
+                    keyring_error = Some(AuthError::KeyringError(e.to_string()));
+                }
             }
         }
         Err(e) => {

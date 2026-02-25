@@ -3,6 +3,8 @@
 Setup Docker local para levantar:
 - PostgreSQL (`gitgov-db`)
 - GitGov Control Plane Server (`gitgov-server`)
+- Jenkins (opcional, perfil `jenkins`, para pruebas V1.2-A)
+- Jira Software (opcional, perfil `jira`, para pruebas V1.2-B)
 
 No reemplaza tu app Desktop/Tauri local. La idea es correr el **server** en Docker y seguir usando GitGov Desktop como cliente.
 
@@ -44,6 +46,62 @@ docker compose logs -f gitgov-db
 
 ---
 
+## Jira (opcional, perfil `jira`)
+
+Levantar Jira local (puede tardar varios minutos en primer arranque):
+
+```bash
+docker compose --profile jira up -d jira
+```
+
+Ver logs de Jira:
+
+```bash
+docker compose logs -f jira
+```
+
+Abrir Jira:
+
+- URL: `http://localhost:8095`
+
+Notas:
+- Primer arranque puede tardar bastante (descarga imagen + setup interno).
+- Jira requiere configuración inicial vía navegador (wizard de Atlassian).
+- Para pruebas locales V1.2-B basta con usarlo como emisor de webhooks/snapshot de issues.
+
+---
+
+## Jenkins (opcional, perfil `jenkins`)
+
+Levantar Jenkins local:
+
+```bash
+docker compose --profile jenkins up -d jenkins
+```
+
+Ver logs de Jenkins:
+
+```bash
+docker compose logs -f jenkins
+```
+
+Abrir Jenkins:
+
+- URL: `http://localhost:8096`
+
+Password inicial (admin) desde logs o archivo en el contenedor:
+
+```bash
+docker exec -it gitgov-jenkins cat /var/jenkins_home/secrets/initialAdminPassword
+```
+
+Notas:
+- Primer arranque puede tardar varios minutos.
+- Jenkins también requiere setup inicial (wizard).
+- Luego puedes configurar webhook/pipeline hacia `GitGov` (`/integrations/jenkins`).
+
+---
+
 ## Qué inicializa automáticamente
 
 Al crear el volumen de Postgres por primera vez, Docker ejecuta:
@@ -73,7 +131,7 @@ Importante:
 
 ### PostgreSQL
 - host: `localhost`
-- port: `5432`
+- port: `5433`
 - db: `gitgov`
 - user: `gitgov`
 - password: `gitgov_dev_password`
