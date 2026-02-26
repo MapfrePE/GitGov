@@ -1604,6 +1604,13 @@ pub async fn get_stats(
     match state.db.get_stats().await {
         Ok(mut stats) => {
             stats.pipeline = state.db.get_pipeline_health_stats().await.unwrap_or_default();
+            stats.client_events.desktop_pushes_today = match state.db.get_desktop_pushes_today().await {
+                Ok(count) => count,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to compute desktop pushes today for /stats");
+                    0
+                }
+            };
             (StatusCode::OK, Json(stats))
         }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(AuditStats::default())),

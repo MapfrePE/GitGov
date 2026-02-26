@@ -375,6 +375,8 @@ pub struct ClientEventStats {
     pub today: i64,
     pub blocked_today: i64,
     #[serde(default)]
+    pub desktop_pushes_today: i64,
+    #[serde(default)]
     pub by_type: HashMap<String, i64>,
     #[serde(default)]
     pub by_status: HashMap<String, i64>,

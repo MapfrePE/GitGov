@@ -154,6 +154,9 @@ export function ServerDashboard() {
       ? ((serverStats.github_events.pushes_today / (serverStats.github_events.pushes_today + serverStats.client_events.blocked_today)) * 100).toFixed(1)
       : '100.0'
     : '0'
+  const githubPushesToday = serverStats?.github_events.pushes_today ?? 0
+  const desktopPushesToday = serverStats?.client_events.desktop_pushes_today ?? 0
+  const totalTrackedPushesToday = githubPushesToday + desktopPushesToday
   const pipeline = serverStats?.pipeline
   const pipelineTotal = pipeline?.total_7d ?? 0
   const pipelineSuccess = pipeline?.success_7d ?? 0
@@ -237,7 +240,22 @@ export function ServerDashboard() {
                 <Activity size={12} strokeWidth={1.5} className="text-success-400" />
                 <span className="card-header">Pushes Hoy</span>
               </div>
-              <span className="text-4xl font-bold text-white tracking-tighter mono-data mt-auto leading-none">{serverStats.github_events.pushes_today}</span>
+              <div className="mt-4 space-y-2">
+                <div className="flex items-end justify-between gap-3">
+                  <div>
+                    <div className="text-[9px] text-surface-600 uppercase tracking-widest">Desktop</div>
+                    <div className="text-2xl font-bold text-white tracking-tighter mono-data leading-none">{desktopPushesToday}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[9px] text-surface-600 uppercase tracking-widest">GitHub</div>
+                    <div className="text-2xl font-bold text-surface-300 tracking-tighter mono-data leading-none">{githubPushesToday}</div>
+                  </div>
+                </div>
+                <div className="pt-1 border-t border-white/[0.04] flex items-center justify-between text-[10px]">
+                  <span className="text-surface-500">Total trazado</span>
+                  <span className="mono-data text-surface-300 font-medium">{totalTrackedPushesToday}</span>
+                </div>
+              </div>
             </div>
 
             {/* Blocked */}

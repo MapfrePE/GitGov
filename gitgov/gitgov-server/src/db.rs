@@ -1539,6 +1539,22 @@ impl Database {
         }
     }
 
+    pub async fn get_desktop_pushes_today(&self) -> Result<i64, DbError> {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM client_events
+            WHERE event_type = 'successful_push'
+              AND created_at >= DATE_TRUNC('day', NOW())
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(count)
+    }
+
     // ========================================================================
     // POLICIES
     // ========================================================================

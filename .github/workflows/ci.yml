@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  server-lint:
+    name: Server Clippy + Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gitgov/gitgov-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gitgov/gitgov-server
+      - run: cargo clippy -- -D warnings
+      - run: cargo check
+
+  desktop-lint:
+    name: Desktop Rust Clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gitgov/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gitgov/src-tauri
+      - run: cargo clippy -- -D warnings
+
+  frontend-lint:
+    name: Frontend Lint + Typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gitgov
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gitgov/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck

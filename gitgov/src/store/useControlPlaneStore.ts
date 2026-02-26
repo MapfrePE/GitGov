@@ -18,6 +18,7 @@ interface ClientEventStats {
   total: number
   today: number
   blocked_today: number
+  desktop_pushes_today: number
   by_type: Record<string, number>
   by_status: Record<string, number>
 }
