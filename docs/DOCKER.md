@@ -13,8 +13,8 @@ No reemplaza tu app Desktop/Tauri local. La idea es correr el **server** en Dock
 ## Requisitos
 
 - Docker Desktop ejecutándose
-- Puerto `3000` libre (server)
-- Puerto `5432` libre (Postgres)
+- Puerto `3001` libre (GitGov server Docker)
+- Puerto `5433` libre (Postgres Docker)
 
 ---
 
@@ -123,8 +123,8 @@ Importante:
 
 ## URL y credenciales (dev local)
 
-### Server
-- URL: `http://localhost:3000`
+### Server (Docker)
+- URL: `http://localhost:3001`
 
 ### API Key admin (dev)
 - `57f1ed59-371d-46ef-9fdf-508f59bc4963`
@@ -141,11 +141,13 @@ Importante:
 ## Integrar con GitGov Desktop (tu app)
 
 En la configuración del Control Plane dentro de la app:
-- URL: `http://localhost:3000`
+- URL: `http://127.0.0.1:3001` (solo si quieres probar el server Docker)
 - API Key: `57f1ed59-371d-46ef-9fdf-508f59bc4963`
 
-Esto mantiene tu flujo actual:
-- cambios → commit → push → logs/dashboard
+**Recomendado para Golden Path diario (server local):**
+- URL: `http://127.0.0.1:3000`
+
+Esto evita split-brain local si también tienes Docker/WSL levantado.
 
 ---
 
@@ -165,14 +167,14 @@ docker compose up --build -d
 Health:
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:3001/health
 ```
 
 Stats (admin):
 
 ```bash
 curl -H "Authorization: Bearer 57f1ed59-371d-46ef-9fdf-508f59bc4963" \
-  http://localhost:3000/stats
+  http://localhost:3001/stats
 ```
 
 ---

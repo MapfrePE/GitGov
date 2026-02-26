@@ -44,6 +44,11 @@ Antes de tocar auth, outbox, dashboard o endpoints del server, asumir que este f
 
 **Advertencia local (muy importante):** en desarrollo local usar **una sola URL canónica** para el Control Plane (`http://127.0.0.1:3000`). No mezclar `localhost` y `127.0.0.1` si Docker/WSL también están levantados, porque puedes terminar enviando eventos del Desktop a un server y viendo el Dashboard en otro (split-brain local).
 
+**Regla operativa (anti split-brain):**
+- `127.0.0.1:3000` = server local (`cargo run`) para Golden Path / demo principal
+- Docker `gitgov-server` = **`127.0.0.1:3001`** por defecto (NO usar `3000`)
+- Si se levanta Docker para pruebas, mantener el Desktop apuntando a `127.0.0.1:3000` salvo que se esté probando Docker explícitamente
+
 ### Pendiente
 
 | Componente | Prioridad |

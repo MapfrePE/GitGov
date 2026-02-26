@@ -181,6 +181,7 @@ En algunas máquinas `localhost` puede resolver por IPv6 (`::1`) y terminar peg�
 **Prevención:**
 - Si usas Docker y server local a la vez, mueve uno a otro puerto (ej. `3001`)
 - No mezclar `localhost` y `127.0.0.1` en configuración
+- **Convención del proyecto:** `server local -> 127.0.0.1:3000`, `gitgov-server` Docker -> `127.0.0.1:3001`
 
 ---
 

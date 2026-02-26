@@ -41,7 +41,7 @@ services:
       # JENKINS_WEBHOOK_SECRET: your-jenkins-secret
       # JIRA_WEBHOOK_SECRET: your-jira-secret
     ports:
-      - "3000:3000"
+      - "3001:3000"
 
   jira:
     image: atlassian/jira-software:latest
