@@ -4,7 +4,7 @@ import { useAuditStore } from '@/store/useAuditStore'
 import { useAuthStore } from '@/store/useAuthStore'
 import { AuditLogRow } from './AuditLogRow'
 import { Button } from '@/components/shared/Button'
-import { Spinner } from '@/components/shared/Spinner'
+import { Skeleton } from '@/components/shared/Skeleton'
 import { RefreshCw, Users, AlertTriangle, TrendingUp } from 'lucide-react'
 
 export function AuditLogView() {
@@ -109,9 +109,30 @@ export function AuditLogView() {
       {/* Table */}
       <div className="flex-1 overflow-auto">
         {isLoading ? (
-          <div className="flex items-center justify-center h-full">
-            <Spinner size="lg" />
-          </div>
+          <table className="w-full">
+            <thead className="bg-surface-800 sticky top-0">
+              <tr className="text-left text-sm text-surface-400">
+                <th className="px-4 py-2 font-medium">Fecha</th>
+                <th className="px-4 py-2 font-medium">Usuario</th>
+                <th className="px-4 py-2 font-medium">Acción</th>
+                <th className="px-4 py-2 font-medium">Rama</th>
+                <th className="px-4 py-2 font-medium">Archivos</th>
+                <th className="px-4 py-2 font-medium">Estado</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
+                <tr key={i} className="border-t border-surface-700/30">
+                  <td className="px-4 py-3"><Skeleton className="h-3 w-24" /></td>
+                  <td className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
+                  <td className="px-4 py-3"><Skeleton className="h-3 w-16" /></td>
+                  <td className="px-4 py-3"><Skeleton className="h-3 w-28" /></td>
+                  <td className="px-4 py-3"><Skeleton className="h-3 w-8" /></td>
+                  <td className="px-4 py-3"><Skeleton className="h-5 w-14 rounded-full" /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         ) : logs.length === 0 ? (
           <div className="flex items-center justify-center h-full text-surface-500">
             No hay logs para mostrar

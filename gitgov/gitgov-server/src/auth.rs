@@ -84,10 +84,56 @@ pub fn require_same_user_or_admin(user: &AuthUser, target_login: &str) -> Result
     if user.role == UserRole::Admin {
         return Ok(());
     }
-    
+
     if user.client_id != target_login {
         return Err(AuthError("Can only access your own data".to_string()));
     }
-    
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn admin_user() -> AuthUser {
+        AuthUser {
+            client_id: "admin1".to_string(),
+            role: UserRole::Admin,
+            org_id: None,
+        }
+    }
+
+    fn dev_user(login: &str) -> AuthUser {
+        AuthUser {
+            client_id: login.to_string(),
+            role: UserRole::Developer,
+            org_id: None,
+        }
+    }
+
+    #[test]
+    fn require_admin_allows_admin() {
+        assert!(require_admin(&admin_user()).is_ok());
+    }
+
+    #[test]
+    fn require_admin_blocks_developer() {
+        assert!(require_admin(&dev_user("dev1")).is_err());
+    }
+
+    #[test]
+    fn require_same_user_or_admin_allows_admin_for_any_target() {
+        assert!(require_same_user_or_admin(&admin_user(), "anyone").is_ok());
+    }
+
+    #[test]
+    fn require_same_user_or_admin_allows_self() {
+        assert!(require_same_user_or_admin(&dev_user("dev1"), "dev1").is_ok());
+    }
+
+    #[test]
+    fn require_same_user_or_admin_blocks_different_user() {
+        assert!(require_same_user_or_admin(&dev_user("dev1"), "dev2").is_err());
+    }
 }

@@ -5,6 +5,7 @@ import { useAuthStore } from '@/store/useAuthStore'
 import type { FileChange } from '@/lib/types'
 import { FILE_STATUS_COLORS } from '@/lib/constants'
 import { FileText, AlertCircle, CheckSquare, Plus, FileCode, Loader2 } from 'lucide-react'
+import { SkeletonFileRow } from '@/components/shared/Skeleton'
 
 interface FileItemProps {
   file: FileChange
@@ -102,6 +103,7 @@ export function FileList() {
     fileChanges,
     selectedFiles,
     stagedFiles,
+    isLoadingStatus,
     selectFile,
     deselectFile,
     selectAll,
@@ -191,7 +193,13 @@ export function FileList() {
       </div>
 
       <div className="flex-1 overflow-y-auto divide-y divide-surface-700/15">
-        {fileChanges.length === 0 ? (
+        {isLoadingStatus && fileChanges.length === 0 ? (
+          <div className="space-y-0.5">
+            {[1, 2, 3, 4, 5].map((i) => (
+              <SkeletonFileRow key={i} />
+            ))}
+          </div>
+        ) : fileChanges.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-surface-500 p-6">
             <FileCode size={24} strokeWidth={1.5} className="mb-3 text-surface-700" />
             <p className="text-xs font-medium text-surface-400">No hay cambios</p>

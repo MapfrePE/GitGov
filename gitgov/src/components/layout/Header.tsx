@@ -1,9 +1,11 @@
-import type { ReactNode } from 'react'
+import { type ReactNode, useEffect } from 'react'
 import { useAuthStore } from '@/store/useAuthStore'
 import { useRepoStore } from '@/store/useRepoStore'
+import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { BranchSelector } from '@/components/branch/BranchSelector'
 import { RefreshCw, FolderOpen } from 'lucide-react'
 import { Button } from '@/components/shared/Button'
+import clsx from 'clsx'
 
 interface HeaderProps {
   children?: ReactNode
@@ -12,9 +14,15 @@ interface HeaderProps {
 export function Header({ children }: HeaderProps) {
   const { user } = useAuthStore()
   const { repoPath, currentBranch, refreshStatus, refreshBranches, isLoadingStatus } = useRepoStore()
+  const { isConnected, checkConnection } = useControlPlaneStore()
+
+  useEffect(() => {
+    const interval = setInterval(checkConnection, 30000)
+    return () => clearInterval(interval)
+  }, [checkConnection])
 
   const handleRefresh = async () => {
-    await Promise.all([refreshStatus(), refreshBranches()])
+    await Promise.all([refreshStatus(), refreshBranches(), checkConnection()])
   }
 
   return (
@@ -25,6 +33,13 @@ export function Header({ children }: HeaderProps) {
           <span className="text-xs text-surface-300 font-medium truncate max-w-[200px]">
             {repoPath?.split('/').pop() || 'Repositorio'}
           </span>
+          <span
+            title={isConnected ? 'Servidor conectado' : 'Sin conexión al servidor'}
+            className={clsx(
+              'w-2 h-2 rounded-full flex-shrink-0',
+              isConnected ? 'bg-success-500' : 'bg-danger-500 animate-pulse'
+            )}
+          />
         </div>
 
         {currentBranch && user && (

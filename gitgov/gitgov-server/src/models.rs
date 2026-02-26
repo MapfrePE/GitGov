@@ -1128,3 +1128,137 @@ pub const RELEVANT_AUDIT_ACTIONS: &[&str] = &[
     "org.update_member_repository_creation_permission",
     "org.update_default_repository_permission",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_role_roundtrip() {
+        let roles = [UserRole::Admin, UserRole::Architect, UserRole::Developer, UserRole::PM];
+        for role in &roles {
+            assert_eq!(&UserRole::from_str(role.as_str()), role);
+        }
+    }
+
+    #[test]
+    fn user_role_unknown_defaults_to_developer() {
+        assert_eq!(UserRole::from_str("unknown"), UserRole::Developer);
+        assert_eq!(UserRole::from_str(""), UserRole::Developer);
+    }
+
+    #[test]
+    fn client_event_type_roundtrip() {
+        let types = [
+            ClientEventType::AttemptPush,
+            ClientEventType::BlockedPush,
+            ClientEventType::SuccessfulPush,
+            ClientEventType::CreateBranch,
+            ClientEventType::BlockedBranch,
+            ClientEventType::StageFiles,
+            ClientEventType::Commit,
+            ClientEventType::CheckoutBranch,
+            ClientEventType::Login,
+            ClientEventType::Logout,
+        ];
+        for t in &types {
+            assert_eq!(&ClientEventType::from_str(t.as_str()), t);
+        }
+    }
+
+    #[test]
+    fn event_status_roundtrip() {
+        assert_eq!(EventStatus::from_str("success"), EventStatus::Success);
+        assert_eq!(EventStatus::from_str("blocked"), EventStatus::Blocked);
+        assert_eq!(EventStatus::from_str("failed"), EventStatus::Failed);
+        assert_eq!(EventStatus::from_str("unknown"), EventStatus::Failed);
+    }
+
+    #[test]
+    fn pipeline_status_roundtrip() {
+        assert_eq!(PipelineStatus::from_str("success"), Some(PipelineStatus::Success));
+        assert_eq!(PipelineStatus::from_str("failure"), Some(PipelineStatus::Failure));
+        assert_eq!(PipelineStatus::from_str("aborted"), Some(PipelineStatus::Aborted));
+        assert_eq!(PipelineStatus::from_str("unstable"), Some(PipelineStatus::Unstable));
+        assert_eq!(PipelineStatus::from_str("invalid"), None);
+    }
+
+    #[test]
+    fn signal_type_roundtrip() {
+        let types = [
+            SignalType::UntrustedPath,
+            SignalType::MissingTelemetry,
+            SignalType::PolicyViolation,
+            SignalType::CorrelationMismatch,
+        ];
+        for t in &types {
+            assert_eq!(&SignalType::from_str(t.as_str()), t);
+        }
+    }
+
+    #[test]
+    fn confidence_level_roundtrip() {
+        assert_eq!(ConfidenceLevel::from_str("high"), ConfidenceLevel::High);
+        assert_eq!(ConfidenceLevel::from_str("medium"), ConfidenceLevel::Medium);
+        assert_eq!(ConfidenceLevel::from_str("low"), ConfidenceLevel::Low);
+        assert_eq!(ConfidenceLevel::from_str("unknown"), ConfidenceLevel::Low);
+    }
+
+    #[test]
+    fn signal_status_roundtrip() {
+        assert_eq!(SignalStatus::from_str("pending"), SignalStatus::Pending);
+        assert_eq!(SignalStatus::from_str("investigating"), SignalStatus::Investigating);
+        assert_eq!(SignalStatus::from_str("confirmed"), SignalStatus::Confirmed);
+        assert_eq!(SignalStatus::from_str("dismissed"), SignalStatus::Dismissed);
+        assert_eq!(SignalStatus::from_str("unknown"), SignalStatus::Pending);
+    }
+
+    #[test]
+    fn client_event_batch_deserialize() {
+        let json = r#"{
+            "events": [{
+                "event_uuid": "abc-123",
+                "event_type": "commit",
+                "repo_full_name": "MapfrePE/GitGov",
+                "branch": "main",
+                "user_login": "dev1",
+                "files": ["src/main.rs"],
+                "status": "success"
+            }]
+        }"#;
+        let batch: ClientEventBatch = serde_json::from_str(json).unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0].event_type, "commit");
+        assert!(batch.client_id.is_none());
+    }
+
+    #[test]
+    fn policy_check_response_default() {
+        let resp = PolicyCheckResponse::default();
+        assert!(!resp.advisory);
+        assert!(!resp.allowed);
+        assert!(resp.reasons.is_empty());
+        assert!(resp.warnings.is_empty());
+    }
+
+    #[test]
+    fn jenkins_pipeline_input_deserialize_with_defaults() {
+        let json = r#"{
+            "pipeline_id": "build-123",
+            "job_name": "main-build",
+            "status": "success"
+        }"#;
+        let input: JenkinsPipelineEventInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.pipeline_id, "build-123");
+        assert!(input.commit_sha.is_none());
+        assert!(input.stages.is_empty());
+        assert!(input.artifacts.is_empty());
+    }
+
+    #[test]
+    fn relevant_audit_actions_contains_expected() {
+        assert!(RELEVANT_AUDIT_ACTIONS.contains(&"protected_branch.create"));
+        assert!(RELEVANT_AUDIT_ACTIONS.contains(&"repo.access"));
+        assert!(!RELEVANT_AUDIT_ACTIONS.contains(&"random_action"));
+    }
+}

@@ -32,7 +32,7 @@ export function BranchSelector({ userLogin, isAdmin, userGroup }: BranchSelector
   const localBranches = filteredBranches.filter((b) => !b.is_remote)
   const remoteBranches = filteredBranches.filter((b) => b.is_remote)
 
-  const handleCheckout = async (branch: BranchInfo) => {
+  const handleCheckout = useCallback(async (branch: BranchInfo) => {
     if (branch.is_current || branch.is_remote) return
     setSwitching(branch.name)
     try {
@@ -43,7 +43,7 @@ export function BranchSelector({ userLogin, isAdmin, userGroup }: BranchSelector
     } finally {
       setSwitching(null)
     }
-  }
+  }, [checkoutBranch])
 
   const selectableBranches = localBranches.filter((b) => !b.is_current)
 

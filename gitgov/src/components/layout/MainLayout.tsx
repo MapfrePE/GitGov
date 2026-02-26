@@ -4,6 +4,7 @@ import { useRepoStore } from '@/store/useRepoStore'
 import { Sidebar } from './Sidebar'
 import { LoginScreen } from '@/components/auth/LoginScreen'
 import { RepoSelector } from '@/components/repo/RepoSelector'
+import { Skeleton, SkeletonFileRow } from '@/components/shared/Skeleton'
 
 interface MainLayoutProps {
   children: ReactNode
@@ -15,10 +16,35 @@ export function MainLayout({ children }: MainLayoutProps) {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-surface-900 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-12 h-12 border-4 border-brand-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-surface-400">Cargando...</p>
+      <div className="flex h-screen bg-surface-900">
+        <div className="w-14 bg-surface-950 border-r border-white/[0.04] flex flex-col items-center py-3">
+          <Skeleton className="w-8 h-8 rounded-lg mb-6" />
+          <div className="flex-1 flex flex-col items-center gap-2">
+            <Skeleton className="w-9 h-9 rounded-lg" />
+            <Skeleton className="w-9 h-9 rounded-lg" />
+            <Skeleton className="w-9 h-9 rounded-lg" />
+          </div>
+        </div>
+        <div className="flex-1 flex flex-col">
+          <div className="h-12 border-b border-surface-700/30 flex items-center px-5 gap-4">
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="h-7 w-40 rounded-lg" />
+          </div>
+          <div className="flex-1 flex">
+            <div className="w-80 border-r border-surface-700/30 p-2 space-y-1">
+              {[1, 2, 3, 4, 5, 6].map((i) => (
+                <SkeletonFileRow key={i} />
+              ))}
+            </div>
+            <div className="flex-1 p-6">
+              <Skeleton className="h-4 w-48 mb-4" />
+              <div className="space-y-2">
+                <Skeleton className="h-3 w-full" />
+                <Skeleton className="h-3 w-5/6" />
+                <Skeleton className="h-3 w-4/6" />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     )

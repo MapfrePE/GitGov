@@ -15,7 +15,6 @@ export function CommitPanel() {
   const [isCommitting, setIsCommitting] = useState(false)
   const [isPushing, setIsPushing] = useState(false)
   const [lastCommitHash, setLastCommitHash] = useState<string | null>(null)
-  const [pushConfirm, setPushConfirm] = useState(false)
 
   const fullMessage = useMemo(() => {
     if (!message.trim()) return ''
@@ -51,12 +50,7 @@ export function CommitPanel() {
     }
   }
 
-  const handlePushClick = () => {
-    setPushConfirm(true)
-  }
-
-  const handlePushConfirm = async () => {
-    setPushConfirm(false)
+  const handlePush = async () => {
     if (!user || !currentBranch) return
     setIsPushing(true)
     try {
@@ -142,28 +136,16 @@ export function CommitPanel() {
             </Button>
           </div>
 
-          {pushConfirm ? (
-            <div className="flex gap-1.5 items-center">
-              <span className="text-[10px] text-warning-400">Push a {currentBranch}?</span>
-              <Button size="sm" onClick={handlePushConfirm} loading={isPushing}>
-                Sí
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setPushConfirm(false)}>
-                No
-              </Button>
-            </div>
-          ) : (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={handlePushClick}
-              loading={isPushing}
-              disabled={!lastCommitHash && !hasUncommittedChanges}
-            >
-              <Upload size={13} strokeWidth={1.5} />
-              Push
-            </Button>
-          )}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={handlePush}
+            loading={isPushing}
+            disabled={!lastCommitHash && !hasUncommittedChanges}
+          >
+            <Upload size={13} strokeWidth={1.5} />
+            Push
+          </Button>
         </div>
       </div>
     </div>
