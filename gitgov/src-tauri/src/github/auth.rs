@@ -4,6 +4,7 @@ use thiserror::Error;
 
 const GITHUB_CLIENT_ID: &str = "Ov23livabbc30nXBY0KF";
 const TOKEN_EXPIRATION_SECONDS: i64 = 28 * 24 * 60 * 60; // 28 days (GitHub default)
+const GITHUB_DEVICE_FLOW_SCOPE: &str = "repo user workflow";
 
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -93,7 +94,7 @@ pub fn start_device_flow() -> Result<DeviceFlowResponse, AuthError> {
         .post("https://github.com/login/device/code")
         .header("Accept", "application/json")
         .header("User-Agent", "GitGov/1.0")
-        .form(&[("client_id", GITHUB_CLIENT_ID), ("scope", "repo user")])
+        .form(&[("client_id", GITHUB_CLIENT_ID), ("scope", GITHUB_DEVICE_FLOW_SCOPE)])
         .send()
         .map_err(|e| AuthError::NetworkError(e.to_string()))?;
 

@@ -37,7 +37,17 @@ fn normalize_loopback_url(url: &str) -> String {
         let _ = parsed.set_host(Some("127.0.0.1"));
     }
 
-    parsed.to_string()
+    // Control Plane config should always be a base URL only (scheme + host + optional port).
+    // Strip path/query/fragment to avoid posting outbox events to /docs/events or /health/events.
+    parsed.set_path("/");
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+
+    let mut base = parsed.to_string();
+    while base.ends_with('/') {
+        base.pop();
+    }
+    base
 }
 
 fn to_command_error(e: impl std::fmt::Display, code: &str) -> String {

@@ -165,8 +165,13 @@ function normalizeLoopbackUrl(url: string): string {
     const parsed = new URL(trimmed)
     if (parsed.hostname === 'localhost') {
       parsed.hostname = '127.0.0.1'
-      return parsed.toString().replace(/\/$/, parsed.pathname === '/' && !trimmed.endsWith('/') ? '' : '/')
     }
+    // Control Plane config must be a base URL only (scheme + host + optional port).
+    // Strip path/query/hash so outbox and dashboard don't diverge (e.g. /docs, /health).
+    parsed.pathname = '/'
+    parsed.search = ''
+    parsed.hash = ''
+    return parsed.origin
   } catch {
     // Ignore invalid URLs here; validation happens later in Tauri/server calls.
   }

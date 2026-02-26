@@ -623,7 +623,11 @@ impl Outbox {
                             }
                         }
                         Ok(response) => {
-                            tracing::warn!("Outbox flush failed: status {}", response.status());
+                            tracing::warn!(
+                                url = %format!("{}/events", url),
+                                status = %response.status(),
+                                "Outbox flush failed"
+                            );
                         }
                         Err(e) => {
                             tracing::warn!("Outbox flush network error: {}", e);

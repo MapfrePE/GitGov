@@ -5,7 +5,23 @@ import { Button } from '@/components/shared/Button'
 import { COMMIT_TYPES } from '@/lib/constants'
 import { GitCommit, Upload, RotateCcw } from 'lucide-react'
 import { toast } from '@/components/shared/Toast'
+import { parseCommandError } from '@/lib/tauri'
 import clsx from 'clsx'
+
+function formatPushErrorForUser(rawError: unknown): string {
+  const parsed = parseCommandError(String(rawError))
+  const msg = parsed.message || String(rawError)
+
+  if (msg.includes('without `workflow` scope') || msg.includes('without workflow scope')) {
+    return 'Push rechazado por GitHub: estás modificando .github/workflows/* y tu token no tiene permiso "workflow". Reautentícate en GitHub para conceder ese permiso y vuelve a intentar.'
+  }
+
+  if (msg.includes('Invalid username or token') || msg.includes('Authentication failed')) {
+    return 'Push rechazado por GitHub: token inválido o expirado. Reautentícate en GitHub y vuelve a intentar.'
+  }
+
+  return msg
+}
 
 export function CommitPanel() {
   const { stagedFiles, fileChanges, currentBranch, commit, push, unstageAll, refreshStatus } = useRepoStore()
@@ -44,7 +60,7 @@ export function CommitPanel() {
       setMessage('')
       toast('success', `Commit creado: ${hash.substring(0, 7)}`)
     } catch (e) {
-      toast('error', String(e))
+      toast('error', parseCommandError(String(e)).message)
     } finally {
       setIsCommitting(false)
     }
@@ -59,7 +75,7 @@ export function CommitPanel() {
       setLastCommitHash(null)
       await refreshStatus()
     } catch (e) {
-      toast('error', String(e))
+      toast('error', formatPushErrorForUser(e))
     } finally {
       setIsPushing(false)
     }
