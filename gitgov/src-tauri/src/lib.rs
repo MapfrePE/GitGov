@@ -97,6 +97,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(audit_db)
         .manage(outbox)
         .setup(move |app| {
@@ -122,6 +123,9 @@ pub fn run() {
             commands::cmd_validate_token,
             commands::cmd_get_status,
             commands::cmd_get_file_diff,
+            commands::cmd_apply_ignore_rules,
+            commands::cmd_read_gitgovignore,
+            commands::cmd_remove_ignore_rules,
             commands::cmd_stage_files,
             commands::cmd_unstage_all,
             commands::cmd_unstage_files,

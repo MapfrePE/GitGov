@@ -1,0 +1,11 @@
+{
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://downloads.gitgov.com/desktop/stable/latest.json"
+      ],
+      "pubkey": "REEMPLAZAR_CON_PUBLIC_KEY_DEL_UPDATER"
+    }
+  }
+}
+

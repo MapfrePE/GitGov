@@ -27,7 +27,9 @@ interface RepoActions {
   deselectFile: (path: string) => void
   selectAll: () => void
   deselectAll: () => void
+  stageFiles: (paths: string[], developerLogin: string) => Promise<void>
   stageSelected: (developerLogin: string) => Promise<void>
+  stageAllUnstaged: (developerLogin: string) => Promise<void>
   unstageAll: () => Promise<void>
   unstageFiles: (paths: string[]) => Promise<void>
   loadDiff: (filePath: string) => Promise<void>
@@ -139,13 +141,13 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
     set({ selectedFiles: new Set() })
   },
 
-  stageSelected: async (developerLogin: string) => {
-    const { repoPath, selectedFiles } = get()
-    if (!repoPath || selectedFiles.size === 0) return
+  stageFiles: async (paths: string[], developerLogin: string) => {
+    const { repoPath } = get()
+    if (!repoPath || paths.length === 0) return
     try {
       await tauriInvoke('cmd_stage_files', {
         repoPath,
-        files: Array.from(selectedFiles),
+        files: paths,
         developerLogin,
       })
       await get().refreshStatus()
@@ -153,6 +155,21 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
     } catch (e) {
       set({ error: parseCommandError(String(e)).message })
     }
+  },
+
+  stageSelected: async (developerLogin: string) => {
+    const { selectedFiles } = get()
+    await get().stageFiles(Array.from(selectedFiles), developerLogin)
+  },
+
+  stageAllUnstaged: async (developerLogin: string) => {
+    const { repoPath, fileChanges } = get()
+    if (!repoPath) return
+
+    const unstagedPaths = fileChanges.filter((f) => !f.staged).map((f) => f.path)
+    if (unstagedPaths.length === 0) return
+
+    await get().stageFiles(unstagedPaths, developerLogin)
   },
 
   unstageAll: async () => {

@@ -66,14 +66,14 @@ function ToastItem({ toast: t }: { toast: Toast }) {
   return (
     <div
       className={clsx(
-        'flex items-center gap-2.5 px-3.5 py-2.5 rounded-lg border shadow-lg backdrop-blur-sm transition-all duration-300 min-w-[260px] max-w-[380px]',
+        'flex items-center gap-2.5 px-3.5 py-2.5 rounded-lg border shadow-lg backdrop-blur-sm transition-all duration-300 min-w-65 max-w-95',
         styleMap[t.type],
         visible ? 'translate-x-0 opacity-100' : 'translate-x-4 opacity-0'
       )}
     >
-      <Icon size={16} className="flex-shrink-0" />
+      <Icon size={16} className="shrink-0" />
       <span className="flex-1 text-xs text-surface-200 leading-snug">{t.message}</span>
-      <button onClick={() => removeToast(t.id)} className="flex-shrink-0 text-surface-500 hover:text-surface-300 transition-colors">
+      <button onClick={() => removeToast(t.id)} className="shrink-0 text-surface-500 hover:text-surface-300 transition-colors">
         <X size={14} />
       </button>
     </div>

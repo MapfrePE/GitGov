@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+
+# Next.js build/cache
+.next/
+out/
+
+# local env
+.env
+.env.local
+.env.*.local
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# local release artifacts (keep .gitkeep)
+public/downloads/*.exe
+!public/downloads/.gitkeep

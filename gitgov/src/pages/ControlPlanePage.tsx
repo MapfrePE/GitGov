@@ -10,7 +10,7 @@ export function ControlPlanePage() {
   return (
     <div className="h-full flex flex-col bg-surface-950">
       {/* Integrated top strip — not a floating header */}
-      <div className="shrink-0 h-11 px-5 flex items-center justify-between border-b border-white/[0.04] bg-surface-950">
+      <div className="shrink-0 h-11 px-5 flex items-center justify-between border-b border-white/4 bg-surface-950">
         <div className="flex items-center gap-3">
           <Server size={14} strokeWidth={1.5} className="text-surface-500" />
           <span className="text-[13px] font-medium text-surface-300 tracking-tight">
@@ -33,7 +33,7 @@ export function ControlPlanePage() {
 
         <Link
           to="/settings"
-          className="w-7 h-7 flex items-center justify-center rounded-lg text-surface-500 hover:text-surface-300 hover:bg-white/[0.04] transition-all duration-200"
+          className="w-7 h-7 flex items-center justify-center rounded-lg text-surface-500 hover:text-surface-300 hover:bg-white/4 transition-all duration-200"
           title="Configuración"
         >
           <Settings size={14} strokeWidth={1.5} />

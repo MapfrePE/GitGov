@@ -93,7 +93,7 @@ export function BranchSelector({ userLogin, isAdmin, userGroup }: BranchSelector
         className="flex items-center gap-2 px-3 py-2 bg-surface-800 hover:bg-surface-700 border border-surface-700 rounded-lg transition-colors"
       >
         <GitBranch size={16} className="text-brand-500" />
-        <span className="text-sm text-white truncate max-w-[200px]">
+        <span className="text-sm text-white truncate max-w-50">
           {currentBranch || 'Sin rama'}
         </span>
         <ChevronDown size={16} className="text-surface-400" />

@@ -1,0 +1,222 @@
+import { Fragment, useState, useCallback } from 'react'
+import { GitCommit, X, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react'
+import { Badge } from '@/components/shared/Badge'
+import { Spinner } from '@/components/shared/Spinner'
+import { useControlPlaneStore } from '@/store/useControlPlaneStore'
+import {
+  readDetailString, getLogDetailPreview, getShortCommitSha,
+  extractTicketIdsFromCommitLog, buildDashboardRows,
+  type DashboardRow,
+} from './dashboard-helpers'
+import type { CombinedEvent } from '@/lib/types'
+
+interface CommitPipelineRun {
+  pipeline_event_id: string
+  pipeline_id: string
+  job_name: string
+  status: string
+  duration_ms?: number | null
+  triggered_by?: string | null
+  ingested_at: number
+}
+
+export function RecentCommitsTable() {
+  const {
+    serverLogs, jenkinsCorrelations, ticketCoverage,
+    jiraTicketDetails, jiraTicketDetailLoading,
+    loadJiraTicketDetail,
+  } = useControlPlaneStore()
+
+  const [expandedCommitRows, setExpandedCommitRows] = useState<Record<string, boolean>>({})
+  const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null)
+  const [ticketPanelExpanded, setTicketPanelExpanded] = useState(false)
+
+  const selectTicket = useCallback((ticketId: string | null) => {
+    setSelectedTicketId(ticketId)
+    setTicketPanelExpanded(false)
+    if (ticketId) void loadJiraTicketDetail(ticketId)
+  }, [loadJiraTicketDetail])
+
+  const dashboardRows: DashboardRow[] = buildDashboardRows(serverLogs).slice(0, 10)
+
+  const pipelineByCommitSha = new Map(
+    jenkinsCorrelations.filter((c) => c.pipeline && c.commit_sha).map((c) => [c.commit_sha.toLowerCase(), c.pipeline!]),
+  )
+
+  const findPipelineForLog = (log: CombinedEvent): CommitPipelineRun | null => {
+    const sha = readDetailString(log, 'commit_sha')
+    if (!sha) return null
+    const normalized = sha.toLowerCase()
+    const exact = pipelineByCommitSha.get(normalized)
+    if (exact) return exact
+    for (const [fullSha, p] of pipelineByCommitSha.entries()) {
+      if (fullSha.startsWith(normalized) || normalized.startsWith(fullSha)) return p
+    }
+    return null
+  }
+
+  const selectedTicketDetails = selectedTicketId
+    ? (jiraTicketDetails[selectedTicketId] ?? (ticketCoverage?.tickets_without_commits ?? []).find((t) => typeof t.ticket_id === 'string' && t.ticket_id === selectedTicketId) ?? null)
+    : null
+  const isSelectedTicketLoading = selectedTicketId ? !!jiraTicketDetailLoading[selectedTicketId] : false
+  const ticketPanelSummaryText = isSelectedTicketLoading
+    ? 'Cargando detalle de Jira...'
+    : selectedTicketDetails && typeof selectedTicketDetails === 'object' && 'title' in selectedTicketDetails && typeof selectedTicketDetails.title === 'string' && selectedTicketDetails.title
+      ? selectedTicketDetails.title
+      : selectedTicketDetails
+        ? 'Detalle parcial desde coverage.'
+        : 'Ticket detectado. Ingiere Jira y ejecuta correlación para más detalle.'
+
+  return (
+    <div className="glass-panel p-5">
+      <div className="card-header mb-4">
+        <GitCommit size={11} strokeWidth={1.5} className="text-surface-400" />
+        Commits Recientes
+      </div>
+
+      {/* Ticket detail panel */}
+      {selectedTicketId && (
+        <TicketDetailPanel
+          ticketId={selectedTicketId}
+          details={selectedTicketDetails}
+          isLoading={isSelectedTicketLoading}
+          summaryText={ticketPanelSummaryText}
+          expanded={ticketPanelExpanded}
+          onToggleExpanded={() => setTicketPanelExpanded((v) => !v)}
+          onClose={() => selectTicket(null)}
+        />
+      )}
+
+      {/* Table */}
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead>
+            <tr className="text-left text-[9px] text-surface-600 uppercase tracking-widest">
+              <th className="pb-3 pr-4 font-medium">Hora</th>
+              <th className="pb-3 pr-4 font-medium">Usuario</th>
+              <th className="pb-3 pr-4 font-medium">Detalle</th>
+              <th className="pb-3 pr-4 font-medium">Repo</th>
+              <th className="pb-3 pr-4 font-medium">Rama</th>
+              <th className="pb-3 font-medium">Estado</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/3">
+            {dashboardRows.map(({ log, attachedFiles }) => {
+              const isCommit = log.event_type === 'commit'
+              const canExpandFiles = isCommit && attachedFiles.length > 0
+              const isExpanded = !!expandedCommitRows[log.id]
+              const pipelineRun = isCommit ? findPipelineForLog(log) : null
+              const ticketIds = isCommit ? extractTicketIdsFromCommitLog(log) : []
+              return (
+                <Fragment key={log.id}>
+                  <tr className="hover:bg-white/1.5 transition-colors">
+                    <td className="py-2.5 pr-4 text-[10px] text-surface-500 whitespace-nowrap mono-data">{new Date(log.created_at).toLocaleString()}</td>
+                    <td className="py-2.5 pr-4 text-[11px] text-surface-200 font-medium">{log.user_login || '-'}</td>
+                    <td className="py-2.5 pr-4">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <Badge variant="neutral">{log.event_type}</Badge>
+                          {isCommit && getShortCommitSha(log) && <code className="text-[9px] text-surface-500 mono-data">{getShortCommitSha(log)}</code>}
+                          {pipelineRun && <Badge variant={pipelineRun.status === 'success' ? 'success' : pipelineRun.status === 'failure' ? 'danger' : 'warning'}>ci:{pipelineRun.status}</Badge>}
+                          {ticketIds.slice(0, 2).map((ticketId) => (
+                            <button key={`${log.id}-${ticketId}`} type="button" onClick={() => selectTicket(selectedTicketId === ticketId ? null : ticketId)} className="inline-flex" title={`Ticket ${ticketId}`}>
+                              <Badge variant="info" className="hover:ring-brand-400/30 transition-all cursor-pointer">{ticketId}</Badge>
+                            </button>
+                          ))}
+                          {ticketIds.length > 2 && <Badge variant="neutral">+{ticketIds.length - 2}</Badge>}
+                          {canExpandFiles && (
+                            <button type="button" className="flex items-center gap-0.5 text-[10px] text-brand-400 hover:text-brand-300 transition-colors" onClick={() => setExpandedCommitRows((prev) => ({ ...prev, [log.id]: !prev[log.id] }))}>
+                              {isExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                              {isExpanded ? 'Ocultar' : `${attachedFiles.length} archivos`}
+                            </button>
+                          )}
+                        </div>
+                        {getLogDetailPreview(log) && <div className="text-[10px] text-surface-500 max-w-64 truncate" title={getLogDetailPreview(log) ?? undefined}>{getLogDetailPreview(log)}</div>}
+                      </div>
+                    </td>
+                    <td className="py-2.5 pr-4 text-[10px] text-surface-500">{log.repo_name || '-'}</td>
+                    <td className="py-2.5 pr-4 text-[10px] text-surface-500 mono-data">{log.branch || '-'}</td>
+                    <td className="py-2.5"><Badge variant={log.status === 'success' ? 'success' : log.status === 'blocked' ? 'danger' : 'warning'}>{log.status || '-'}</Badge></td>
+                  </tr>
+                  {canExpandFiles && isExpanded && (
+                    <tr>
+                      <td />
+                      <td colSpan={5} className="pb-3 pt-1">
+                        <div className="pl-3 border-l border-white/6 animate-slide-up">
+                          <div className="text-[9px] text-surface-600 uppercase tracking-widest font-medium mb-1.5">Archivos del commit</div>
+                          <div className="flex flex-col gap-0.5">
+                            {attachedFiles.map((file) => <code key={`${log.id}-${file}`} className="text-[10px] text-surface-500 break-all mono-data">{file}</code>)}
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
+            {dashboardRows.length === 0 && (
+              <tr><td colSpan={6} className="py-12 text-center"><GitCommit size={18} strokeWidth={1.5} className="mx-auto text-surface-700 mb-2" /><p className="text-[10px] text-surface-600">Sin commits aún</p></td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+/* ── Ticket Detail Panel ── */
+
+interface TicketDetailPanelProps {
+  ticketId: string
+  details: object | null
+  isLoading: boolean
+  summaryText: string
+  expanded: boolean
+  onToggleExpanded: () => void
+  onClose: () => void
+}
+
+function TicketDetailPanel({ ticketId, details, isLoading, summaryText, expanded, onToggleExpanded, onClose }: TicketDetailPanelProps) {
+  const detailMap = details && typeof details === 'object' ? (details as Record<string, unknown>) : null
+  return (
+    <div className="mb-4 rounded-xl bg-white/2 border border-white/6 p-4 animate-scale-in">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Badge variant="info">{ticketId}</Badge>
+          {detailMap && typeof detailMap.status === 'string' && <Badge variant="warning">{detailMap.status}</Badge>}
+          {detailMap && typeof detailMap.assignee === 'string' && detailMap.assignee && <Badge variant="neutral">{detailMap.assignee}</Badge>}
+          {isLoading && <Spinner size="sm" className="ml-1" />}
+        </div>
+        <button type="button" className="p-1 rounded text-surface-600 hover:text-surface-400 transition-colors" onClick={onClose}><X size={13} strokeWidth={1.5} /></button>
+      </div>
+      <p className="text-[10px] text-surface-400 mt-2 leading-relaxed">{summaryText}</p>
+      {detailMap && typeof detailMap.ticket_url === 'string' && detailMap.ticket_url && (
+        <a href={detailMap.ticket_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 mt-2 text-[10px] text-brand-400 hover:text-brand-300 transition-colors"><ExternalLink size={9} />Abrir ticket</a>
+      )}
+      {detailMap && 'related_branches' in detailMap && (
+        <div className="mt-3 border-t border-white/4 pt-2">
+          <button type="button" className="flex items-center gap-1 text-[10px] text-brand-400 hover:text-brand-300 transition-colors" onClick={onToggleExpanded}>
+            {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+            {expanded ? 'Ocultar relaciones' : 'Ver relaciones'}
+          </button>
+          {expanded && (
+            <div className="mt-2 grid grid-cols-3 gap-3 animate-slide-up">
+              {['related_branches', 'related_commits', 'related_prs'].map((field) => {
+                const label = field === 'related_branches' ? 'Branches' : field === 'related_commits' ? 'Commits' : 'PRs'
+                const items = Array.isArray(detailMap[field]) ? (detailMap[field] as unknown[]).slice(0, 8) : []
+                return (
+                  <div key={field}>
+                    <div className="text-[9px] text-surface-600 uppercase tracking-widest mb-1 font-medium">{label}</div>
+                    <div className="flex flex-col gap-0.5">
+                      {items.length > 0 ? items.map((b, idx) => <code key={`${field}-${idx}`} className="text-[9px] text-surface-500 break-all mono-data">{String(b)}</code>) : <span className="text-[9px] text-surface-700">-</span>}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}

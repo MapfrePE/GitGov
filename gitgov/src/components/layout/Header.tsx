@@ -30,13 +30,13 @@ export function Header({ children }: HeaderProps) {
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2 text-surface-400">
           <FolderOpen size={13} strokeWidth={1.5} />
-          <span className="text-xs text-surface-300 font-medium truncate max-w-[200px]">
+          <span className="text-xs text-surface-300 font-medium truncate max-w-50">
             {repoPath?.split('/').pop() || 'Repositorio'}
           </span>
           <span
             title={isConnected ? 'Servidor conectado' : 'Sin conexión al servidor'}
             className={clsx(
-              'w-2 h-2 rounded-full flex-shrink-0',
+              'w-2 h-2 rounded-full shrink-0',
               isConnected ? 'bg-success-500' : 'bg-danger-500 animate-pulse'
             )}
           />

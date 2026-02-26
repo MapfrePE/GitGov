@@ -7,8 +7,14 @@ use crate::git::{
 use crate::models::AuditStatus;
 use crate::models::FileChange;
 use crate::outbox::{Outbox, OutboxEvent};
+use git2::Repository;
+use std::collections::HashSet;
+use std::fs;
+use std::io::Write;
 use std::sync::Arc;
 use tauri::State;
+
+const MAX_STAGE_FILES_EVENT_LIST: usize = 500;
 
 fn to_command_error(e: impl std::fmt::Display, code: &str) -> String {
     serde_json::to_string(&serde_json::json!({
@@ -23,6 +29,199 @@ fn trigger_flush(outbox: &Arc<Outbox>) {
     std::thread::spawn(move || {
         let _ = outbox_clone.flush();
     });
+}
+
+fn summarize_stage_files_for_event(files: &[String]) -> (Vec<String>, Option<serde_json::Value>) {
+    if files.len() <= MAX_STAGE_FILES_EVENT_LIST {
+        return (files.to_vec(), None);
+    }
+
+    let preview = files
+        .iter()
+        .take(MAX_STAGE_FILES_EVENT_LIST)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    (
+        preview,
+        Some(serde_json::json!({
+            "file_count": files.len(),
+            "files_preview_count": MAX_STAGE_FILES_EVENT_LIST,
+            "files_truncated": true
+        })),
+    )
+}
+
+fn repo_workdir(repo: &Repository) -> Result<&std::path::Path, String> {
+    repo.workdir()
+        .ok_or_else(|| to_command_error("Repositorio bare no soportado", "GIT_ERROR"))
+}
+
+fn normalize_ignore_rule(rule: &str) -> Option<String> {
+    let trimmed = rule.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn resolve_ignore_target_path(repo: &Repository, target: &str) -> Result<std::path::PathBuf, String> {
+    let workdir = repo_workdir(repo)?;
+    let normalized_target = target.trim().to_lowercase();
+    match normalized_target.as_str() {
+        "gitignore" => Ok(workdir.join(".gitignore")),
+        "gitgovignore" | "gitgov_ignore" => Ok(workdir.join(".gitgovignore")),
+        "exclude" | "git_info_exclude" => Ok(repo.path().join("info").join("exclude")),
+        _ => Err(to_command_error(
+            format!("Target de ignore no soportado: {}", target),
+            "VALIDATION_ERROR",
+        )),
+    }
+}
+
+#[tauri::command]
+pub fn cmd_apply_ignore_rules(
+    repo_path: String,
+    target: String,
+    rules: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let repo = open_repository(&repo_path).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+    let normalized_target = target.trim().to_lowercase();
+    let target_path = resolve_ignore_target_path(&repo, &target)?;
+
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| to_command_error(e, "IO_ERROR"))?;
+    }
+
+    let file_existed = target_path.exists();
+    let existing_raw = if file_existed {
+        fs::read_to_string(&target_path).map_err(|e| to_command_error(e, "IO_ERROR"))?
+    } else {
+        String::new()
+    };
+
+    let mut existing_lines = HashSet::new();
+    for line in existing_raw.lines() {
+        if let Some(norm) = normalize_ignore_rule(line) {
+            existing_lines.insert(norm);
+        }
+    }
+
+    let mut to_append = Vec::new();
+    for rule in rules.iter().filter_map(|r| normalize_ignore_rule(r)) {
+        if existing_lines.insert(rule.clone()) {
+            to_append.push(rule);
+        }
+    }
+
+    if !to_append.is_empty() {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&target_path)
+            .map_err(|e| to_command_error(e, "IO_ERROR"))?;
+
+        let needs_leading_newline = file_existed && !existing_raw.is_empty() && !existing_raw.ends_with('\n');
+        if needs_leading_newline {
+            writeln!(file).map_err(|e| to_command_error(e, "IO_ERROR"))?;
+        }
+
+        for rule in &to_append {
+            writeln!(file, "{}", rule).map_err(|e| to_command_error(e, "IO_ERROR"))?;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "target": normalized_target,
+        "target_path": target_path.to_string_lossy(),
+        "rules_requested": rules.len(),
+        "rules_added": to_append.len(),
+        "file_existed": file_existed,
+    }))
+}
+
+#[tauri::command]
+pub fn cmd_read_gitgovignore(repo_path: String) -> Result<serde_json::Value, String> {
+    let repo = open_repository(&repo_path).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+    let workdir = repo_workdir(&repo)?;
+    let target_path = workdir.join(".gitgovignore");
+
+    let exists = target_path.exists();
+    let content = if exists {
+        fs::read_to_string(&target_path).map_err(|e| to_command_error(e, "IO_ERROR"))?
+    } else {
+        String::new()
+    };
+
+    Ok(serde_json::json!({
+        "exists": exists,
+        "path": target_path.to_string_lossy(),
+        "content": content
+    }))
+}
+
+#[tauri::command]
+pub fn cmd_remove_ignore_rules(
+    repo_path: String,
+    target: String,
+    rules: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let repo = open_repository(&repo_path).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+    let target_path = resolve_ignore_target_path(&repo, &target)?;
+    let normalized_target = target.trim().to_lowercase();
+
+    let file_existed = target_path.exists();
+    if !file_existed {
+        return Ok(serde_json::json!({
+            "target": normalized_target,
+            "target_path": target_path.to_string_lossy(),
+            "rules_requested": rules.len(),
+            "rules_removed": 0,
+            "file_existed": false,
+        }));
+    }
+
+    let existing_raw = fs::read_to_string(&target_path).map_err(|e| to_command_error(e, "IO_ERROR"))?;
+    let to_remove: HashSet<String> = rules.into_iter().filter_map(|r| normalize_ignore_rule(&r)).collect();
+    if to_remove.is_empty() {
+        return Ok(serde_json::json!({
+            "target": normalized_target,
+            "target_path": target_path.to_string_lossy(),
+            "rules_requested": 0,
+            "rules_removed": 0,
+            "file_existed": true,
+        }));
+    }
+
+    let mut removed_count = 0usize;
+    let mut kept_lines: Vec<String> = Vec::new();
+    for line in existing_raw.lines() {
+        if let Some(norm) = normalize_ignore_rule(line) {
+            if to_remove.contains(&norm) {
+                removed_count += 1;
+                continue;
+            }
+        }
+        kept_lines.push(line.to_string());
+    }
+
+    let mut rebuilt = kept_lines.join("\n");
+    if existing_raw.ends_with('\n') && !rebuilt.is_empty() {
+        rebuilt.push('\n');
+    }
+
+    fs::write(&target_path, rebuilt).map_err(|e| to_command_error(e, "IO_ERROR"))?;
+
+    Ok(serde_json::json!({
+        "target": normalized_target,
+        "target_path": target_path.to_string_lossy(),
+        "rules_requested": to_remove.len(),
+        "rules_removed": removed_count,
+        "file_existed": true,
+    }))
 }
 
 #[tauri::command]
@@ -54,16 +253,21 @@ pub fn cmd_stage_files(
     let repo = open_repository(&repo_path).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
 
     let files_to_stage: Vec<String> = files.clone();
+    let (event_files, stage_metadata) = summarize_stage_files_for_event(&files_to_stage);
 
     match stage_files(&repo, &files_to_stage) {
         Ok(()) => {
-            let event = OutboxEvent::new(
+            let mut event = OutboxEvent::new(
                 "stage_files".to_string(),
                 developer_login,
                 None,
                 AuditStatus::Success,
             )
-            .with_files(files_to_stage.clone());
+            .with_files(event_files.clone());
+
+            if let Some(metadata) = stage_metadata.clone() {
+                event = event.with_metadata(metadata);
+            }
 
             let _ = outbox.add(event);
             trigger_flush(&outbox);
@@ -74,14 +278,18 @@ pub fn cmd_stage_files(
             }))
         }
         Err(e) => {
-            let event = OutboxEvent::new(
+            let mut event = OutboxEvent::new(
                 "stage_files".to_string(),
                 developer_login,
                 None,
                 AuditStatus::Failed,
             )
-            .with_files(files_to_stage)
+            .with_files(event_files)
             .with_reason(e.to_string());
+
+            if let Some(metadata) = stage_metadata {
+                event = event.with_metadata(metadata);
+            }
 
             let _ = outbox.add(event);
             trigger_flush(&outbox);

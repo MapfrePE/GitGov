@@ -17,7 +17,7 @@ export function MainLayout({ children }: MainLayoutProps) {
   if (isLoading) {
     return (
       <div className="flex h-screen bg-surface-900">
-        <div className="w-14 bg-surface-950 border-r border-white/[0.04] flex flex-col items-center py-3">
+        <div className="w-14 bg-surface-950 border-r border-white/4 flex flex-col items-center py-3">
           <Skeleton className="w-8 h-8 rounded-lg mb-6" />
           <div className="flex-1 flex flex-col items-center gap-2">
             <Skeleton className="w-9 h-9 rounded-lg" />

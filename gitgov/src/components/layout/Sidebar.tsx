@@ -14,7 +14,7 @@ export function Sidebar() {
   ]
 
   return (
-    <div className="w-14 bg-surface-950 border-r border-white/[0.04] flex flex-col items-center py-3">
+    <div className="w-14 bg-surface-950 border-r border-white/4 flex flex-col items-center py-3">
       {/* Logo */}
       <div className="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center mb-6">
         <FolderGit2 size={15} className="text-white" />
@@ -33,7 +33,7 @@ export function Sidebar() {
                 'w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-200',
                 isActive
                   ? 'bg-white/[0.08] text-white'
-                  : 'text-surface-500 hover:text-surface-300 hover:bg-white/[0.04]'
+                  : 'text-surface-500 hover:text-surface-300 hover:bg-white/4'
               )
             }
           >
@@ -55,7 +55,7 @@ export function Sidebar() {
             onClick={logout}
             title="Cerrar sesión"
             aria-label="Cerrar sesión"
-            className="w-9 h-9 flex items-center justify-center rounded-lg text-surface-600 hover:text-surface-400 hover:bg-white/[0.04] transition-all duration-200"
+            className="w-9 h-9 flex items-center justify-center rounded-lg text-surface-600 hover:text-surface-400 hover:bg-white/4 transition-all duration-200"
           >
             <LogOut size={16} strokeWidth={1.5} aria-hidden="true" />
           </button>

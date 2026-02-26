@@ -3,13 +3,14 @@ import { RouterProvider } from 'react-router-dom'
 import { router } from './router'
 import { useAuthStore } from './store/useAuthStore'
 import { useControlPlaneStore } from './store/useControlPlaneStore'
+import { useUpdateStore } from './store/useUpdateStore'
 import { ToastContainer } from './components/shared/Toast'
 import { FolderGit2 } from 'lucide-react'
 import { ErrorBoundary } from './components/shared/ErrorBoundary'
 
 function SplashScreen() {
   return (
-    <div className="min-h-[100dvh] bg-surface-950 flex flex-col items-center justify-center">
+    <div className="min-h-dvh bg-surface-950 flex flex-col items-center justify-center">
       <div className="animate-scale-in flex flex-col items-center">
         <div className="w-12 h-12 rounded-xl bg-brand-600 flex items-center justify-center mb-5">
           <FolderGit2 size={24} className="text-white" />
@@ -29,6 +30,7 @@ function SplashScreen() {
 function App() {
   const { checkExistingSession, isLoading } = useAuthStore()
   const { initFromEnv } = useControlPlaneStore()
+  const { initializeUpdater } = useUpdateStore()
   const [initialized, setInitialized] = useState(false)
 
   useEffect(() => {
@@ -41,6 +43,11 @@ function App() {
     }
     init()
   }, [checkExistingSession, initFromEnv])
+
+  useEffect(() => {
+    if (!initialized || isLoading) return
+    void initializeUpdater()
+  }, [initialized, isLoading, initializeUpdater])
 
   if (!initialized || isLoading) {
     return <SplashScreen />

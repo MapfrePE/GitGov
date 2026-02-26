@@ -1,0 +1,12 @@
+{
+  "version": "0.1.1",
+  "notes": "Fixes de rendimiento para repositorios con cambios masivos y mejoras de limpieza (.gitgovignore).",
+  "pub_date": "2026-02-26T12:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "PEGA_AQUI_LA_FIRMA_DEL_ARCHIVO_SIG",
+      "url": "https://downloads.gitgov.com/desktop/stable/GitGov_0.1.1_x64-setup.exe"
+    }
+  }
+}
+
