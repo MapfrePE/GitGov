@@ -153,8 +153,8 @@ export function DocsClient({ slug, docs, allDocs }: DocsClientProps) {
                                 <span className="text-[10px] uppercase tracking-tighter text-gray-500 font-bold">{t('footer.rights') as string}</span>
                                 <span className="text-xs text-gray-400">© {new Date().getFullYear()} GitGov</span>
                             </div>
-                            <Button variant="ghost" size="sm" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}>
-                                {t('hero.cta') as string}
+                            <Button variant="ghost" size="sm" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} aria-label="Back to top">
+                                Back to top
                             </Button>
                         </div>
                     </article>

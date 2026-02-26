@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(node:*)",
-      "Bash(git filter-branch:*)"
+      "Bash(git filter-branch:*)",
+      "Bash(dir:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(where:*)",
+      "Bash(\"C:/Program Files/nodejs/node.exe\" ./node_modules/.bin/tsc --noEmit)",
+      "Bash(node_modules/.bin/tsc.cmd:*)",
+      "Bash(export PATH=\"/c/Program Files/nodejs:$PATH\")"
     ]
   }
 }

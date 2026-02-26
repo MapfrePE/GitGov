@@ -35,9 +35,9 @@ export function HomeClient() {
                         description={t('whatIs.description') as string}
                     />
 
-                    <div className="grid md:grid-cols-2 gap-8 mt-12">
-                        <SectionReveal>
-                            <div className="glass-card rounded-2xl p-8">
+                    <div className="grid md:grid-cols-2 gap-8 mt-12 items-stretch">
+                        <SectionReveal className="h-full">
+                            <div className="glass-card rounded-2xl p-8 h-full">
                                 <div className="flex items-center gap-3 mb-4">
                                     <div className="w-10 h-10 rounded-xl bg-red-500/10 flex items-center justify-center">
                                         <HiOutlineEye className="text-red-400" size={22} />
@@ -48,8 +48,8 @@ export function HomeClient() {
                             </div>
                         </SectionReveal>
 
-                        <SectionReveal delay={0.15}>
-                            <div className="glass-card rounded-2xl p-8 glow-border">
+                        <SectionReveal delay={0.15} className="h-full">
+                            <div className="glass-card rounded-2xl p-8 glow-border h-full">
                                 <div className="flex items-center gap-3 mb-4">
                                     <div className="w-10 h-10 rounded-xl bg-brand-500/10 flex items-center justify-center">
                                         <HiOutlineShieldCheck className="text-brand-400" size={22} />

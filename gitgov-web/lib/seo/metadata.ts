@@ -26,6 +26,9 @@ export function generatePageMetadata({
         title: pageTitle,
         description: pageDescription,
         metadataBase: new URL(siteConfig.url),
+        alternates: {
+            canonical: pageUrl,
+        },
         openGraph: {
             title: pageTitle,
             description: pageDescription,
@@ -51,6 +54,13 @@ export function generatePageMetadata({
         robots: {
             index: true,
             follow: true,
+            googleBot: {
+                index: true,
+                follow: true,
+                'max-video-preview': -1,
+                'max-image-preview': 'large',
+                'max-snippet': -1,
+            },
         },
     };
 }

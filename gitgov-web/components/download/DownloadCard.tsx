@@ -83,12 +83,12 @@ export function DownloadCard({
                     {/* File info */}
                     <div className="mt-4 space-y-2 text-xs text-gray-500 w-full">
                         <div className="flex justify-between">
-                            <span>{t('contact.form.company') === 'Company' ? 'File' : 'Archivo'}</span>
-                            <span className="font-mono text-gray-400">{fileName}</span>
+                            <span>{t('download.file' as any) as string}</span>
+                            <span className="font-mono text-gray-400 truncate ml-2 max-w-[200px]">{fileName}</span>
                         </div>
                         <div className="flex justify-between">
-                            <span>Checksum</span>
-                            <span className="font-mono text-gray-400 truncate ml-2">{checksum}</span>
+                            <span>{t('download.checksum' as any) as string}</span>
+                            <span className="font-mono text-gray-400 truncate ml-2 max-w-[200px]">{checksum}</span>
                         </div>
                     </div>
                 </div>

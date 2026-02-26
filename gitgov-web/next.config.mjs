@@ -4,6 +4,7 @@ const nextConfig = {
     images: {
         formats: ['image/avif', 'image/webp'],
     },
+    poweredByHeader: false,
     // Workaround: disable output file tracing which causes errors in App Router-only projects
     outputFileTracing: false,
 };

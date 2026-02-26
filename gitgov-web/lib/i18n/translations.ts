@@ -256,6 +256,9 @@ export const translations = {
         es: 'Empieza a trabajar — cada operación Git será capturada automáticamente',
     },
 
+    'download.file': { en: 'File', es: 'Archivo' },
+    'download.checksum': { en: 'Checksum', es: 'Checksum' },
+
     // ═══ Contact Page ═══
     'contact.badge': { en: 'Contact', es: 'Contacto' },
     'contact.title': { en: 'Get in', es: 'Ponte en' },

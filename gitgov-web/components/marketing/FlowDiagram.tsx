@@ -4,32 +4,49 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import { SectionReveal } from '@/components/ui/SectionReveal';
 import { HiOutlineDesktopComputer, HiOutlineServer, HiOutlineLink } from 'react-icons/hi';
+import { useTranslation } from '@/lib/i18n';
 
-const steps = [
+interface StepConfig {
+    icon: React.ReactNode;
+    labelKey: string;
+    descKey: string;
+    color: string;
+    dotColor: string;
+}
+
+const stepConfigs: StepConfig[] = [
     {
         icon: <HiOutlineDesktopComputer size={28} />,
-        label: 'Desktop App',
-        description: 'Capture every Git operation at the developer\'s machine',
+        labelKey: 'howItWorks.desktop',
+        descKey: 'howItWorks.desktopDesc',
         color: 'brand',
         dotColor: 'bg-brand-500',
     },
     {
         icon: <HiOutlineServer size={28} />,
-        label: 'Control Plane',
-        description: 'Centralize events, enforce policies, generate audit trails',
+        labelKey: 'howItWorks.controlPlane',
+        descKey: 'howItWorks.controlPlaneDesc',
         color: 'brand',
         dotColor: 'bg-brand-400',
     },
     {
         icon: <HiOutlineLink size={28} />,
-        label: 'Integrations',
-        description: 'Correlate with Jenkins CI, Jira tickets, GitHub webhooks',
+        labelKey: 'howItWorks.integrations',
+        descKey: 'howItWorks.integrationsDesc',
         color: 'accent',
         dotColor: 'bg-accent-400',
     },
 ];
 
 export function FlowDiagram() {
+    const { t } = useTranslation();
+
+    const steps = stepConfigs.map((s) => ({
+        ...s,
+        label: t(s.labelKey as any) as string,
+        description: t(s.descKey as any) as string,
+    }));
+
     return (
         <SectionReveal>
             <div className="relative">
@@ -57,7 +74,7 @@ export function FlowDiagram() {
 
                     {steps.map((step, i) => (
                         <motion.div
-                            key={step.label}
+                            key={step.labelKey}
                             className="flex flex-col items-center text-center w-1/3 relative z-10"
                             initial={{ opacity: 0, y: 20 }}
                             whileInView={{ opacity: 1, y: 0 }}
@@ -65,7 +82,7 @@ export function FlowDiagram() {
                             transition={{ delay: i * 0.2, duration: 0.5 }}
                         >
                             {/* Node */}
-                            <div className={`w-20 h-20 rounded-2xl glass-card flex items-center justify-center mb-5 text-${step.color === 'brand' ? 'brand' : 'accent'}-400 border border-${step.color === 'brand' ? 'brand-500' : 'accent-400'}/20`}>
+                            <div className={`w-20 h-20 rounded-2xl glass-card flex items-center justify-center mb-5 ${step.color === 'brand' ? 'text-brand-400 border-brand-500/20' : 'text-accent-400 border-accent-400/20'} border`}>
                                 {step.icon}
                             </div>
 
@@ -82,7 +99,7 @@ export function FlowDiagram() {
                 <div className="md:hidden space-y-6">
                     {steps.map((step, i) => (
                         <motion.div
-                            key={step.label}
+                            key={step.labelKey}
                             className="flex items-start gap-4"
                             initial={{ opacity: 0, x: -20 }}
                             whileInView={{ opacity: 1, x: 0 }}
@@ -90,7 +107,7 @@ export function FlowDiagram() {
                             transition={{ delay: i * 0.15 }}
                         >
                             <div className="flex flex-col items-center">
-                                <div className={`w-12 h-12 rounded-xl glass-card flex items-center justify-center text-${step.color === 'brand' ? 'brand' : 'accent'}-400`}>
+                                <div className={`w-12 h-12 rounded-xl glass-card flex items-center justify-center ${step.color === 'brand' ? 'text-brand-400' : 'text-accent-400'}`}>
                                     {step.icon}
                                 </div>
                                 {i < steps.length - 1 && (

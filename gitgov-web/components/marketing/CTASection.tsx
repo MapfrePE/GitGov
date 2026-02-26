@@ -22,8 +22,8 @@ export function CTASection({
 }: CTASectionProps) {
     return (
         <section className="relative py-24 md:py-32 overflow-hidden">
-            {/* Background gradient */}
-            <div className="absolute inset-0">
+            {/* Background gradient — pointer-events-none so clicks reach buttons */}
+            <div className="absolute inset-0 pointer-events-none">
                 <div
                     className="absolute inset-0"
                     style={{
@@ -33,10 +33,10 @@ export function CTASection({
             </div>
 
             {/* Top/bottom lines */}
-            <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-brand-500/20 to-transparent" />
-            <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-brand-500/10 to-transparent" />
+            <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-brand-500/20 to-transparent pointer-events-none" />
+            <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-brand-500/10 to-transparent pointer-events-none" />
 
-            <Container>
+            <Container className="relative z-10">
                 <SectionReveal>
                     <div className="text-center max-w-3xl mx-auto">
                         <h2 className="text-3xl md:text-heading font-bold tracking-tight">

@@ -1,0 +1,10 @@
+﻿{
+  "name": "GitGov",
+  "short_name": "GitGov",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0e1a",
+  "theme_color": "#0a0e1a",
+  "description": "Git governance and traceability control plane.",
+  "icons": []
+}

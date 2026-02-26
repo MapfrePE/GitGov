@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import Link from 'next/link';
 import { motion } from 'framer-motion';
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -11,7 +12,7 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
     icon?: React.ReactNode;
 }
 
-const variants = {
+const variantStyles = {
     primary:
         'bg-brand-500 text-surface-300 hover:bg-brand-400 shadow-glow hover:shadow-glow-lg font-semibold',
     secondary:
@@ -42,7 +43,8 @@ export function Button({
     transition-all duration-300 ease-out
     focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-surface-300
     disabled:opacity-50 disabled:cursor-not-allowed
-    ${variants[variant]}
+    active:scale-[0.98]
+    ${variantStyles[variant]}
     ${sizes[size]}
     ${className}
   `.trim();
@@ -55,15 +57,25 @@ export function Button({
     );
 
     if (href) {
+        // External links or download paths
+        if (href.startsWith('http') || href.startsWith('/downloads/')) {
+            return (
+                <motion.a
+                    href={href}
+                    className={classes}
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                >
+                    {content}
+                </motion.a>
+            );
+        }
+
+        // Internal navigation via Next.js Link
         return (
-            <motion.a
-                href={href}
-                className={classes}
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-            >
+            <Link href={href} className={classes}>
                 {content}
-            </motion.a>
+            </Link>
         );
     }
 

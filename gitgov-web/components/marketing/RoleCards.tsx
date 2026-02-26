@@ -3,6 +3,7 @@
 import React from 'react';
 import { Card } from '@/components/ui/Card';
 import { SectionReveal } from '@/components/ui/SectionReveal';
+import { useTranslation } from '@/lib/i18n';
 
 interface RoleCardData {
     icon: React.ReactNode;
@@ -16,10 +17,12 @@ interface RoleCardsProps {
 }
 
 export function RoleCards({ roles }: RoleCardsProps) {
+    const { t } = useTranslation();
+
     return (
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
             {roles.map((role, i) => (
-                <SectionReveal key={role.role} delay={i * 0.15}>
+                <SectionReveal key={role.role} delay={i * 0.15} className="h-full">
                     <Card hover glow padding="lg" className="h-full group">
                         <div className="flex flex-col h-full">
                             {/* Icon */}
@@ -32,13 +35,13 @@ export function RoleCards({ roles }: RoleCardsProps) {
 
                             {/* Pain point */}
                             <div className="mb-4">
-                                <span className="text-[10px] font-semibold tracking-wider uppercase text-red-400/70">Challenge</span>
+                                <span className="text-[10px] font-semibold tracking-wider uppercase text-red-400/70">{t('challenge')}</span>
                                 <p className="text-sm text-gray-400 mt-1">{role.painPoint}</p>
                             </div>
 
                             {/* Solution */}
                             <div className="mt-auto pt-4 border-t border-white/[0.04]">
-                                <span className="text-[10px] font-semibold tracking-wider uppercase text-brand-400/70">With GitGov</span>
+                                <span className="text-[10px] font-semibold tracking-wider uppercase text-brand-400/70">{t('withGitGov')}</span>
                                 <p className="text-sm text-gray-300 mt-1">{role.solution}</p>
                             </div>
                         </div>

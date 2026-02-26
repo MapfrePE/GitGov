@@ -11,7 +11,7 @@ export function NotFoundClient() {
     const { t } = useTranslation();
 
     return (
-        <section className="min-h-screen flex items-center relative overflow-hidden">
+        <section className="min-h-[100dvh] flex items-center relative overflow-hidden">
             {/* Background */}
             <div className="absolute inset-0">
                 <div
