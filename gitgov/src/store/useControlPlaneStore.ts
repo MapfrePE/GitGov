@@ -226,18 +226,20 @@ function persistJiraCoverageFilters(filters: JiraCoverageFilters) {
 
 function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: ServerConfig | null): ServerConfig {
   const stored = readStoredServerConfig()
+  const envUrl = normalizeLoopbackUrl(import.meta.env.VITE_SERVER_URL || '')
+  const envApiKey = (import.meta.env.VITE_API_KEY || '').trim()
   const url =
     normalizeLoopbackUrl(input?.url ?? '') ||
     normalizeLoopbackUrl(previous?.url ?? '') ||
+    envUrl ||
     normalizeLoopbackUrl(stored?.url ?? '') ||
-    import.meta.env.VITE_SERVER_URL ||
     'http://127.0.0.1:3000'
 
   const apiKey =
     input?.api_key?.trim() ||
     previous?.api_key?.trim() ||
+    envApiKey ||
     stored?.api_key?.trim() ||
-    import.meta.env.VITE_API_KEY ||
     LEGACY_DEFAULT_API_KEY
 
   return {
