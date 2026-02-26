@@ -1,10 +1,10 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import clsx from 'clsx'
 import { useRepoStore } from '@/store/useRepoStore'
 import { useAuthStore } from '@/store/useAuthStore'
 import type { FileChange } from '@/lib/types'
 import { FILE_STATUS_COLORS } from '@/lib/constants'
-import { FileText, AlertCircle, CheckSquare, Plus, FileCode } from 'lucide-react'
+import { FileText, AlertCircle, CheckSquare, Plus, FileCode, Loader2 } from 'lucide-react'
 
 interface FileItemProps {
   file: FileChange
@@ -12,9 +12,10 @@ interface FileItemProps {
   disabled: boolean
   onToggle: () => void
   onViewDiff: () => void
+  onUnstage: () => void
 }
 
-const FileItem = memo(function FileItem({ file, selected, disabled, onToggle, onViewDiff }: FileItemProps) {
+const FileItem = memo(function FileItem({ file, selected, disabled, onToggle, onViewDiff, onUnstage }: FileItemProps) {
   const statusChar = {
     Modified: 'M',
     Added: 'A',
@@ -68,9 +69,13 @@ const FileItem = memo(function FileItem({ file, selected, disabled, onToggle, on
       </div>
 
       {file.staged && (
-        <span className="text-[9px] font-medium bg-brand-500/10 text-brand-400 px-1.5 py-0.5 rounded">
-          Staged
-        </span>
+        <button
+          onClick={(e) => { e.stopPropagation(); onUnstage() }}
+          title="Quitar del staging"
+          className="text-[9px] font-medium bg-brand-500/10 text-brand-400 px-1.5 py-0.5 rounded hover:bg-danger-500/15 hover:text-danger-400 transition-colors"
+        >
+          Staged ×
+        </button>
       )}
 
       {disabled && (
@@ -103,9 +108,11 @@ export function FileList() {
     deselectAll,
     loadDiff,
     stageSelected,
+    unstageFiles,
   } = useRepoStore()
 
   const { user } = useAuthStore()
+  const [isPreparing, setIsPreparing] = useState(false)
 
   const handleToggle = (path: string, isSelected: boolean) => {
     if (isSelected) {
@@ -121,7 +128,19 @@ export function FileList() {
     }
   }
 
-  const allSelected = fileChanges.length > 0 && selectedFiles.size === fileChanges.length
+  const handlePrepareAll = async () => {
+    if (!user) return
+    setIsPreparing(true)
+    try {
+      selectAll()
+      await stageSelected(user.login)
+    } finally {
+      setIsPreparing(false)
+    }
+  }
+
+  const hasUnstagedFiles = fileChanges.some((f) => !f.staged)
+  const someSelected = selectedFiles.size > 0
 
   return (
     <div className="h-full flex flex-col bg-surface-900/50 border-r border-surface-700/30">
@@ -130,21 +149,44 @@ export function FileList() {
           Cambios ({fileChanges.length})
         </h3>
         <div className="flex gap-2">
-          {selectedFiles.size > 0 && (
-            <button
-              onClick={handleStageSelected}
-              className="text-[11px] text-brand-400 hover:text-brand-300 flex items-center gap-1 transition-colors"
-            >
-              <Plus size={11} />
-              Preparar ({selectedFiles.size})
-            </button>
-          )}
-          <button
-            onClick={allSelected ? deselectAll : selectAll}
-            className="text-[11px] text-surface-500 hover:text-surface-300 transition-colors"
-          >
-            {allSelected ? 'Deseleccionar' : 'Seleccionar todo'}
-          </button>
+          {someSelected ? (
+            <>
+              <button
+                onClick={handleStageSelected}
+                className="text-[11px] text-brand-400 hover:text-brand-300 flex items-center gap-1 transition-colors"
+              >
+                <Plus size={11} />
+                Preparar ({selectedFiles.size})
+              </button>
+              <button
+                onClick={deselectAll}
+                className="text-[11px] text-surface-500 hover:text-surface-300 transition-colors"
+              >
+                Deseleccionar
+              </button>
+            </>
+          ) : hasUnstagedFiles ? (
+            <>
+              <button
+                onClick={handlePrepareAll}
+                disabled={isPreparing}
+                className="text-[11px] text-brand-400 hover:text-brand-300 flex items-center gap-1 transition-colors disabled:opacity-50"
+              >
+                {isPreparing ? (
+                  <Loader2 size={11} className="animate-spin" />
+                ) : (
+                  <Plus size={11} />
+                )}
+                Preparar todo
+              </button>
+              <button
+                onClick={selectAll}
+                className="text-[11px] text-surface-500 hover:text-surface-300 transition-colors"
+              >
+                Seleccionar todo
+              </button>
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -164,6 +206,7 @@ export function FileList() {
               disabled={false}
               onToggle={() => handleToggle(file.path, selectedFiles.has(file.path))}
               onViewDiff={() => loadDiff(file.path)}
+              onUnstage={() => unstageFiles([file.path])}
             />
           ))
         )}

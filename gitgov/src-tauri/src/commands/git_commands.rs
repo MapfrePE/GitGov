@@ -2,7 +2,7 @@ use crate::audit::AuditDatabase;
 use crate::config::{load_config, validate_commit_message};
 use crate::git::{
     create_commit, get_file_diff, get_working_tree_changes, has_staged_changes, open_repository,
-    stage_files, unstage_all,
+    stage_files, unstage_all, unstage_files,
 };
 use crate::models::AuditStatus;
 use crate::models::FileChange;
@@ -96,6 +96,15 @@ pub fn cmd_unstage_all(repo_path: String) -> Result<(), String> {
     let repo = open_repository(&repo_path).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
 
     unstage_all(&repo).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_unstage_files(repo_path: String, files: Vec<String>) -> Result<(), String> {
+    let repo = open_repository(&repo_path).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+
+    unstage_files(&repo, &files).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
 
     Ok(())
 }

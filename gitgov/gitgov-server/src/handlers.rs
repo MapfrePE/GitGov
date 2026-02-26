@@ -602,10 +602,13 @@ pub async fn get_jira_ticket_coverage(
         .await
     {
         Ok(resp) => (StatusCode::OK, Json(resp)),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(TicketCoverageResponse::default()),
-        ),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to compute Jira ticket coverage");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(TicketCoverageResponse::default()),
+            )
+        }
     }
 }
 

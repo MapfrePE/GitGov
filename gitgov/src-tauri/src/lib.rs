@@ -124,6 +124,7 @@ pub fn run() {
             commands::cmd_get_file_diff,
             commands::cmd_stage_files,
             commands::cmd_unstage_all,
+            commands::cmd_unstage_files,
             commands::cmd_commit,
             commands::cmd_push,
             commands::cmd_list_branches,

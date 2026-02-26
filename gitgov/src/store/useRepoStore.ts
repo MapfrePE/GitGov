@@ -29,6 +29,7 @@ interface RepoActions {
   deselectAll: () => void
   stageSelected: (developerLogin: string) => Promise<void>
   unstageAll: () => Promise<void>
+  unstageFiles: (paths: string[]) => Promise<void>
   loadDiff: (filePath: string) => Promise<void>
   createBranch: (name: string, from: string, developerLogin: string, isAdmin: boolean, group?: string) => Promise<void>
   checkoutBranch: (name: string) => Promise<void>
@@ -159,6 +160,17 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
     if (!repoPath) return
     try {
       await tauriInvoke('cmd_unstage_all', { repoPath })
+      await get().refreshStatus()
+    } catch (e) {
+      set({ error: parseCommandError(String(e)).message })
+    }
+  },
+
+  unstageFiles: async (paths: string[]) => {
+    const { repoPath } = get()
+    if (!repoPath || paths.length === 0) return
+    try {
+      await tauriInvoke('cmd_unstage_files', { repoPath, files: paths })
       await get().refreshStatus()
     } catch (e) {
       set({ error: parseCommandError(String(e)).message })

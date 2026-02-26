@@ -28,6 +28,24 @@ pub fn stage_files(repo: &Repository, files: &[String]) -> Result<(), GitError> 
     Ok(())
 }
 
+pub fn unstage_files(repo: &Repository, files: &[String]) -> Result<(), GitError> {
+    let head = repo
+        .head()
+        .map_err(|e| GitError::GitError(e.message().to_string()))?;
+
+    let commit = head
+        .peel_to_commit()
+        .map_err(|e| GitError::GitError(e.message().to_string()))?;
+
+    repo.reset_default(
+        Some(commit.as_object()),
+        files.iter().map(|s| s.as_str()),
+    )
+    .map_err(|e| GitError::GitError(e.message().to_string()))?;
+
+    Ok(())
+}
+
 pub fn unstage_all(repo: &Repository) -> Result<(), GitError> {
     let head = repo
         .head()
