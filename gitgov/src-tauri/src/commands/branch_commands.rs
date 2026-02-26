@@ -1,7 +1,8 @@
 use crate::audit::AuditDatabase;
 use crate::config::{load_config, validate_branch_name};
 use crate::git::{
-    checkout_branch, create_branch, get_current_branch, list_branches, open_repository, BranchInfo,
+    checkout_branch, create_branch, get_branch_sync_status, get_current_branch, list_branches,
+    open_repository, BranchInfo, BranchSyncStatus,
 };
 use crate::models::{AuditAction, AuditLogEntry, AuditStatus};
 use crate::outbox::{Outbox, OutboxEvent};
@@ -40,6 +41,19 @@ pub fn cmd_get_current_branch(repo_path: String) -> Result<String, String> {
     let branch = get_current_branch(&repo).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
 
     Ok(branch)
+}
+
+#[tauri::command]
+pub fn cmd_get_branch_sync_status(
+    repo_path: String,
+    branch: Option<String>,
+) -> Result<BranchSyncStatus, String> {
+    let repo = open_repository(&repo_path).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+
+    let status = get_branch_sync_status(&repo, branch.as_deref())
+        .map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+
+    Ok(status)
 }
 
 #[tauri::command]

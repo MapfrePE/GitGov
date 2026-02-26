@@ -61,7 +61,10 @@ fi
 # 4. Send Client Event
 echo ""
 echo "4. Send Client Event..."
-EVENT_UUID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+EVENT_UUID=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || \
+  powershell.exe -NoProfile -Command "[System.Guid]::NewGuid().ToString()" 2>/dev/null | tr -d '\r\n' || \
+  cat /proc/sys/kernel/random/uuid 2>/dev/null || \
+  printf '%08x-%04x-%04x-%04x-%012x' $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM)
 TIMESTAMP=$(date +%s)000
 
 EVENT_RESPONSE=$(curl -s -X POST "$SERVER_URL/events" \
@@ -91,7 +94,7 @@ echo ""
 echo "5. Verify Event in Logs..."
 sleep 1
 LOGS=$(curl -s -H "Authorization: Bearer $API_KEY" \
-    "$SERVER_URL/logs?limit=10")
+    "$SERVER_URL/logs?limit=10&offset=0")
 
 if echo "$LOGS" | grep -q "successful_push"; then
     pass "Event appears in logs"
@@ -116,7 +119,7 @@ fi
 echo ""
 echo "7. Get Combined Events..."
 COMBINED=$(curl -s -H "Authorization: Bearer $API_KEY" \
-    "$SERVER_URL/logs?limit=5")
+    "$SERVER_URL/logs?limit=5&offset=0")
 
 if echo "$COMBINED" | grep -q "events"; then
     EVENT_COUNT=$(echo "$COMBINED" | jq '.events | length' 2>/dev/null || echo "0")

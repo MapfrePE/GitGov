@@ -750,7 +750,9 @@ pub struct SignalFilter {
     pub status: Option<String>,
     pub signal_type: Option<String>,
     pub user_login: Option<String>,
+    #[serde(default)]
     pub limit: usize,
+    #[serde(default)]
     pub offset: usize,
 }
 
@@ -2206,7 +2208,9 @@ pub async fn get_governance_events(
 pub struct GovernanceEventFilter {
     pub org_name: Option<String>,
     pub event_type: Option<String>,
+    #[serde(default)]
     pub limit: usize,
+    #[serde(default)]
     pub offset: usize,
 }
 

@@ -16,7 +16,11 @@ Esta guía te ayuda a resolver problemas comunes. Cada sección explica:
 3. [Problemas de Base de Datos](#problemas-de-base-de-datos)
 4. [Problemas de Serialización](#problemas-de-serialización)
 5. [Problemas de Conexión](#problemas-de-conexión)
-6. [Logs y Debugging](#logs-y-debugging)
+6. [Problemas de Variables de Entorno](#problemas-de-variables-de-entorno)
+7. [Rate Limiting (429)](#rate-limiting-429)
+8. [Integraciones Jenkins / Jira](#integraciones-jenkins--jira)
+9. [Paginación: defaults y límites](#paginación-defaults-y-límites)
+10. [Logs y Debugging](#logs-y-debugging)
 
 ---
 
@@ -334,6 +338,215 @@ El certificado SSL no es válido o es auto-firmado.
 
 ---
 
+## Problemas de Variables de Entorno
+
+### El Outbox envía eventos pero el Dashboard no muestra nada (o viceversa)
+
+**Síntomas:**
+- Haces commit/push, los logs del servidor muestran que llegan eventos (status 200)
+- Pero el panel "Control Plane" de la app muestra "Sin datos" o no actualiza
+
+**Causa: Desktop App tiene DOS capas de configuración independientes**
+
+La Desktop App tiene dos contextos de ejecución con fuentes de configuración distintas:
+
+| Capa | Variables | Qué lee | Para qué |
+|------|-----------|---------|----------|
+| Rust/Tauri (backend) | `GITGOV_SERVER_URL`, `GITGOV_API_KEY` | `gitgov/.env` (lado Rust) | Outbox, git commands, envío de eventos |
+| Vite/React (frontend) | `VITE_SERVER_URL`, `VITE_API_KEY` | `gitgov/.env` (lado Vite) | Dashboard UI, consultas desde el navegador |
+
+Si configuras solo `VITE_*`, el outbox (Rust) no sabe a dónde enviar. Si configuras solo `GITGOV_*`, el dashboard (React) no sabe a dónde consultar.
+
+**Solución: definir ambos pares en `gitgov/.env`:**
+
+```env
+# Para el frontend React (dashboard UI)
+VITE_SERVER_URL=http://127.0.0.1:3000
+VITE_API_KEY=tu-api-key-aqui
+
+# Para el backend Rust (outbox, git commands)
+GITGOV_SERVER_URL=http://127.0.0.1:3000
+GITGOV_API_KEY=tu-api-key-aqui
+```
+
+**Diagnóstico rápido:**
+- Si el servidor recibe eventos (logs muestran 200) pero dashboard no carga → falta `VITE_*`
+- Si dashboard carga pero no llegan eventos al servidor → falta `GITGOV_*`
+- Si nada funciona → faltan ambos pares o la URL tiene `localhost` en vez de `127.0.0.1`
+
+---
+
+### La API key no aparece al arrancar el servidor en Docker/CI
+
+**Síntoma:** El servidor arranca sin errores pero nunca muestra la API key generada en los logs.
+
+**Causa:** Por seguridad, la API key generada automáticamente solo se imprime si:
+1. La salida estándar es una TTY interactiva (terminal real)
+2. O se usó el flag `--print-bootstrap-key` explícitamente
+
+En Docker/Kubernetes los logs no son TTY, así que la key no aparece.
+
+**Solución:**
+```bash
+# Opción 1: Flag explícito
+./gitgov-server --print-bootstrap-key
+
+# Opción 2: Establecer la key directamente en el entorno
+GITGOV_API_KEY=tu-uuid-aqui ./gitgov-server
+```
+
+Con `GITGOV_API_KEY` en el entorno, el servidor inserta esa key en la DB (si no existe) sin generar ni imprimir nada.
+
+---
+
+## Rate Limiting (429)
+
+### Error: 429 Too Many Requests
+
+**Síntoma:** El servidor responde con status 429 en lugar de procesar el request.
+
+**Causa:** Se superó el límite de requests por segundo para ese endpoint.
+
+**Límites por defecto:**
+
+| Endpoint | Límite | Burst |
+|----------|--------|-------|
+| `/events` | 10 req/s | 20 |
+| `/webhooks/github` (audit-stream) | 5 req/s | 10 |
+| `/integrations/jenkins` | 5 req/s | 10 |
+| `/integrations/jira` | 5 req/s | 10 |
+
+**La clave de rate limiting** es `{IP}:{SHA256(auth_header)[0:12]}`. Cada API key distinta tiene su propio límite por IP.
+
+**Solución para cargas altas:**
+
+Ajustar en `gitgov/gitgov-server/.env`:
+```env
+GITGOV_RATE_LIMIT_EVENTS_PER_MIN=600
+GITGOV_RATE_LIMIT_JENKINS_PER_MIN=300
+GITGOV_RATE_LIMIT_JIRA_PER_MIN=300
+GITGOV_RATE_LIMIT_ADMIN_PER_MIN=120
+```
+
+Reiniciar el servidor para que tome los nuevos valores.
+
+---
+
+## Integraciones Jenkins / Jira
+
+### Jenkins: eventos llegan pero no aparecen correlaciones
+
+**Síntomas:**
+- `POST /integrations/jenkins` devuelve 200
+- `GET /integrations/jenkins/correlations` devuelve array vacío
+
+**Causas posibles:**
+
+| Causa | Diagnóstico | Solución |
+|-------|-------------|----------|
+| SHA mismatch | El `commit_sha` que envía Jenkins no coincide con el de Desktop | Verificar que Jenkins reporta el SHA exacto del commit |
+| Tabla vacía de commits | No hay `client_events` de tipo `commit` en el server | Hacer al menos un commit + push desde Desktop primero |
+| Short vs full SHA | Jenkins envía SHA corto (7 chars), Desktop envía SHA completo | La correlación soporta prefijo, pero el SHA corto debe ser prefijo del largo |
+
+**Verificar manualmente:**
+```bash
+# Ver pipeline events ingresados
+curl -H "Authorization: Bearer $API_KEY" http://127.0.0.1:3000/integrations/jenkins/status
+
+# Ver correlaciones
+curl -H "Authorization: Bearer $API_KEY" "http://127.0.0.1:3000/integrations/jenkins/correlations?limit=10"
+```
+
+---
+
+### Jira: secret incorrecto o rechazado
+
+**Síntoma:** `POST /integrations/jira` devuelve 401.
+
+**Causa:** Si `JIRA_WEBHOOK_SECRET` está configurado en el servidor, todos los requests deben incluir el header `x-gitgov-jira-secret` con el valor correcto.
+
+**Solución:**
+```bash
+# Enviar con el header correcto
+curl -X POST http://127.0.0.1:3000/integrations/jira \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "x-gitgov-jira-secret: $JIRA_WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"ticket_id": "PROJ-1", ...}'
+```
+
+Si no quieres usar secret, simplemente no configures `JIRA_WEBHOOK_SECRET` (ni `JENKINS_WEBHOOK_SECRET`).
+
+---
+
+### DB: supabase_schema_v5 / v6 no aplicados
+
+**Síntoma:** `POST /integrations/jenkins` falla con error de tabla no encontrada, o el widget Pipeline Health no aparece.
+
+**Causa:** No se ejecutaron los schemas incrementales de Jenkins/Jira.
+
+**Solución:**
+```sql
+-- En Supabase SQL Editor, ejecutar en orden:
+-- supabase_schema_v5.sql  (pipeline_events para Jenkins)
+-- supabase_schema_v6.sql  (project_tickets + commit_ticket_correlations para Jira)
+```
+
+---
+
+## Paginación: defaults y límites
+
+### Error: "missing field `offset`" o "missing field `limit`"
+
+**Qué verás:**
+```
+Failed to deserialize query string: missing field `offset`
+```
+
+**Causa:** Antes de la corrección (Feb 2026) los campos `offset` y `limit` eran obligatorios en la query string.
+
+**Solución:** Ya no es necesario mandarlos. Todos los endpoints de lectura paginada usan defaults si faltan:
+
+| Campo | Default | Máximo |
+|-------|---------|--------|
+| `offset` | `0` | — |
+| `limit` | depende del endpoint (ver abajo) | 500 |
+
+**Defaults por endpoint:**
+
+| Endpoint | limit default si no se manda |
+|----------|------------------------------|
+| `/logs` | 100 |
+| `/integrations/jenkins/correlations` | 20 |
+| `/signals` | 100 |
+| `/governance-events` | 100 |
+
+**Ejemplos que ahora funcionan:**
+```bash
+# Antes fallaba con "missing field offset"
+curl -H "Authorization: Bearer $API_KEY" "$SERVER_URL/logs?limit=50"
+curl -H "Authorization: Bearer $API_KEY" "$SERVER_URL/integrations/jenkins/correlations?limit=20"
+curl -H "Authorization: Bearer $API_KEY" "$SERVER_URL/signals?limit=5"
+
+# Compatibilidad hacia atrás — mandar offset explícito sigue funcionando
+curl -H "Authorization: Bearer $API_KEY" "$SERVER_URL/logs?limit=50&offset=0"
+```
+
+### Cómo verificar el contrato de paginación (smoke script)
+
+El script `gitgov/gitgov-server/tests/smoke_contract.sh` valida que los 8 checks de contrato pasen:
+
+```bash
+cd gitgov/gitgov-server/tests
+SERVER_URL=http://127.0.0.1:3000 \
+API_KEY=<tu_api_key> \
+bash smoke_contract.sh
+```
+
+Salida esperada: `Results: 8 passed, 0 failed`
+
+---
+
 ## Logs y Debugging
 
 ### Cómo habilitar logs detallados
@@ -389,15 +602,29 @@ RUST_LOG=gitgov=debug npm run tauri dev
 
 Cuando algo no funciona, verifica en orden:
 
+**Conexión básica:**
 1. [ ] El servidor está corriendo en puerto 3000
-2. [ ] El health check devuelve OK
-3. [ ] La API key existe en la base de datos
-4. [ ] El header Authorization: Bearer se envía correctamente
-5. [ ] Las estructuras de datos coinciden entre cliente y servidor
-6. [ ] No hay NULLs donde se esperan objetos
-7. [ ] El worker del outbox está iniciado
-8. [ ] El archivo outbox.jsonl existe
-9. [ ] Los logs no muestran errores
+2. [ ] `curl http://127.0.0.1:3000/health` devuelve OK
+3. [ ] La API key existe en la base de datos (`api_keys.is_active = true`)
+4. [ ] El header es `Authorization: Bearer TU_KEY` (no `X-API-Key`)
+
+**Outbox (eventos no llegan al servidor):**
+5. [ ] `GITGOV_SERVER_URL` y `GITGOV_API_KEY` configurados en `gitgov/.env`
+6. [ ] El archivo `{data_local_dir}/gitgov/outbox.jsonl` existe y tiene eventos con `"sent": false`
+7. [ ] No hay mensaje `Outbox flush failed: status 401` en los logs de la app
+
+**Dashboard (llegan eventos pero UI no muestra):**
+8. [ ] `VITE_SERVER_URL` y `VITE_API_KEY` configurados en `gitgov/.env`
+9. [ ] No estás mezclando `localhost` y `127.0.0.1` (usar solo `127.0.0.1`)
+10. [ ] El auto-refresh (30s) no está bloqueado por CORS o red
+
+**Base de datos:**
+11. [ ] Se ejecutaron todos los schemas v1 a v6 en orden
+12. [ ] No hay panics con "invalid type: null" → revisar COALESCE en queries
+13. [ ] Las estructuras `ServerStats` / `CombinedEvent` coinciden frontend ↔ backend
+
+**Rate limiting:**
+14. [ ] No hay respuestas 429 en logs → ajustar `RATE_LIMIT_*` si es necesario
 
 ---
 

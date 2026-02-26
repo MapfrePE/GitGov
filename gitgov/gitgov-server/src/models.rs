@@ -345,7 +345,9 @@ pub struct EventFilter {
     pub status: Option<String>,
     pub start_date: Option<i64>,
     pub end_date: Option<i64>,
+    #[serde(default)]
     pub limit: usize,
+    #[serde(default)]
     pub offset: usize,
 }
 
@@ -927,7 +929,9 @@ pub struct JenkinsCorrelationFilter {
     pub repo_full_name: Option<String>,
     pub branch: Option<String>,
     pub user_login: Option<String>,
+    #[serde(default)]
     pub limit: usize,
+    #[serde(default)]
     pub offset: usize,
 }
 
@@ -1255,10 +1259,132 @@ mod tests {
         assert!(input.artifacts.is_empty());
     }
 
+    // ── Golden Path contract tests ────────────────────────────────────────────
+    // Validate the exact JSON shape the Desktop sends for each step of the
+    // Golden Path: stage_files → commit → attempt_push → successful_push.
+    // Pure deserialisation — no DB or server required; run in CI via `cargo test`.
+
+    fn gp_batch(event_type: &str, extra_fields: &str) -> ClientEventBatch {
+        let json = format!(
+            r#"{{
+                "events": [{{
+                    "event_uuid": "00000000-0000-0000-0000-000000000001",
+                    "event_type": "{event_type}",
+                    "user_login": "dev1",
+                    "repo_full_name": "MapfrePE/GitGov",
+                    "branch": "feat/golden",
+                    "files": ["src/main.rs", "src/lib.rs"],
+                    "status": "success"
+                    {extra_fields}
+                }}],
+                "client_version": "1.0.0"
+            }}"#
+        );
+        serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("failed to parse {event_type} batch: {e}"))
+    }
+
+    #[test]
+    fn golden_path_stage_files_contract() {
+        let batch = gp_batch("stage_files", "");
+        assert_eq!(batch.events.len(), 1);
+        let ev = &batch.events[0];
+        assert_eq!(ev.event_type, "stage_files");
+        assert_eq!(ev.user_login, "dev1");
+        assert!(!ev.files.is_empty(), "stage_files must carry file list");
+        assert_eq!(ev.status, "success");
+        assert!(!ev.event_uuid.is_empty(), "event_uuid required for dedup");
+    }
+
+    #[test]
+    fn golden_path_commit_contract() {
+        let batch = gp_batch(
+            "commit",
+            r#", "commit_sha": "abc123def4567890abc123def4567890abc12345""#,
+        );
+        let ev = &batch.events[0];
+        assert_eq!(ev.event_type, "commit");
+        assert!(ev.commit_sha.is_some(), "commit event must carry commit_sha");
+        assert_eq!(ev.status, "success");
+    }
+
+    #[test]
+    fn golden_path_attempt_push_contract() {
+        let batch = gp_batch("attempt_push", "");
+        let ev = &batch.events[0];
+        assert_eq!(ev.event_type, "attempt_push");
+        assert_eq!(ev.branch.as_deref(), Some("feat/golden"));
+        assert_eq!(ev.status, "success");
+    }
+
+    #[test]
+    fn golden_path_successful_push_contract() {
+        let batch = gp_batch("successful_push", "");
+        let ev = &batch.events[0];
+        assert_eq!(ev.event_type, "successful_push");
+        assert_eq!(ev.status, "success");
+        assert!(!ev.event_uuid.is_empty());
+    }
+
+    #[test]
+    fn golden_path_response_accepted_shape() {
+        // Validates /events response — Desktop parses this to know if accepted or duped.
+        let json = r#"{"accepted":["00000000-0000-0000-0000-000000000001"],"duplicates":[],"errors":[]}"#;
+        let resp: ClientEventResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.accepted.len(), 1);
+        assert!(resp.duplicates.is_empty());
+        assert!(resp.errors.is_empty());
+    }
+
+    #[test]
+    fn golden_path_duplicate_detected_in_response() {
+        // Server returns the same UUID as a duplicate on second send.
+        let json = r#"{"accepted":[],"duplicates":["00000000-0000-0000-0000-000000000001"],"errors":[]}"#;
+        let resp: ClientEventResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.accepted.is_empty());
+        assert_eq!(resp.duplicates.len(), 1);
+    }
+
     #[test]
     fn relevant_audit_actions_contains_expected() {
         assert!(RELEVANT_AUDIT_ACTIONS.contains(&"protected_branch.create"));
         assert!(RELEVANT_AUDIT_ACTIONS.contains(&"repo.access"));
         assert!(!RELEVANT_AUDIT_ACTIONS.contains(&"random_action"));
+    }
+
+    // Pagination defaults — regression tests for "missing field offset/limit"
+    #[test]
+    fn event_filter_offset_optional_defaults_to_zero() {
+        let f: EventFilter = serde_json::from_str(r#"{"limit": 5}"#).unwrap();
+        assert_eq!(f.offset, 0);
+        assert_eq!(f.limit, 5);
+    }
+
+    #[test]
+    fn event_filter_all_pagination_optional() {
+        let f: EventFilter = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(f.offset, 0);
+        assert_eq!(f.limit, 0); // 0 → handler uses its fallback default
+    }
+
+    #[test]
+    fn event_filter_explicit_offset_respected() {
+        let f: EventFilter = serde_json::from_str(r#"{"limit": 10, "offset": 25}"#).unwrap();
+        assert_eq!(f.offset, 25);
+        assert_eq!(f.limit, 10);
+    }
+
+    #[test]
+    fn jenkins_correlation_filter_offset_optional() {
+        let f: JenkinsCorrelationFilter = serde_json::from_str(r#"{"limit": 10}"#).unwrap();
+        assert_eq!(f.offset, 0);
+        assert_eq!(f.limit, 10);
+    }
+
+    #[test]
+    fn jenkins_correlation_filter_all_pagination_optional() {
+        let f: JenkinsCorrelationFilter = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(f.offset, 0);
+        assert_eq!(f.limit, 0); // 0 → handler uses its fallback default (20)
     }
 }

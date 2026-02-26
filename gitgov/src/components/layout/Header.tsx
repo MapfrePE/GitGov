@@ -3,7 +3,7 @@ import { useAuthStore } from '@/store/useAuthStore'
 import { useRepoStore } from '@/store/useRepoStore'
 import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { BranchSelector } from '@/components/branch/BranchSelector'
-import { RefreshCw, FolderOpen } from 'lucide-react'
+import { AlertTriangle, ArrowDown, ArrowUp, RefreshCw, FolderOpen } from 'lucide-react'
 import { Button } from '@/components/shared/Button'
 import clsx from 'clsx'
 
@@ -13,7 +13,15 @@ interface HeaderProps {
 
 export function Header({ children }: HeaderProps) {
   const { user } = useAuthStore()
-  const { repoPath, currentBranch, refreshStatus, refreshBranches, isLoadingStatus } = useRepoStore()
+  const {
+    repoPath,
+    currentBranch,
+    branchSync,
+    refreshStatus,
+    refreshBranches,
+    refreshBranchSync,
+    isLoadingStatus,
+  } = useRepoStore()
   const { isConnected, checkConnection } = useControlPlaneStore()
 
   useEffect(() => {
@@ -22,7 +30,7 @@ export function Header({ children }: HeaderProps) {
   }, [checkConnection])
 
   const handleRefresh = async () => {
-    await Promise.all([refreshStatus(), refreshBranches(), checkConnection()])
+    await Promise.all([refreshStatus(), refreshBranches(), refreshBranchSync(), checkConnection()])
   }
 
   return (
@@ -50,6 +58,28 @@ export function Header({ children }: HeaderProps) {
               isAdmin={user.is_admin}
               userGroup={user.group}
             />
+            {branchSync && (
+              <div className="flex items-center gap-1">
+                {!branchSync.has_upstream && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border border-warning-500/30 bg-warning-500/10 text-warning-300">
+                    <AlertTriangle size={10} strokeWidth={2} />
+                    sin upstream
+                  </span>
+                )}
+                {branchSync.ahead > 0 && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border border-danger-500/30 bg-danger-500/10 text-danger-300">
+                    <ArrowUp size={10} strokeWidth={2} />
+                    {branchSync.ahead}
+                  </span>
+                )}
+                {branchSync.behind > 0 && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border border-warning-500/30 bg-warning-500/10 text-warning-300">
+                    <ArrowDown size={10} strokeWidth={2} />
+                    {branchSync.behind}
+                  </span>
+                )}
+              </div>
+            )}
           </>
         )}
       </div>

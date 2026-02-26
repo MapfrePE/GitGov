@@ -1,12 +1,13 @@
 import { create } from 'zustand'
 import { tauriInvoke, parseCommandError } from '@/lib/tauri'
-import type { FileChange, BranchInfo, GitGovConfig, RepoValidation } from '@/lib/types'
+import type { BranchInfo, BranchSyncStatus, FileChange, GitGovConfig, RepoValidation } from '@/lib/types'
 
 interface RepoState {
   repoPath: string | null
   config: GitGovConfig | null
   validation: RepoValidation | null
   currentBranch: string | null
+  branchSync: BranchSyncStatus | null
   branches: BranchInfo[]
   fileChanges: FileChange[]
   selectedFiles: Set<string>
@@ -23,6 +24,7 @@ interface RepoActions {
   loadConfig: () => Promise<void>
   refreshStatus: () => Promise<void>
   refreshBranches: () => Promise<void>
+  refreshBranchSync: (branch?: string) => Promise<BranchSyncStatus | null>
   selectFile: (path: string) => void
   deselectFile: (path: string) => void
   selectAll: () => void
@@ -46,6 +48,7 @@ const initialState: RepoState = {
   config: null,
   validation: null,
   currentBranch: null,
+  branchSync: null,
   branches: [],
   fileChanges: [],
   selectedFiles: new Set(),
@@ -69,6 +72,7 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
       }
       await get().refreshStatus()
       await get().refreshBranches()
+      await get().refreshBranchSync()
     } catch (e) {
       set({ error: parseCommandError(String(e)).message })
     } finally {
@@ -113,8 +117,30 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
       const branches = await tauriInvoke<BranchInfo[]>('cmd_list_branches', { repoPath })
       const current = branches.find((b) => b.is_current)
       set({ branches, currentBranch: current?.name ?? null })
+      await get().refreshBranchSync(current?.name)
     } catch (e) {
       set({ error: parseCommandError(String(e)).message })
+    }
+  },
+
+  refreshBranchSync: async (branch?: string) => {
+    const { repoPath, currentBranch } = get()
+    if (!repoPath) {
+      set({ branchSync: null })
+      return null
+    }
+
+    try {
+      const resolvedBranch = branch ?? currentBranch ?? undefined
+      const status = await tauriInvoke<BranchSyncStatus>('cmd_get_branch_sync_status', {
+        repoPath,
+        branch: resolvedBranch,
+      })
+      set({ branchSync: status })
+      return status
+    } catch (e) {
+      set({ error: parseCommandError(String(e)).message, branchSync: null })
+      return null
     }
   },
 
@@ -250,6 +276,7 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
         developerLogin,
       })
       await get().refreshStatus()
+      await get().refreshBranchSync()
       return hash
     } catch (e) {
       set({ error: parseCommandError(String(e)).message })
@@ -265,6 +292,8 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
     } catch (e) {
       set({ error: parseCommandError(String(e)).message })
       throw e
+    } finally {
+      await get().refreshBranchSync(branch)
     }
   },
 

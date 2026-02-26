@@ -1,5 +1,5 @@
 use crate::git::GitError;
-use git2::{Branch, BranchType, Repository};
+use git2::{BranchType, Repository};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -10,6 +10,15 @@ pub struct BranchInfo {
     pub is_remote: bool,
     pub last_commit_hash: Option<String>,
     pub last_commit_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchSyncStatus {
+    pub branch: String,
+    pub upstream: Option<String>,
+    pub has_upstream: bool,
+    pub ahead: usize,
+    pub behind: usize,
 }
 
 pub fn list_branches(repo: &Repository) -> Result<Vec<BranchInfo>, GitError> {
@@ -132,6 +141,83 @@ pub fn checkout_branch(repo: &Repository, name: &str) -> Result<(), GitError> {
         .map_err(|e| GitError::GitError(e.message().to_string()))?;
 
     Ok(())
+}
+
+pub fn get_branch_sync_status(
+    repo: &Repository,
+    branch: Option<&str>,
+) -> Result<BranchSyncStatus, GitError> {
+    let branch_name = match branch {
+        Some(name) if !name.trim().is_empty() => name.trim().to_string(),
+        _ => repo
+            .head()
+            .ok()
+            .and_then(|h| h.shorthand().map(|s| s.to_string()))
+            .unwrap_or_else(|| "HEAD".to_string()),
+    };
+
+    if branch_name == "HEAD" {
+        return Ok(BranchSyncStatus {
+            branch: branch_name,
+            upstream: None,
+            has_upstream: false,
+            ahead: 0,
+            behind: 0,
+        });
+    }
+
+    let local_branch = repo
+        .find_branch(&branch_name, BranchType::Local)
+        .map_err(|_| GitError::BranchNotFound(branch_name.clone()))?;
+
+    let local_oid = local_branch
+        .get()
+        .target()
+        .ok_or_else(|| GitError::GitError("Local branch has no target commit".to_string()))?;
+
+    let upstream_branch = match local_branch.upstream() {
+        Ok(upstream) => upstream,
+        Err(_) => {
+            return Ok(BranchSyncStatus {
+                branch: branch_name,
+                upstream: None,
+                has_upstream: false,
+                ahead: 0,
+                behind: 0,
+            });
+        }
+    };
+
+    let upstream_name = upstream_branch
+        .name()
+        .ok()
+        .flatten()
+        .map(|s| s.to_string());
+
+    let upstream_oid = match upstream_branch.get().target() {
+        Some(oid) => oid,
+        None => {
+            return Ok(BranchSyncStatus {
+                branch: branch_name,
+                upstream: upstream_name,
+                has_upstream: true,
+                ahead: 0,
+                behind: 0,
+            });
+        }
+    };
+
+    let (ahead, behind) = repo
+        .graph_ahead_behind(local_oid, upstream_oid)
+        .map_err(|e| GitError::GitError(e.message().to_string()))?;
+
+    Ok(BranchSyncStatus {
+        branch: branch_name,
+        upstream: upstream_name,
+        has_upstream: true,
+        ahead,
+        behind,
+    })
 }
 
 pub fn push_to_remote(repo: &Repository, branch: &str, token: &str) -> Result<(), GitError> {

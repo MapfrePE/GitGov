@@ -8,23 +8,25 @@ import { Button } from '@/components/shared/Button'
 import { FolderSync } from 'lucide-react'
 
 export function DashboardPage() {
-  const { repoPath, refreshStatus, refreshBranches, setRepoPath } = useRepoStore()
+  const { repoPath, refreshStatus, refreshBranches, refreshBranchSync, setRepoPath } = useRepoStore()
 
   useEffect(() => {
     if (repoPath) {
       refreshStatus()
       refreshBranches()
+      refreshBranchSync()
     }
-  }, [repoPath, refreshStatus, refreshBranches])
+  }, [repoPath, refreshStatus, refreshBranches, refreshBranchSync])
 
   useEffect(() => {
     const interval = setInterval(() => {
       if (repoPath) {
         refreshStatus()
+        refreshBranchSync()
       }
     }, 30000)
     return () => clearInterval(interval)
-  }, [repoPath, refreshStatus])
+  }, [repoPath, refreshStatus, refreshBranchSync])
 
   const handleChangeRepo = () => {
     setRepoPath('')

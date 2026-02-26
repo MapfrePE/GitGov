@@ -4,61 +4,77 @@
 
 GitGov es un sistema de gobernanza de Git distribuido que permite auditar y controlar las operaciones de Git en una organización. Funciona como un "testigo" que observa y registra todo lo que hacen los desarrolladores con sus repositorios.
 
-El sistema está compuesto por tres piezas que trabajan juntas: una aplicación de escritorio que usan los desarrolladores, un servidor central que recopila datos, y la plataforma GitHub donde viven los repositorios.
+El sistema está compuesto por **cuatro componentes** que trabajan juntas: una aplicación de escritorio que usan los desarrolladores, un servidor central que recopila datos, la plataforma GitHub donde viven los repositorios, y un sitio web de marketing/documentación público.
 
 ---
 
 ## Visión General de la Arquitectura
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              ARQUITECTURA GITGOV                             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌─────────────────┐         ┌─────────────────┐         ┌───────────────┐ │
-│  │   DESKTOP APP   │         │ CONTROL PLANE   │         │    GITHUB     │ │
-│  │    (Tauri)      │         │    SERVER       │         │               │ │
-│  │                 │         │    (Axum)       │         │               │ │
-│  │  ┌───────────┐  │         │  ┌───────────┐  │         │  ┌─────────┐  │ │
-│  │  │  React UI │  │         │  │  Handlers │  │         │  │   API   │  │ │
-│  │  │  Zustand  │  │  HTTP   │  │  Auth     │  │ Webhook │  │  OAuth  │  │ │
-│  │  │  Tailwind │  │◄───────►│  │  DB       │  │◄───────►│  │  Repos  │  │ │
-│  │  └───────────┘  │         │  └───────────┘  │         │  └─────────┘  │ │
-│  │  ┌───────────┐  │         │  ┌───────────┐  │         │               │ │
-│  │  │  Rust     │  │         │  │ PostgreSQL│  │         │               │ │
-│  │  │  git2     │  │         │  │ Supabase  │  │         │               │ │
-│  │  │  Outbox   │  │         │  │ Jobs      │  │         │               │ │
-│  │  │  SQLite   │  │         │  └───────────┘  │         │               │ │
-│  │  └───────────┘  │         │                 │         │               │ │
-│  └─────────────────┘         └─────────────────┘         └───────────────┘ │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                                ARQUITECTURA GITGOV                                │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  ┌─────────────────┐   ┌─────────────────┐   ┌───────────────┐  ┌─────────────┐ │
+│  │   DESKTOP APP   │   │ CONTROL PLANE   │   │    GITHUB     │  │  WEB APP    │ │
+│  │    (Tauri v2)   │   │    SERVER       │   │               │  │ (Next.js 14)│ │
+│  │                 │   │    (Axum)       │   │               │  │             │ │
+│  │  React 19       │   │  ┌───────────┐  │   │  ┌─────────┐  │  │  Marketing  │ │
+│  │  Zustand v5     │HTTP│  │  Handlers │  │   │  │   API   │  │  │  /docs      │ │
+│  │  Tailwind v4    │◄──►│  │  Auth     │  │Wh.│  │  OAuth  │  │  │  /download  │ │
+│  │  react-router v7│   │  │  Jobs     │  │◄─►│  │  Repos  │  │  │  /pricing   │ │
+│  │  ─────────────  │   │  └───────────┘  │   │  └─────────┘  │  │  i18n EN/ES │ │
+│  │  Rust + git2    │   │  ┌───────────┐  │   │               │  │  Vercel     │ │
+│  │  Outbox (JSONL) │   │  │ PostgreSQL│  │   │               │  │             │ │
+│  │  SQLite local   │   │  │ Supabase  │  │   │               │  │             │ │
+│  │  tauri-updater  │   │  │ Job Queue │  │   │               │  │             │ │
+│  └─────────────────┘   │  └───────────┘  │   └───────────────┘  └─────────────┘ │
+│                         └─────────────────┘                                      │
+│                         EC2: 3.143.150.199                                       │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Los Tres Componentes
+## Los Cuatro Componentes
 
 ### 1. Desktop App (Aplicación de Escritorio)
 
 **Qué hace:** Es la aplicación que usa cada desarrollador en su computadora. Se conecta a GitHub, permite hacer operaciones Git, y registra todo lo que pasa.
 
 **Tecnologías:**
-- Frontend: React con TypeScript y Tailwind CSS
+- Frontend: React 19 + TypeScript + Tailwind CSS v4
+- Estado global: Zustand v5
+- Routing: react-router-dom v7
 - Backend: Rust con el framework Tauri v2
 - Comunicación con Git: librería git2
-- Almacenamiento local: SQLite para auditoría offline
+- Almacenamiento local: SQLite para auditoría offline (`{data_local_dir}/gitgov/audit.db`)
 - Credenciales: usa el keyring del sistema operativo
+- Actualizaciones: tauri-plugin-updater v2 (OTA, aún sin servidor de releases configurado)
+- Tests: vitest 4 + @testing-library/react 16
 
 **Responsabilidades principales:**
 
 | Módulo | Qué hace |
 |--------|----------|
 | Operaciones Git | Ejecuta push, commit, stage, diff, merge |
-| Outbox | Cola de eventos que funciona sin internet |
+| Outbox | Cola de eventos JSONL que funciona sin internet (flush cada 60s) |
 | Autenticación | Maneja el login con GitHub OAuth |
 | Ramas | Crea y valida ramas según políticas |
 | Auditoría local | Guarda eventos en SQLite cuando no hay conexión |
+| Ignore rules | Gestiona .gitignore / .gitgovignore / git info/exclude (`cmd_apply_ignore_rules`) |
+| Stage limiter | `stage_files` events se truncan a 500 archivos máximo (`MAX_STAGE_FILES_EVENT_LIST`) |
+
+**Constantes importantes del cliente:**
+
+| Constante | Valor | Propósito |
+|-----------|-------|-----------|
+| `MAX_STAGE_FILES_EVENT_LIST` | 500 | Máx. archivos listados en un evento stage_files |
+| Outbox flush interval | 60s | Worker de background |
+| HTTP connect timeout | 5s | Tiempo máximo para conectar al servidor |
+| HTTP request timeout | 30s | Tiempo máximo para una request completa |
+| HTTP pool idle timeout | 90s | Keep-alive de conexiones HTTP |
+| TCP keepalive | 30s | Ping TCP para detectar conexiones muertas |
 
 **Cómo fluyen los datos:**
 
@@ -78,9 +94,18 @@ Usuario hace click → React UI → Comando Tauri → Lógica Rust → Operació
 
 **Tecnologías:**
 - Framework: Axum (basado en Tokio para async)
-- Base de datos: PostgreSQL (hosteado en Supabase)
-- Autenticación: hash SHA256 de API keys
-- Procesamiento: jobs en background con reintentos
+- Base de datos: PostgreSQL (hosteado en Supabase; pooler de conexiones)
+- Autenticación: hash SHA256 de API keys + roles (Admin, Architect, Developer, PM)
+- Procesamiento: jobs en background con reintentos (`FOR UPDATE SKIP LOCKED`)
+- Deploy: Ubuntu 22.04 + Nginx + systemd en EC2 (`3.143.150.199`) o Docker
+
+**Job Worker — constantes hardcoded:**
+
+| Constante | Valor | Descripción |
+|-----------|-------|-------------|
+| `JOB_WORKER_TTL_SECS` | 300 | Job se considera atascado si lleva más de 5 min en RUNNING |
+| `JOB_POLL_INTERVAL_SECS` | 5 | El worker revisa la cola cada 5 segundos |
+| `JOB_ERROR_BACKOFF_SECS` | 10 | Espera 10s antes de reintentar tras error |
 
 **Responsabilidades principales:**
 
@@ -93,14 +118,41 @@ Usuario hace click → React UI → Comando Tauri → Lógica Rust → Operació
 
 **Endpoints principales:**
 
-| Endpoint | Para qué sirve |
-|----------|----------------|
-| /health | Verificar que el servidor está vivo |
-| /events | Recibir eventos de las desktop apps |
-| /webhooks/github | Recibir notificaciones de GitHub |
-| /stats | Estadísticas para el dashboard |
-| /logs | Lista de eventos para auditoría |
-| /dashboard | Datos agregados para visualización |
+| Endpoint | Auth | Para qué sirve |
+|----------|------|----------------|
+| `/health` | None | Health check básico |
+| `/health/detailed` | None | Latencia DB + uptime |
+| `/events` | Bearer | Ingesta de eventos del cliente |
+| `/webhooks/github` | HMAC | Webhooks de GitHub |
+| `/audit-stream/github` | Bearer (admin) | Batch de audit logs de GitHub |
+| `/stats` | Bearer (admin) | Estadísticas para el dashboard |
+| `/logs` | Bearer | Eventos combinados (admin=todos, dev=propios) |
+| `/dashboard` | Bearer (admin) | Datos agregados |
+| `/jobs/metrics` | Bearer (admin) | Estado del job queue |
+| `/jobs/dead` | Bearer (admin) | Jobs muertos |
+| `/jobs/retry/{id}` | Bearer (admin) | Reintentar job muerto |
+| `/governance-events` | Bearer (admin) | Cambios de políticas GitHub |
+| `/signals` | Bearer (admin) | Señales de no-cumplimiento |
+| `/violations` | Bearer (admin) | Violaciones detectadas |
+| `/policy/check` | Bearer | Advisory de política (no bloqueante) |
+| `/compliance` | Bearer (admin) | Estado de compliance |
+| `/export` | Bearer (admin) | Export de audit data |
+| `/api-keys` | Bearer (admin) | Gestión de API keys |
+| `/integrations/jenkins` | Bearer | Ingesta de pipeline events |
+| `/integrations/jenkins/status` | Bearer (admin) | Health check Jenkins |
+| `/integrations/jenkins/correlations` | Bearer (admin) | Correlaciones commit↔pipeline |
+| `/integrations/jira` | Bearer | Ingesta de issues Jira |
+| `/integrations/jira/status` | Bearer (admin) | Health check Jira |
+| `/integrations/jira/correlate` | Bearer (admin) | Correlación batch commit↔ticket |
+| `/integrations/jira/ticket-coverage` | Bearer (admin) | Cobertura de tickets |
+| `/integrations/jira/tickets/{id}` | Bearer (admin) | Detalle de ticket |
+
+**Headers de integración:**
+- Jenkins: `x-gitgov-jenkins-secret` (si `JENKINS_WEBHOOK_SECRET` configurado)
+- Jira: `x-gitgov-jira-secret` (si `JIRA_WEBHOOK_SECRET` configurado)
+
+**Schema versionado:** La DB se inicializa con 6 archivos SQL incrementales:
+`supabase_schema.sql` → `v2` → `v3` → `v4` → `v5` (Jenkins) → `v6` (Jira)
 
 ### 3. GitHub Integration
 
@@ -112,7 +164,57 @@ Usuario hace click → React UI → Comando Tauri → Lógica Rust → Operació
 |-----------|-----|
 | OAuth Device Flow | Login de usuarios desde la desktop app |
 | Webhooks | Recibir eventos cuando alguien hace push |
+| Audit Log Stream | Cambios de branch protection, rulesets, permisos → `governance_events` |
 | API REST | Operaciones adicionales en repositorios |
+
+---
+
+### 4. Web App (gitgov-web) — Sitio Público
+
+**Qué hace:** Es el sitio público de marketing y documentación, desplegado en Vercel. No tiene conexión directa con el Control Plane ni con la Desktop App.
+
+**Directorio:** `gitgov-web/`
+
+**URL:** `https://git-gov.vercel.app`
+
+**Tecnologías:**
+- Framework: Next.js 14 (App Router)
+- Frontend: React 18 + TypeScript + Tailwind CSS v3
+- Animaciones: framer-motion
+- Documentación: gray-matter + remark (markdown)
+- i18n: bilingual EN/ES via `lib/i18n/translations.ts` (context + hook)
+- Package manager: pnpm
+- Deploy: Vercel (CD automático desde main)
+
+**Rutas:**
+
+| Ruta | Propósito |
+|------|-----------|
+| `/` | Home / hero / what-is |
+| `/features` | Features de la plataforma |
+| `/download` | Descarga del installer Windows (.exe) |
+| `/pricing` | Planes y precios |
+| `/contact` | Formulario de contacto |
+| `/docs` | Documentación (markdown) |
+| `/docs/installation` | Guía de instalación |
+| `/docs/control-plane` | Setup del servidor |
+
+**Download page:**
+- Componente `DownloadPage` es un Server Component de Next.js
+- Calcula el SHA256 del installer en build time desde `public/downloads/GitGov_0.1.0_x64-setup.exe`
+- Si el archivo no existe, muestra `downloadChecksum: 'sha256:pending-build'`
+- Versión actual: `0.1.0`, archivo: `GitGov_0.1.0_x64-setup.exe`
+
+**Diferencias importantes vs Desktop App:**
+
+| Aspecto | Desktop App | Web App |
+|---------|-------------|---------|
+| React version | 19 | 18 |
+| Tailwind version | v4 | v3 |
+| Framework | Tauri v2 + Vite | Next.js 14 |
+| Package manager | npm | pnpm |
+| i18n | No | Sí (EN/ES) |
+| Server URL config | `GITGOV_SERVER_URL` (Rust) / `VITE_SERVER_URL` (Vite) | N/A |
 
 ---
 
@@ -207,6 +309,21 @@ Cuando la desktop app quiere enviar eventos al servidor:
 ```
 
 **IMPORTANTE:** El servidor SOLO acepta el header `Authorization: Bearer`, NO acepta `X-API-Key`.
+
+**Roles del sistema:**
+
+| Rol | Permisos |
+|-----|----------|
+| Admin | Acceso total — stats, dashboard, integrations, signals, violations, export, api-keys |
+| Architect | Acceso a governance y compliance |
+| Developer | Solo sus propios eventos (`/logs` filtrado por user_login) |
+| PM | Acceso a vistas de tickets y cobertura |
+
+**Bootstrap de API key en el servidor:**
+- Si `GITGOV_API_KEY` está en el entorno → inserta en DB si no existe (sin imprimir en logs)
+- Si NO está → genera UUID nuevo automáticamente
+- La key generada solo se imprime si: la salida es una TTY interactiva, O se usó el flag `--print-bootstrap-key`
+- En Docker/CI (sin TTY) la key generada NO aparece en stdout. Usar `--print-bootstrap-key` explícitamente.
 
 ---
 
@@ -323,9 +440,12 @@ Este es el camino que siguen los datos cuando un desarrollador hace push:
 | blocked_push | Desktop | Push a rama protegida (rechazado) |
 | push_failed | Desktop | Push falló por error de Git |
 | commit | Desktop | Se creó un commit |
-| stage_files | Desktop | Se agregaron archivos al staging area |
+| stage_files | Desktop | Se agregaron archivos al staging area (max 500 archivos) |
 | create_branch | Desktop | Se creó una rama nueva |
 | blocked_branch | Desktop | Creación de rama bloqueada por política |
+| checkout_branch | Desktop | Cambio de rama |
+| login | Desktop | Inicio de sesión del usuario |
+| logout | Desktop | Cierre de sesión |
 | push | GitHub | Webhook recibido por push |
 
 ---
@@ -361,6 +481,37 @@ El sistema trabaja con estas entidades principales:
 **API Keys (api_keys)**
 - Permiten autenticar requests
 - Se guardan hasheadas (nunca en texto plano)
+- Tienen rol asociado: Admin, Architect, Developer, PM
+
+**Pipeline Events (pipeline_events) — V1.2-A**
+- Llegan de Jenkins vía `/integrations/jenkins`
+- Registra builds, stages, resultados (append-only)
+- Correlación con commits por `commit_sha`
+
+**Project Tickets (project_tickets) — V1.2-B**
+- Llegan de Jira vía `/integrations/jira`
+- Snapshot de issues (estado, asignado, summary)
+- Actualizable (campos `related_commits`, `related_branches`, `related_prs`)
+
+**Commit Ticket Correlations (commit_ticket_correlations) — V1.2-B**
+- Correlaciones entre commits y tickets Jira (append-only)
+- Deduplicación por `(commit_sha, ticket_id)`
+- Extraída de mensajes de commit y nombres de ramas
+
+**Governance Events (governance_events)**
+- Cambios de configuración de seguridad desde GitHub Audit Log
+- Append-only. Incluye cambios de branch protection, rulesets, permisos
+
+**Versioning del Schema:**
+
+| Archivo | Contenido |
+|---------|-----------|
+| `supabase_schema.sql` | Schema base: orgs, repos, events, violations, jobs, api_keys |
+| `supabase_schema_v2.sql` | Mejoras de índices y funciones |
+| `supabase_schema_v3.sql` | Governance events, signals, decisions |
+| `supabase_schema_v4.sql` | Append-only triggers y compliance signals |
+| `supabase_schema_v5.sql` | Jenkins: `pipeline_events` + índices de correlación |
+| `supabase_schema_v6.sql` | Jira: `project_tickets` + `commit_ticket_correlations` |
 
 ### Relaciones entre Entidades
 
@@ -394,8 +545,10 @@ Organización
 
 | Tipo | Header | Uso |
 |------|--------|-----|
-| API Key | `Authorization: Bearer {key}` | Desktop → Server |
-| HMAC | `X-Hub-Signature-256: sha256={sig}` | GitHub → Server (webhooks) |
+| API Key | `Authorization: Bearer {key}` | Desktop → Server (TODOS los endpoints autenticados) |
+| HMAC GitHub | `X-Hub-Signature-256: sha256={sig}` | GitHub → Server (webhooks) |
+| Secret Jenkins | `x-gitgov-jenkins-secret: {secret}` | Jenkins → Server (si `JENKINS_WEBHOOK_SECRET` configurado) |
+| Secret Jira | `x-gitgov-jira-secret: {secret}` | Jira → Server (si `JIRA_WEBHOOK_SECRET` configurado) |
 
 ### Validación de Webhooks
 
@@ -405,6 +558,23 @@ Cuando GitHub envía un webhook, incluye una firma criptográfica. El servidor:
 3. Si no coinciden → rechaza el webhook
 
 Esto previene que alguien envíe webhooks falsos.
+
+### Rate Limiting
+
+El servidor implementa un rate limiter en memoria por `{IP}:{SHA256(auth_header)[0:12]}`.
+
+| Variable de entorno | Default | Descripción |
+|---------------------|---------|-------------|
+| `GITGOV_RATE_LIMIT_EVENTS_PER_MIN` | 240 | req/min para `/events` |
+| `GITGOV_RATE_LIMIT_AUDIT_STREAM_PER_MIN` | 60 | req/min para `/audit-stream/github` |
+| `GITGOV_RATE_LIMIT_JENKINS_PER_MIN` | 120 | req/min para `/integrations/jenkins` |
+| `GITGOV_RATE_LIMIT_JIRA_PER_MIN` | 120 | req/min para `/integrations/jira` |
+| `GITGOV_RATE_LIMIT_ADMIN_PER_MIN` | 60 | req/min para endpoints admin (logs, stats, dashboard) |
+| `GITGOV_JENKINS_MAX_BODY_BYTES` | 262144 | Límite de body para Jenkins (256 KB) |
+| `GITGOV_JIRA_MAX_BODY_BYTES` | 524288 | Límite de body para Jira (512 KB) |
+
+Respuesta cuando se supera el límite: HTTP `429 Too Many Requests`.
+La clave de rate limiting es `{IP}:{SHA256(auth_header)[0:12]}` — cada API key distinta tiene su propio bucket por IP.
 
 ---
 

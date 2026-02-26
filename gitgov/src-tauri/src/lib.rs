@@ -133,6 +133,7 @@ pub fn run() {
             commands::cmd_push,
             commands::cmd_list_branches,
             commands::cmd_get_current_branch,
+            commands::cmd_get_branch_sync_status,
             commands::cmd_create_branch,
             commands::cmd_checkout_branch,
             commands::cmd_get_audit_logs,

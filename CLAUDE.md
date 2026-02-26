@@ -6,10 +6,11 @@
 
 ## Qué es GitGov
 
-Sistema de gobernanza de Git distribuido con tres componentes:
-1. **Desktop App** — Tauri v2 + React (en `gitgov/`)
+Sistema de gobernanza de Git distribuido con cuatro componentes:
+1. **Desktop App** — Tauri v2 + React 19 + Tailwind v4 + Zustand v5 (en `gitgov/`)
 2. **Control Plane Server** — Axum + Rust (en `gitgov/gitgov-server/`)
 3. **GitHub/Jenkins/Jira Integrations** — Webhooks + OAuth
+4. **Web App (marketing/docs)** — Next.js 14 + React 18 + Tailwind v3 (en `gitgov-web/`), desplegada en Vercel (`https://git-gov.vercel.app`)
 
 ---
 
@@ -38,6 +39,9 @@ cd gitgov && npm run tauri dev
 # Control Plane Server
 cd gitgov/gitgov-server && cargo run
 
+# Web App (marketing/docs)
+cd gitgov-web && pnpm dev     # o npm run dev
+
 # Tests E2E
 cd gitgov/gitgov-server/tests && ./e2e_flow_test.sh
 
@@ -46,6 +50,9 @@ cd gitgov/gitgov-server/tests && API_KEY="57f1ed59-371d-46ef-9fdf-508f59bc4963" 
 
 # Jira integration test
 cd gitgov/gitgov-server/tests && API_KEY="57f1ed59-371d-46ef-9fdf-508f59bc4963" ./jira_integration_test.sh
+
+# Tests unitarios Desktop (vitest)
+cd gitgov && npm test
 ```
 
 ### Linting (EJECUTAR ANTES DE COMMIT)
@@ -70,8 +77,17 @@ cd gitgov && npm run lint && npm run typecheck
 - Server calcula SHA256 del token y busca en tabla `api_keys` por `key_hash`
 
 ### Roles
-- **admin:** Acceso total (stats, dashboard, integrations)
-- **developer:** Solo sus propios eventos
+- **Admin:** Acceso total (stats, dashboard, integrations)
+- **Architect:** (reservado para futuras restricciones)
+- **Developer:** Solo sus propios eventos
+- **PM:** (reservado para futuras restricciones)
+
+> El enum `UserRole` tiene 4 variantes: `Admin`, `Architect`, `Developer`, `PM`. `from_str` desconocido → `Developer`.
+
+### Jenkins / Jira Webhook Secrets (opcionales)
+- Jenkins: header `x-gitgov-jenkins-secret` con valor de `JENKINS_WEBHOOK_SECRET`
+- Jira: header `x-gitgov-jira-secret` con valor de `JIRA_WEBHOOK_SECRET`
+- Si no se configuran, el endpoint acepta cualquier request autenticado con Bearer admin key.
 
 ### GitHub Webhooks
 - Validación HMAC con `GITHUB_WEBHOOK_SECRET`
@@ -80,24 +96,43 @@ cd gitgov && npm run lint && npm run typecheck
 
 ## Endpoints del Servidor
 
-| Endpoint | Auth | Propósito |
-|----------|------|-----------|
-| `/health` | None | Health check |
-| `/events` | Bearer | Ingesta de eventos del cliente |
-| `/webhooks/github` | HMAC | Webhooks de GitHub |
-| `/stats` | Bearer (admin) | Estadísticas |
-| `/logs` | Bearer | Eventos combinados |
-| `/dashboard` | Bearer (admin) | Datos del dashboard |
-| `/jobs/metrics` | Bearer (admin) | Métricas del job queue |
-| `/integrations/jenkins` | Bearer | Pipeline events de Jenkins |
-| `/integrations/jenkins/status` | Bearer (admin) | Health check Jenkins |
-| `/integrations/jenkins/correlations` | Bearer (admin) | Correlaciones commit↔pipeline |
-| `/policy/check` | Bearer | Policy check advisory |
-| `/integrations/jira` | Bearer | Ingesta de issues Jira |
-| `/integrations/jira/status` | Bearer (admin) | Health check Jira |
-| `/integrations/jira/correlate` | Bearer (admin) | Correlación batch commit↔ticket |
-| `/integrations/jira/ticket-coverage` | Bearer (admin) | Cobertura de tickets |
-| `/integrations/jira/tickets/{id}` | Bearer (admin) | Detalle de ticket |
+| Endpoint | Método | Auth | Propósito |
+|----------|--------|------|-----------|
+| `/health` | GET | None | Health check básico |
+| `/health/detailed` | GET | None | Health check con latencia DB y uptime |
+| `/webhooks/github` | POST | HMAC | Webhooks de GitHub (push, create) |
+| `/events` | POST | Bearer | Ingesta batch de eventos del cliente |
+| `/logs` | GET | Bearer | Eventos combinados (dev: solo propios) |
+| `/stats` | GET | Bearer (admin) | Estadísticas globales + pipeline 7d |
+| `/dashboard` | GET | Bearer (admin) | Datos del dashboard |
+| `/jobs/metrics` | GET | Bearer (admin) | Métricas del job queue |
+| `/jobs/dead` | GET | Bearer (admin) | Lista de jobs muertos |
+| `/jobs/{job_id}/retry` | POST | Bearer (admin) | Reintentar job muerto |
+| `/integrations/jenkins` | POST | Bearer (admin) | Pipeline events de Jenkins |
+| `/integrations/jenkins/status` | GET | Bearer (admin) | Health check Jenkins |
+| `/integrations/jenkins/correlations` | GET | Bearer (admin) | Correlaciones commit↔pipeline |
+| `/integrations/jira` | POST | Bearer (admin) | Ingesta webhook de Jira |
+| `/integrations/jira/status` | GET | Bearer (admin) | Health check Jira |
+| `/integrations/jira/correlate` | POST | Bearer (admin) | Correlación batch commit↔ticket |
+| `/integrations/jira/ticket-coverage` | GET | Bearer (admin) | Cobertura de tickets |
+| `/integrations/jira/tickets/{id}` | GET | Bearer (admin) | Detalle de ticket |
+| `/compliance/{org_name}` | GET | Bearer (admin) | Dashboard de compliance |
+| `/signals` | GET | Bearer | Noncompliance signals |
+| `/signals/{signal_id}` | POST | Bearer | Actualizar signal |
+| `/signals/{signal_id}/confirm` | POST | Bearer (admin) | Confirmar signal (bypass detectado) |
+| `/signals/detect/{org_name}` | POST | Bearer (admin) | Disparar detección de signals |
+| `/violations/{id}/decisions` | GET | Bearer | Historial de decisiones sobre violación |
+| `/violations/{id}/decisions` | POST | Bearer (admin) | Añadir decisión a violación |
+| `/policy/{repo_name}` | GET | Bearer | Obtener política del repo (gitgov.toml) |
+| `/policy/check` | POST | Bearer (admin) | Policy check advisory (Jenkins) |
+| `/policy/{repo_name}/history` | GET | Bearer | Historial de cambios de política |
+| `/policy/{repo_name}/override` | PUT | Bearer (admin) | Override de política |
+| `/export` | POST | Bearer | Exportar eventos (crea audit log de export) |
+| `/api-keys` | POST | Bearer (admin) | Crear nueva API key |
+| `/audit-stream/github` | POST | Bearer (admin) | Ingestar GitHub audit log stream |
+| `/governance-events` | GET | Bearer | Eventos de governance (branch protection, etc.) |
+
+> **Nota:** `/logs` aplica scoping: `Admin` ve todos, `Developer` solo ve sus propios eventos (filtrado por `user_login = client_id`).
 
 ---
 
@@ -112,11 +147,20 @@ cd gitgov && npm run lint && npm run typecheck
 - Tablas de auditoría: append-only (no UPDATE/DELETE)
 - Deduplicación: por `event_uuid` único
 
-### TypeScript (Frontend)
-- Estado: Zustand stores en `src/store/`
+### TypeScript (Desktop Frontend — `gitgov/src/`)
+- Estado: Zustand v5 stores en `src/store/`
 - Tipos: Interfaces en `src/lib/types.ts`
 - Componentes: Functional components con hooks
-- Estilos: Tailwind classes
+- Estilos: Tailwind v4 classes
+- Router: react-router-dom v7
+- Tests: vitest + @testing-library/react
+
+### TypeScript (Web App — `gitgov-web/`)
+- Framework: Next.js 14 App Router
+- Estilos: Tailwind v3
+- i18n: EN/ES con `lib/i18n/translations.ts` + context provider
+- Docs: markdown con gray-matter + remark (en `app/docs/`)
+- Analytics: `lib/analytics/index.ts`
 
 ### Commits
 - Formato: `tipo: descripción` (feat, fix, refactor, docs, test)
@@ -125,6 +169,11 @@ cd gitgov && npm run lint && npm run typecheck
 ---
 
 ## Errores Comunes (NO REPETIR)
+
+### JWT_SECRET inseguro en producción
+- **Causa:** `GITGOV_JWT_SECRET` tiene un default hardcodeado: `"gitgov-secret-key-change-in-production"`
+- **Fix:** SIEMPRE establecer un secreto fuerte y único en producción (`openssl rand -hex 32`)
+- **Riesgo:** Si no se cambia, cualquiera puede forjar tokens JWT
 
 ### Panic: "invalid type: null, expected a map"
 - **Causa:** `json_object_agg()` devuelve NULL sin filas
@@ -137,6 +186,12 @@ cd gitgov && npm run lint && npm run typecheck
 ### Serialization error
 - **Causa:** Structs no coinciden entre cliente y servidor
 - **Fix:** `ServerStats` y `CombinedEvent` deben ser idénticos en ambos lados
+- Las tres copias que deben sincronizarse: `models.rs` (server), `control_plane/server.rs` (Tauri), `useControlPlaneStore.ts` (frontend)
+
+### localhost ≠ 127.0.0.1 (split-brain local)
+- **Síntoma:** Desktop envía eventos pero el dashboard no los muestra
+- **Causa:** `localhost` puede resolver a IPv6 (`::1`), pegando a un proceso diferente
+- **Fix:** Usar `127.0.0.1` canónico en toda la configuración. El código ya normaliza `localhost→127.0.0.1` en 4 lugares (server.rs, server_commands.rs, lib.rs, useControlPlaneStore.ts)
 
 ---
 
@@ -149,10 +204,17 @@ cd gitgov && npm run lint && npm run typecheck
 | `gitgov/gitgov-server/src/auth.rs` | Middleware auth | Token validation |
 | `gitgov/gitgov-server/src/db.rs` | Database queries | COALESCE, append-only |
 | `gitgov/gitgov-server/src/main.rs` | Routes, startup | Wiring de rutas y middleware |
-| `gitgov/src-tauri/src/outbox/` | Cola de eventos offline | Auth headers, retry logic |
-| `gitgov/src-tauri/src/commands/git_commands.rs` | Operaciones Git | Event logging |
-| `gitgov/src/store/useControlPlaneStore.ts` | Estado del dashboard | Sync con server structs |
-| `gitgov/src/components/control_plane/ServerDashboard.tsx` | Dashboard UI | Widgets, badges |
+| `gitgov/gitgov-server/supabase_schema_v6.sql` | Schema actual (v6) | V1-V6 son incrementales |
+| `gitgov/src-tauri/src/outbox/outbox.rs` | Cola de eventos offline | Auth headers, retry logic |
+| `gitgov/src-tauri/src/control_plane/server.rs` | Cliente HTTP al server | Structs deben coincidir con models.rs |
+| `gitgov/src-tauri/src/commands/git_commands.rs` | Operaciones Git | Event logging, trunca a 500 files |
+| `gitgov/src-tauri/src/commands/server_commands.rs` | Tauri commands del server | Expone cmds al frontend |
+| `gitgov/src/store/useControlPlaneStore.ts` | Estado del dashboard | Sync con server structs, cache Jira 2min |
+| `gitgov/src/components/control_plane/ServerDashboard.tsx` | Dashboard UI | Auto-refresh 30s, carga paralela |
+| `gitgov/src/components/control_plane/RecentCommitsTable.tsx` | Tabla commits | Correlación CI badge, ticket badges |
+| `gitgov/src/components/control_plane/dashboard-helpers.tsx` | Lógica UI dashboard | buildDashboardRows, extractTicketIds |
+| `gitgov-web/lib/config/site.ts` | Config web app | URL Vercel, versión, download path |
+| `gitgov-web/lib/i18n/translations.ts` | Traducciones EN/ES | Agregar clave en ambos idiomas |
 
 ---
 
@@ -163,14 +225,38 @@ cd gitgov && npm run lint && npm run typecheck
 - `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_KEY`
 - `GITGOV_JWT_SECRET` — JWT signing
 - `GITGOV_SERVER_ADDR` — `0.0.0.0:3000`
-- `GITGOV_API_KEY` — API key para desktop clients
+- `GITGOV_API_KEY` — API key para desktop clients (se inserta en DB al arrancar si no existe)
 - `GITHUB_WEBHOOK_SECRET` — Validación HMAC de webhooks GitHub
+- `JENKINS_WEBHOOK_SECRET` — Secret adicional para Jenkins (header: `x-gitgov-jenkins-secret`, opcional)
+- `JIRA_WEBHOOK_SECRET` — Secret adicional para Jira (header: `x-gitgov-jira-secret`, opcional)
 - `GITHUB_PERSONAL_ACCESS_TOKEN` — Token para GitHub MCP
 - `RUST_LOG` — Log level (`gitgov_server=info,tower_http=info`)
 
-### Desktop (`gitgov/.env`)
-- `VITE_SERVER_URL=http://localhost:3000`
-- `VITE_API_KEY` — API key del servidor
+**Rate limiting (configurables, valores por defecto):**
+- `GITGOV_RATE_LIMIT_EVENTS_PER_MIN` — default `240` (ruta `/events`)
+- `GITGOV_RATE_LIMIT_AUDIT_STREAM_PER_MIN` — default `60` (ruta `/audit-stream/github`)
+- `GITGOV_RATE_LIMIT_JENKINS_PER_MIN` — default `120` (ruta `/integrations/jenkins`)
+- `GITGOV_RATE_LIMIT_JIRA_PER_MIN` — default `120` (ruta `/integrations/jira`)
+- `GITGOV_RATE_LIMIT_ADMIN_PER_MIN` — default `60` (logs, stats, dashboard)
+- `GITGOV_JENKINS_MAX_BODY_BYTES` — default `262144` (256 KB)
+- `GITGOV_JIRA_MAX_BODY_BYTES` — default `524288` (512 KB)
+
+**Job Worker (hardcodeado en main.rs):**
+- `JOB_WORKER_TTL_SECS = 300` — TTL antes de considerar job estancado
+- `JOB_POLL_INTERVAL_SECS = 5` — Frecuencia de polling de jobs
+- `JOB_ERROR_BACKOFF_SECS = 10` — Backoff base para errores (exponencial, máx ×32)
+
+### Desktop (`gitgov/.env` y `gitgov/src-tauri/.env`)
+- `VITE_SERVER_URL=http://localhost:3000` — URL del server para el frontend (Vite)
+- `VITE_API_KEY` — API key del servidor para el frontend
+- `GITGOV_SERVER_URL` — URL del server para el backend Tauri (leído en lib.rs al arrancar)
+- `GITGOV_API_KEY` — API key del servidor para el backend Tauri
+
+> **IMPORTANTE:** Existen DOS fuentes de config del server URL: `VITE_SERVER_URL` (frontend React) y `GITGOV_SERVER_URL` (Tauri Rust). El store `useControlPlaneStore` tiene prioridad: input > previous > env > localStorage > default `127.0.0.1:3000`. Hay un fallback legacy hardcodeado: `'57f1ed59-371d-46ef-9fdf-508f59bc4963'`.
+
+### Web App (`gitgov-web/.env.local`) — producción en Vercel
+- No requiere variables de entorno especiales actualmente
+- URL canónica: `https://git-gov.vercel.app`
 
 ---
 

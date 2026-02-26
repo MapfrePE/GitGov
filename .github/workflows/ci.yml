@@ -26,6 +26,15 @@ jobs:
           workspaces: gitgov/gitgov-server
       - run: cargo clippy -- -D warnings
       - run: cargo check
+      - name: Run tests
+        run: cargo test 2>&1 | tee /tmp/cargo-test-output.txt
+      - name: Upload test output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-test-output
+          path: /tmp/cargo-test-output.txt
+          retention-days: 7
 
   desktop-lint:
     name: Desktop Rust Clippy

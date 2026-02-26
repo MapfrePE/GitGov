@@ -69,3 +69,13 @@ API_KEY="TU_API_KEY_ADMIN" JENKINS_SECRET="tu_secreto" ./jenkins_integration_tes
 
 Si un cambio rompe cualquiera de los checks A/B/C, **se considera regresión del core** y debe corregirse antes de continuar con nuevas features.
 
+**Antes de release:**
+```bash
+cd gitgov/gitgov-server
+make test   # unit tests — no servidor necesario (también corre en CI)
+make smoke  # contrato live — requiere servidor corriendo (cargo run)
+```
+
+> Nota: `make test` valida el contrato de payload/respuesta (structs serde, Golden Path shapes).
+> `make smoke` valida el flujo real contra server+DB (no corre en CI).
+

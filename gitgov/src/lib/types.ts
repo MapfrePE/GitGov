@@ -69,6 +69,14 @@ export interface BranchInfo {
   last_commit_message?: string
 }
 
+export interface BranchSyncStatus {
+  branch: string
+  upstream?: string | null
+  has_upstream: boolean
+  ahead: number
+  behind: number
+}
+
 export interface AuthenticatedUser {
   login: string
   name: string

@@ -137,7 +137,7 @@ test_correlations_endpoint() {
   local response
   response=$(curl -s \
     -H "Authorization: Bearer $API_KEY" \
-    "$SERVER_URL/integrations/jenkins/correlations?limit=5")
+    "$SERVER_URL/integrations/jenkins/correlations?limit=5&offset=0")
   echo "$response" | grep -q '"correlations"' || fail "Correlations endpoint falló: $response"
   pass "Correlations endpoint responde"
 }

@@ -1,5 +1,57 @@
 # GitGov - Registro de Progreso
 
+## Actualización Reciente (2026-02-26)
+
+### Análisis Exhaustivo del Proyecto — Hallazgos de Arquitectura
+
+Se realizó un análisis milimétrico del codebase completo. Principales hallazgos documentados:
+
+**Componente inédito: gitgov-web**
+- El proyecto tiene **4 componentes**, no 3 como indicaba la documentación
+- `gitgov-web/` es un sitio Next.js 14 + React 18 + Tailwind v3 (pnpm) con i18n EN/ES
+- Desplegado en Vercel en `https://git-gov.vercel.app`
+- Rutas: `/`, `/features`, `/download`, `/pricing`, `/contact`, `/docs`
+- La download page es un Server Component que calcula SHA256 del installer en build time
+- Versión actual del installer: `0.1.0` (`GitGov_0.1.0_x64-setup.exe`)
+
+**Diferencias de stack Desktop vs Web (importante para no confundir):**
+- Desktop: React **19**, Tailwind **v4**, **npm**, `VITE_*` + `GITGOV_*` env vars
+- Web: React **18**, Tailwind **v3**, **pnpm**, sin conexión al servidor
+
+**Dual env vars en Desktop App:**
+- `VITE_SERVER_URL` / `VITE_API_KEY` → solo para el frontend React (Vite)
+- `GITGOV_SERVER_URL` / `GITGOV_API_KEY` → para el backend Rust de Tauri
+- Son independientes. El outbox usa las `GITGOV_*`, el dashboard UI usa las `VITE_*`
+
+**Endpoints no documentados encontrados (~15 adicionales):**
+- `/compliance`, `/export`, `/api-keys`, `/governance-events`, `/signals`, `/violations`
+- `/jobs/dead`, `/jobs/retry/{id}`, `/health/detailed`
+- `/integrations/jenkins`, `/integrations/jenkins/status`, `/integrations/jenkins/correlations`
+- `/integrations/jira`, `/integrations/jira/status`, `/integrations/jira/correlate`, etc.
+
+**Roles del sistema (4, no 2):** Admin, Architect, Developer, PM
+
+**Rate limiting configurado y en producción:**
+- 8 variables de entorno `RATE_LIMIT_*_RPS/BURST` con defaults conservadores
+- Clave de rate limiting: `{IP}:{SHA256(auth)[0:12]}`
+
+**Job Worker hardcoded:** TTL=300s, poll=5s, backoff=10s
+
+**Dashboard UI detalles:**
+- Auto-refresh cada 30 segundos
+- Máx. 10 commits en RecentCommitsTable
+- Cache TTL de 2 min para detalle de tickets Jira
+- Filtros Jira persisten en localStorage
+
+**Deploy en producción:**
+- Control Plane: Ubuntu 22.04 + Nginx + systemd en EC2 `3.143.150.199`
+- Binario en `/opt/gitgov/bin/gitgov-server`
+- HTTP (pendiente: dominio + HTTPS + Let's Encrypt)
+
+**Toda la documentación actualizada:** CLAUDE.md, ARCHITECTURE.md, QUICKSTART.md, TROUBLESHOOTING.md
+
+---
+
 ## Actualización Reciente (2026-02-24)
 
 ### Resumen Ejecutivo
@@ -441,17 +493,21 @@ Esto crea un historial completo de cada violación.
 
 | Componente | Qué falta |
 |------------|-----------|
-| Webhooks GitHub | Recibir y procesar eventos push de GitHub |
-| Correlation Engine | Correlacionar client_events con github_events |
-| Drift Detection | Detectar cuando la configuración difiere de la política |
+| Jenkins + Jira E2E | Pruebas integrales reales en entorno completo (local + remoto) |
+| `related_prs` | Correlación automática de PRs en `commit_ticket_correlations` |
+| HTTPS en EC2 | Dominio + Let's Encrypt + redirección 80→443 |
+| Webhooks GitHub | Configurar webhooks en repos de producción |
 
 ### Prioridad Media
 
 | Componente | Qué falta |
 |------------|-----------|
-| Tests automatizados | Expandir cobertura de tests |
-| Documentación | Agregar más ejemplos y casos de uso |
-| Performance | Optimizar queries para organizaciones grandes |
+| Tests automatizados backend | Cobertura de integraciones Jira/Jenkins |
+| Desktop Updater | Servidor de releases S3/CloudFront para tauri-plugin-updater |
+| Correlation Engine V2 | GitHub webhooks + desktop + Jira + Jenkins en una sola vista (V1.2-C) |
+| Drift Detection | Detectar cuando configuración difiere de política |
+| gitgov-web: installer | Subir `GitGov_0.1.0_x64-setup.exe` a `public/downloads/` |
+| Performance | Optimizar queries para datasets grandes |
 
 ---
 
@@ -469,12 +525,20 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
 
 | Ubicación | Qué hace |
 |-----------|----------|
-| gitgov/src-tauri/src/outbox/ | Cola de eventos offline |
-| gitgov/src-tauri/src/commands/ | Operaciones Git |
-| gitgov-server/src/auth.rs | Middleware de autenticación |
-| gitgov-server/src/handlers.rs | Handlers HTTP |
-| gitgov-server/src/models.rs | Estructuras de datos |
-| gitgov-server/supabase_schema.sql | Schema de la base de datos |
+| `gitgov/src-tauri/src/outbox/` | Cola de eventos offline JSONL |
+| `gitgov/src-tauri/src/commands/git_commands.rs` | Operaciones Git + logging de eventos |
+| `gitgov/src-tauri/src/commands/server_commands.rs` | Comandos Tauri para comunicación con servidor |
+| `gitgov/src-tauri/src/control_plane/server.rs` | HTTP client singleton (OnceLock) al Control Plane |
+| `gitgov/src/store/useControlPlaneStore.ts` | Estado del dashboard, config resolution, cache Jira |
+| `gitgov/src/components/control_plane/ServerDashboard.tsx` | Dashboard principal, auto-refresh 30s |
+| `gitgov/gitgov-server/src/main.rs` | Rutas, rate limiters, bootstrap API key |
+| `gitgov/gitgov-server/src/handlers.rs` | 30+ HTTP handlers, integraciones |
+| `gitgov/gitgov-server/src/auth.rs` | Middleware SHA256 + roles |
+| `gitgov/gitgov-server/src/models.rs` | Estructuras de datos (serde + defaults) |
+| `gitgov/gitgov-server/src/db.rs` | Queries PostgreSQL (COALESCE siempre) |
+| `gitgov/gitgov-server/supabase_schema*.sql` | Schema versionado (v1 a v6) |
+| `gitgov-web/lib/config/site.ts` | Config del sitio público (URL, versión, nav) |
+| `gitgov-web/lib/i18n/translations.ts` | Traducciones EN/ES del sitio |
 
 ---
 

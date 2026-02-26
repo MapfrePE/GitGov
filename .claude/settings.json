@@ -8,7 +8,32 @@
       "Bash(where:*)",
       "Bash(\"C:/Program Files/nodejs/node.exe\" ./node_modules/.bin/tsc --noEmit)",
       "Bash(node_modules/.bin/tsc.cmd:*)",
-      "Bash(export PATH=\"/c/Program Files/nodejs:$PATH\")"
+      "Bash(export PATH=\"/c/Program Files/nodejs:$PATH\")",
+      "Bash(curl:*)",
+      "Bash(SERVER_URL=http://127.0.0.1:3000 API_KEY=57f1ed59-371d-46ef-9fdf-508f59bc4963 bash:*)",
+      "Bash(__NEW_LINE_8d10aabe8abc1e89__ SERVER_URL=http://127.0.0.1:3000)",
+      "Bash(API_KEY=57f1ed59-371d-46ef-9fdf-508f59bc4963:*)",
+      "Bash(__NEW_LINE_8d10aabe8abc1e89__ echo \"=== 1. Health Check ===\")",
+      "Bash(__NEW_LINE_8d10aabe8abc1e89__ echo \"=== 2. Auth Test ===\")",
+      "Bash(__NEW_LINE_8d10aabe8abc1e89__ echo \"=== 3. Wrong auth \\(espera 401\\) ===\")",
+      "Bash(echo:*)",
+      "Bash(KEY=57f1ed59-371d-46ef-9fdf-508f59bc4963)",
+      "Bash(URL=http://127.0.0.1:3000:*)",
+      "Bash(__NEW_LINE_fb9545775be4470e__ curl -s -H \"Authorization: Bearer $KEY\" \"$URL/logs?limit=5\")",
+      "Bash(__NEW_LINE_b16647df2c7bb8ea__ echo \"[5a] Logs con offset\")",
+      "Bash(__NEW_LINE_462daed57801b710__ echo \"[6] Stats\")",
+      "Bash(COMMIT_SHA=169392867ef4d09a89a25600fe7336fc54df64be)",
+      "Bash(__NEW_LINE_b8a8bcf5297822ad__ echo \"[J5b] Correlaciones con offset\")",
+      "Bash(__NEW_LINE_cf3d8291dc077496__ echo \"[Ji3] Auth inválida \\(espera 401\\)\")",
+      "Bash(__NEW_LINE_cf3d8291dc077496__ echo \"[Ji4] Correlacion batch\")",
+      "Bash(__NEW_LINE_02660b6d1d95adb5__ echo \"[Ji5] Ticket coverage\")",
+      "Bash(__NEW_LINE_02660b6d1d95adb5__ echo \"[Ji6] Ticket detail PROJ-123\")",
+      "Bash(__NEW_LINE_4580a8b6d5338f00__ echo \"[Ji9] Ticket detail actualizado\")",
+      "Bash(__NEW_LINE_4580a8b6d5338f00__ echo \"[H2] Health detailed\")",
+      "Read(//c//**)",
+      "Read(//c/Users/PC/**)",
+      "Bash(find:*)",
+      "Bash(cargo test:*)"
     ]
   }
 }
