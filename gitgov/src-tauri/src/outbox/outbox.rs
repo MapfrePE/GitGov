@@ -138,8 +138,8 @@ pub struct Outbox {
     events: Arc<Mutex<Vec<OutboxEvent>>>,
     file_lock: Arc<Mutex<()>>,
     worker_control: Arc<WorkerControl>,
-    server_url: Option<String>,
-    api_key: Option<String>,
+    server_url: Arc<Mutex<Option<String>>>,
+    api_key: Arc<Mutex<Option<String>>>,
     max_retries: u32,
 }
 
@@ -156,16 +156,31 @@ impl Outbox {
                 shutdown: AtomicBool::new(false),
                 trigger: Condvar::new(),
             }),
-            server_url: None,
-            api_key: None,
+            server_url: Arc::new(Mutex::new(None)),
+            api_key: Arc::new(Mutex::new(None)),
             max_retries: 5,
         })
     }
 
     pub fn with_server(mut self, url: String, api_key: Option<String>) -> Self {
-        self.server_url = Some(url);
-        self.api_key = api_key;
+        if let Ok(mut server_url) = self.server_url.lock() {
+            *server_url = Some(url);
+        }
+        if let Ok(mut key) = self.api_key.lock() {
+            *key = api_key;
+        }
         self
+    }
+
+    pub fn set_server_config(&self, server_url: Option<String>, api_key: Option<String>) {
+        if let Ok(mut url_guard) = self.server_url.lock() {
+            *url_guard = server_url;
+        }
+        if let Ok(mut key_guard) = self.api_key.lock() {
+            *key_guard = api_key;
+        }
+        // Wake worker so it can flush promptly with the new config.
+        self.worker_control.trigger.notify_all();
     }
 
     fn load_events(path: &PathBuf) -> Result<Vec<OutboxEvent>, OutboxError> {
@@ -329,12 +344,26 @@ impl Outbox {
 
     /// Flush pending events. NEVER holds both locks simultaneously.
     pub fn flush(&self) -> Result<FlushResult, OutboxError> {
-        let server_url = match &self.server_url {
-            Some(url) => url.clone(),
-            None => {
-                return Err(OutboxError::NetworkError(
-                    "Server URL not configured".to_string(),
+        let server_url = match self.server_url.lock() {
+            Ok(guard) => match &*guard {
+                Some(url) => url.clone(),
+                None => {
+                    return Err(OutboxError::NetworkError(
+                        "Server URL not configured".to_string(),
+                    ))
+                }
+            },
+            Err(_) => {
+                return Err(OutboxError::IoError(
+                    "Server URL lock poisoned".to_string(),
                 ))
+            }
+        };
+
+        let api_key = match self.api_key.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => {
+                return Err(OutboxError::IoError("API key lock poisoned".to_string()))
             }
         };
 
@@ -380,7 +409,7 @@ impl Outbox {
         };
 
         // Step 3: Send to server
-        let response = self.send_batch(&server_url, &batch)?;
+        let response = self.send_batch(&server_url, api_key.as_deref(), &batch)?;
 
         let sent_count = response.accepted.len();
         let dup_count = response.duplicates.len();
@@ -424,6 +453,7 @@ impl Outbox {
     fn send_batch(
         &self,
         server_url: &str,
+        api_key: Option<&str>,
         batch: &ClientEventBatch,
     ) -> Result<ClientEventResponse, OutboxError> {
         let url = format!("{}/events", server_url);
@@ -435,7 +465,7 @@ impl Outbox {
 
         let mut request = client.post(&url).json(batch);
 
-        if let Some(ref api_key) = self.api_key {
+        if let Some(api_key) = api_key {
             request = request.header("Authorization", format!("Bearer {}", api_key));
         }
 
@@ -464,8 +494,8 @@ impl Outbox {
         let file_lock = Arc::clone(&self.file_lock);
         let worker_control = Arc::clone(&self.worker_control);
         let path = self.path.clone();
-        let server_url = self.server_url.clone();
-        let api_key = self.api_key.clone();
+        let server_url = Arc::clone(&self.server_url);
+        let api_key = Arc::clone(&self.api_key);
         let max_retries = self.max_retries;
 
         std::thread::spawn(move || {
@@ -516,8 +546,11 @@ impl Outbox {
                 }
 
                 // Build and send batch
+                let url_opt = server_url.lock().ok().and_then(|g| (*g).clone());
+                let api_key_opt = api_key.lock().ok().and_then(|g| (*g).clone());
+
                 if let (Some(ref url), Ok(client)) = (
-                    &server_url,
+                    &url_opt,
                     reqwest::blocking::Client::builder()
                         .timeout(Duration::from_secs(30))
                         .build(),
@@ -546,7 +579,7 @@ impl Outbox {
                     };
 
                     let mut request = client.post(&format!("{}/events", url)).json(&batch);
-                    if let Some(ref key) = api_key {
+                    if let Some(ref key) = api_key_opt {
                         request = request.header("Authorization", format!("Bearer {}", key));
                     }
 

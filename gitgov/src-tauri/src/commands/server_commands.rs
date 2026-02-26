@@ -3,12 +3,41 @@ use crate::control_plane::{
     JenkinsCorrelationFilter, JiraCorrelateRequest, JiraCorrelateResponse, ServerConfig, ServerStats,
     TicketCoverageQuery, TicketCoverageResponse, JiraTicketDetailResponse,
 };
+use crate::outbox::Outbox;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tauri::State;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConnectionConfig {
     pub url: String,
     pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboxSyncResult {
+    pub pending_before: usize,
+    pub pending_after: usize,
+    pub flushed_sent: usize,
+    pub flushed_duplicates: usize,
+    pub flushed_failed: usize,
+}
+
+fn normalize_loopback_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let Ok(mut parsed) = reqwest::Url::parse(trimmed) else {
+        return trimmed.to_string();
+    };
+
+    if parsed.host_str() == Some("localhost") {
+        let _ = parsed.set_host(Some("127.0.0.1"));
+    }
+
+    parsed.to_string()
 }
 
 fn to_command_error(e: impl std::fmt::Display, code: &str) -> String {
@@ -17,6 +46,61 @@ fn to_command_error(e: impl std::fmt::Display, code: &str) -> String {
         "message": e.to_string()
     }))
     .unwrap_or_else(|_| format!("{{\"code\":\"{}\",\"message\":\"{}\"}}", code, e))
+}
+
+#[tauri::command]
+pub fn cmd_server_sync_outbox(
+    config: Option<ServerConnectionConfig>,
+    outbox: State<'_, Arc<Outbox>>,
+) -> Result<OutboxSyncResult, String> {
+    let pending_before = outbox.get_pending_count();
+
+    let normalized_config = config.and_then(|cfg| {
+        let url = normalize_loopback_url(&cfg.url);
+        if url.trim().is_empty() {
+            None
+        } else {
+            Some(ServerConnectionConfig {
+                url,
+                api_key: cfg
+                    .api_key
+                    .and_then(|k| {
+                        let trimmed = k.trim().to_string();
+                        if trimmed.is_empty() { None } else { Some(trimmed) }
+                    }),
+            })
+        }
+    });
+
+    outbox.set_server_config(
+        normalized_config.as_ref().map(|c| c.url.clone()),
+        normalized_config.as_ref().and_then(|c| c.api_key.clone()),
+    );
+
+    let mut flushed_sent = 0;
+    let mut flushed_duplicates = 0;
+    let mut flushed_failed = 0;
+
+    if normalized_config.is_some() && pending_before > 0 {
+        match outbox.flush() {
+            Ok(result) => {
+                flushed_sent = result.sent;
+                flushed_duplicates = result.duplicates;
+                flushed_failed = result.failed;
+            }
+            Err(e) => {
+                return Err(to_command_error(e, "OUTBOX_SYNC_ERROR"));
+            }
+        }
+    }
+
+    Ok(OutboxSyncResult {
+        pending_before,
+        pending_after: outbox.get_pending_count(),
+        flushed_sent,
+        flushed_duplicates,
+        flushed_failed,
+    })
 }
 
 #[tauri::command]

@@ -1,6 +1,7 @@
 use crate::git::GitError;
 use git2::{Branch, BranchType, Repository};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchInfo {
@@ -139,8 +140,27 @@ pub fn push_to_remote(repo: &Repository, branch: &str, token: &str) -> Result<()
         .map_err(|e| GitError::GitError(format!("Remote 'origin' not found: {}", e.message())))?;
 
     let mut callbacks = git2::RemoteCallbacks::new();
-    callbacks.credentials(|_url, username_from_url, _allowed_types| {
-        git2::Cred::userpass_plaintext(username_from_url.unwrap_or("git"), token)
+    callbacks.credentials(|url, username_from_url, _allowed_types| {
+        let username = if url.contains("github.com") {
+            username_from_url.unwrap_or("x-access-token")
+        } else {
+            username_from_url.unwrap_or("git")
+        };
+
+        git2::Cred::userpass_plaintext(username, token)
+    });
+
+    let push_status_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let push_status_errors_cb = Arc::clone(&push_status_errors);
+    callbacks.push_update_reference(move |refname, status| {
+        if let Some(status) = status {
+            let message = format!("{}: {}", refname, status);
+            tracing::warn!(%message, "Remote reported push rejection");
+            if let Ok(mut errors) = push_status_errors_cb.lock() {
+                errors.push(message);
+            }
+        }
+        Ok(())
     });
 
     let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
@@ -151,6 +171,14 @@ pub fn push_to_remote(repo: &Repository, branch: &str, token: &str) -> Result<()
     remote
         .push(&[&refspec], Some(&mut push_options))
         .map_err(|e| GitError::PushFailed(e.message().to_string()))?;
+
+    let status_errors = push_status_errors
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    if !status_errors.is_empty() {
+        return Err(GitError::PushFailed(status_errors.join("; ")));
+    }
 
     Ok(())
 }

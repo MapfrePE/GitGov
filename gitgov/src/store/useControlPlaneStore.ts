@@ -248,6 +248,14 @@ function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: Se
   }
 }
 
+async function syncOutboxServerConfig(config: ServerConfig | null): Promise<void> {
+  try {
+    await tauriInvoke('cmd_server_sync_outbox', { config })
+  } catch {
+    // Non-fatal: dashboard connectivity should still work even if outbox sync fails.
+  }
+}
+
 export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActions>((set, get) => ({
   serverConfig: null,
   serverStats: null,
@@ -268,6 +276,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     const config = resolveServerConfig()
     persistServerConfig(config)
     set({ serverConfig: config })
+    await syncOutboxServerConfig(config)
     await get().checkConnection()
   },
 
@@ -275,6 +284,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     const merged = resolveServerConfig(config, get().serverConfig)
     persistServerConfig(merged)
     set({ serverConfig: merged })
+    void syncOutboxServerConfig(merged)
     get().checkConnection()
   },
 
@@ -475,6 +485,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
 
   disconnect: () => {
     persistServerConfig(null)
+    void syncOutboxServerConfig(null)
     set({
       serverConfig: null,
       isConnected: false,

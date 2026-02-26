@@ -141,6 +141,7 @@ pub fn run() {
             commands::cmd_load_repo_config,
             commands::cmd_validate_repo,
             commands::cmd_validate_branch_name,
+            commands::cmd_server_sync_outbox,
             commands::cmd_server_health,
             commands::cmd_server_send_event,
             commands::cmd_server_get_logs,
