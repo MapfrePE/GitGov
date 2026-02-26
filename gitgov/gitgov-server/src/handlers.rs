@@ -15,6 +15,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 fn sanitize_db_error(e: &DbError) -> String {
@@ -117,7 +118,7 @@ pub async fn ingest_jenkins_pipeline_event(
             .map(str::trim)
             .unwrap_or_default();
 
-        if provided_secret.is_empty() || provided_secret != expected_secret {
+        if provided_secret.is_empty() || provided_secret.as_bytes().ct_eq(expected_secret.as_bytes()).unwrap_u8() != 1 {
             tracing::warn!("Rejected Jenkins pipeline event due to missing/invalid secret header");
             return (
                 StatusCode::UNAUTHORIZED,
@@ -333,7 +334,7 @@ pub async fn ingest_jira_webhook(
             .and_then(|v| v.to_str().ok())
             .map(str::trim)
             .unwrap_or_default();
-        if provided_secret.is_empty() || provided_secret != expected_secret {
+        if provided_secret.is_empty() || provided_secret.as_bytes().ct_eq(expected_secret.as_bytes()).unwrap_u8() != 1 {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(JiraWebhookIngestResponse {
@@ -1566,15 +1567,16 @@ pub async fn get_logs(
     Query(filter): Query<EventFilter>,
 ) -> impl IntoResponse {
     // Non-admins can only see their own events
+    let clamped_limit = if filter.limit == 0 { 100 } else { filter.limit.min(500) };
     let filter = if auth_user.role != UserRole::Admin {
         EventFilter {
             user_login: Some(auth_user.client_id.clone()),
-            limit: if filter.limit == 0 { 100 } else { filter.limit },
+            limit: clamped_limit,
             ..filter
         }
     } else {
         EventFilter {
-            limit: if filter.limit == 0 { 100 } else { filter.limit },
+            limit: clamped_limit,
             ..filter
         }
     };

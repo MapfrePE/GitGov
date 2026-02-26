@@ -18,6 +18,19 @@ export interface AuditLogEntry {
   reason?: string
 }
 
+export interface EventDetails {
+  commit_sha?: string
+  commit_message?: string
+  files?: string[]
+  pipeline_id?: string
+  job_name?: string
+  pipeline_status?: string
+  ticket_key?: string
+  ticket_summary?: string
+  reason?: string
+  [key: string]: unknown
+}
+
 export interface CombinedEvent {
   id: string
   source: string
@@ -27,7 +40,7 @@ export interface CombinedEvent {
   repo_name?: string
   branch?: string
   status?: string
-  details: Record<string, unknown>
+  details: EventDetails
 }
 
 export interface AuditFilter {

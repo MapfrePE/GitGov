@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import { useRepoStore } from '@/store/useRepoStore'
 import type { BranchInfo } from '@/lib/types'
 import { Button } from '@/components/shared/Button'
@@ -19,6 +19,8 @@ export function BranchSelector({ userLogin, isAdmin, userGroup }: BranchSelector
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [search, setSearch] = useState('')
   const [switching, setSwitching] = useState<string | null>(null)
+  const [focusIndex, setFocusIndex] = useState(-1)
+  const dropdownRef = useRef<HTMLDivElement>(null)
 
   const filteredBranches = useMemo(() => {
     if (!search) return branches
@@ -43,10 +45,51 @@ export function BranchSelector({ userLogin, isAdmin, userGroup }: BranchSelector
     }
   }
 
+  const selectableBranches = localBranches.filter((b) => !b.is_current)
+
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    if (!isOpen) return
+    if (e.key === 'Escape') {
+      setIsOpen(false)
+      setFocusIndex(-1)
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setFocusIndex((i) => Math.min(i + 1, selectableBranches.length - 1))
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setFocusIndex((i) => Math.max(i - 1, 0))
+    } else if (e.key === 'Enter' && focusIndex >= 0 && focusIndex < selectableBranches.length) {
+      handleCheckout(selectableBranches[focusIndex])
+    }
+  }, [isOpen, focusIndex, selectableBranches, handleCheckout])
+
+  useEffect(() => {
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [handleKeyDown])
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsOpen(false)
+        setFocusIndex(-1)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isOpen])
+
+  useEffect(() => {
+    if (!isOpen) setFocusIndex(-1)
+  }, [isOpen])
+
   return (
-    <>
+    <div ref={dropdownRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
         className="flex items-center gap-2 px-3 py-2 bg-surface-800 hover:bg-surface-700 border border-surface-700 rounded-lg transition-colors"
       >
         <GitBranch size={16} className="text-brand-500" />
@@ -80,6 +123,7 @@ export function BranchSelector({ userLogin, isAdmin, userGroup }: BranchSelector
                     key={branch.name}
                     branch={branch}
                     isLoading={switching === branch.name}
+                    focused={!branch.is_current && selectableBranches.indexOf(branch) === focusIndex}
                     onCheckout={() => handleCheckout(branch)}
                   />
                 ))}
@@ -131,7 +175,7 @@ export function BranchSelector({ userLogin, isAdmin, userGroup }: BranchSelector
           onSuccess={() => setShowCreateModal(false)}
         />
       </Modal>
-    </>
+    </div>
   )
 }
 
@@ -139,18 +183,22 @@ interface BranchItemProps {
   branch: BranchInfo
   isLoading: boolean
   disabled?: boolean
+  focused?: boolean
   onCheckout?: () => void
 }
 
-function BranchItem({ branch, isLoading, disabled, onCheckout }: BranchItemProps) {
+function BranchItem({ branch, isLoading, disabled, focused, onCheckout }: BranchItemProps) {
   return (
     <button
       onClick={onCheckout}
       disabled={disabled || isLoading || branch.is_current}
+      role="option"
+      aria-selected={branch.is_current}
       className={clsx(
         'w-full flex items-center gap-2 px-3 py-2 text-left text-sm hover:bg-surface-700 transition-colors',
         disabled && 'opacity-50 cursor-not-allowed',
-        branch.is_current && 'bg-surface-700'
+        branch.is_current && 'bg-surface-700',
+        focused && 'bg-surface-700 ring-1 ring-brand-500/50'
       )}
     >
       <span className="w-4">

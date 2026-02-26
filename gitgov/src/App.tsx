@@ -5,6 +5,7 @@ import { useAuthStore } from './store/useAuthStore'
 import { useControlPlaneStore } from './store/useControlPlaneStore'
 import { ToastContainer } from './components/shared/Toast'
 import { FolderGit2 } from 'lucide-react'
+import { ErrorBoundary } from './components/shared/ErrorBoundary'
 
 function SplashScreen() {
   return (
@@ -46,10 +47,10 @@ function App() {
   }
 
   return (
-    <>
+    <ErrorBoundary>
       <RouterProvider router={router} />
       <ToastContainer />
-    </>
+    </ErrorBoundary>
   )
 }
 

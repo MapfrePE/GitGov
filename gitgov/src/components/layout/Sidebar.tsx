@@ -27,6 +27,7 @@ export function Sidebar() {
             key={item.to}
             to={item.to}
             title={item.label}
+            aria-label={item.label}
             className={({ isActive }) =>
               clsx(
                 'w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-200',
@@ -36,7 +37,7 @@ export function Sidebar() {
               )
             }
           >
-            <item.icon size={18} strokeWidth={1.5} />
+            <item.icon size={18} strokeWidth={1.5} aria-hidden="true" />
           </NavLink>
         ))}
       </nav>
@@ -53,9 +54,10 @@ export function Sidebar() {
           <button
             onClick={logout}
             title="Cerrar sesión"
+            aria-label="Cerrar sesión"
             className="w-9 h-9 flex items-center justify-center rounded-lg text-surface-600 hover:text-surface-400 hover:bg-white/[0.04] transition-all duration-200"
           >
-            <LogOut size={16} strokeWidth={1.5} />
+            <LogOut size={16} strokeWidth={1.5} aria-hidden="true" />
           </button>
         </div>
       )}

@@ -1018,7 +1018,7 @@ BEGIN
                 'total', (SELECT COUNT(*) FROM noncompliance_signals WHERE org_id = p_org_id),
                 'pending', (SELECT COUNT(*) FROM noncompliance_signals WHERE org_id = p_org_id AND status = 'pending'),
                 'high_confidence', (SELECT COUNT(*) FROM noncompliance_signals WHERE org_id = p_org_id AND confidence = 'high'),
-                'by_type', (SELECT json_object_agg(signal_type, cnt) FROM (SELECT signal_type, COUNT(*) as cnt FROM noncompliance_signals WHERE org_id = p_org_id GROUP BY signal_type) t)
+                'by_type', COALESCE((SELECT json_object_agg(signal_type, cnt) FROM (SELECT signal_type, COUNT(*) as cnt FROM noncompliance_signals WHERE org_id = p_org_id GROUP BY signal_type) t), '{}'::json)
             )
         ),
         'correlation', (

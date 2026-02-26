@@ -446,6 +446,11 @@ async fn main() {
         parse_u32_env("GITGOV_RATE_LIMIT_JIRA_PER_MIN", 120),
         Duration::from_secs(60),
     ));
+    let admin_rate_limit = Arc::new(InMemoryRateLimiter::new(
+        "admin_endpoints",
+        parse_u32_env("GITGOV_RATE_LIMIT_ADMIN_PER_MIN", 60),
+        Duration::from_secs(60),
+    ));
     let jenkins_body_limit_bytes = parse_usize_env(
         "GITGOV_JENKINS_MAX_BODY_BYTES",
         256 * 1024,
@@ -462,13 +467,23 @@ async fn main() {
         jira_per_min = jira_rate_limit.limit,
         jenkins_body_limit_bytes,
         jira_body_limit_bytes,
-        "Basic rate limiting enabled for ingestion endpoints"
+        admin_per_min = admin_rate_limit.limit,
+        "Rate limiting enabled for ingestion and admin endpoints"
     );
 
     let auth_routes = Router::new()
-        .route("/logs", get(handlers::get_logs))
-        .route("/stats", get(handlers::get_stats))
-        .route("/dashboard", get(handlers::get_dashboard))
+        .route("/logs", get(handlers::get_logs).layer(middleware::from_fn_with_state(
+            Arc::clone(&admin_rate_limit),
+            rate_limit_middleware,
+        )))
+        .route("/stats", get(handlers::get_stats).layer(middleware::from_fn_with_state(
+            Arc::clone(&admin_rate_limit),
+            rate_limit_middleware,
+        )))
+        .route("/dashboard", get(handlers::get_dashboard).layer(middleware::from_fn_with_state(
+            Arc::clone(&admin_rate_limit),
+            rate_limit_middleware,
+        )))
         .route(
             "/integrations/jenkins",
             post(handlers::ingest_jenkins_pipeline_event)
