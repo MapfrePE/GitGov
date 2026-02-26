@@ -1172,7 +1172,7 @@ impl Database {
             LEFT JOIN repos r ON r.id = c.repo_id
             WHERE c.event_type = 'commit'
               AND c.commit_sha IS NOT NULL
-              AND c.created_at >= NOW() - make_interval(hours => $1)
+              AND c.created_at >= NOW() - make_interval(hours => $1::int)
               AND ($2::uuid IS NULL OR c.org_id = $2::uuid)
               AND ($3::uuid IS NULL OR c.repo_id = $3::uuid)
             ORDER BY c.created_at DESC
@@ -1239,7 +1239,7 @@ impl Database {
             FROM client_events c
             WHERE c.event_type = 'commit'
               AND c.commit_sha IS NOT NULL
-              AND c.created_at >= NOW() - make_interval(hours => $1)
+              AND c.created_at >= NOW() - make_interval(hours => $1::int)
               AND ($2::uuid IS NULL OR c.org_id = $2::uuid)
               AND ($3::uuid IS NULL OR c.repo_id = $3::uuid)
               AND ($4::text IS NULL OR c.branch = $4)
@@ -1260,7 +1260,7 @@ impl Database {
             JOIN commit_ticket_correlations ct ON ct.commit_sha = c.commit_sha
             WHERE c.event_type = 'commit'
               AND c.commit_sha IS NOT NULL
-              AND c.created_at >= NOW() - make_interval(hours => $1)
+              AND c.created_at >= NOW() - make_interval(hours => $1::int)
               AND ($2::uuid IS NULL OR c.org_id = $2::uuid)
               AND ($3::uuid IS NULL OR c.repo_id = $3::uuid)
               AND ($4::text IS NULL OR c.branch = $4)
@@ -1281,7 +1281,7 @@ impl Database {
             LEFT JOIN commit_ticket_correlations ct ON ct.commit_sha = c.commit_sha
             WHERE c.event_type = 'commit'
               AND c.commit_sha IS NOT NULL
-              AND c.created_at >= NOW() - make_interval(hours => $1)
+              AND c.created_at >= NOW() - make_interval(hours => $1::int)
               AND ($2::uuid IS NULL OR c.org_id = $2::uuid)
               AND ($3::uuid IS NULL OR c.repo_id = $3::uuid)
               AND ($4::text IS NULL OR c.branch = $4)
@@ -1305,7 +1305,7 @@ impl Database {
             LEFT JOIN commit_ticket_correlations ct
               ON ct.ticket_id = pt.ticket_id
              AND (pt.org_id IS NULL OR ct.org_id = pt.org_id)
-            WHERE pt.ingested_at >= NOW() - make_interval(hours => $1)
+            WHERE pt.ingested_at >= NOW() - make_interval(hours => $1::int)
               AND ($2::uuid IS NULL OR pt.org_id = $2::uuid)
               AND ct.id IS NULL
             ORDER BY pt.ingested_at DESC
