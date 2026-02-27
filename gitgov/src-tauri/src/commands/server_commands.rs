@@ -1,6 +1,7 @@
 use crate::control_plane::{
-    AuditFilter, CombinedEvent, CommitPipelineCorrelation, ControlPlaneClient, EventPayload,
-    JenkinsCorrelationFilter, JiraCorrelateRequest, JiraCorrelateResponse, ServerConfig, ServerStats,
+    ApiKeyInfo, AuditFilter, CombinedEvent, CommitPipelineCorrelation, ControlPlaneClient,
+    EventPayload, ExportLogEntry, ExportResponse, JenkinsCorrelationFilter, JiraCorrelateRequest,
+    JiraCorrelateResponse, MeResponse, RevokeApiKeyResponse, ServerConfig, ServerStats,
     TicketCoverageQuery, TicketCoverageResponse, JiraTicketDetailResponse,
 };
 use crate::outbox::Outbox;
@@ -236,5 +237,74 @@ pub fn cmd_server_get_jira_ticket_detail(
 
     client
         .get_jira_ticket_detail(&ticket_id)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_get_me(config: ServerConnectionConfig) -> Result<MeResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .get_me()
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_list_api_keys(config: ServerConnectionConfig) -> Result<Vec<ApiKeyInfo>, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .list_api_keys()
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_revoke_api_key(
+    config: ServerConnectionConfig,
+    key_id: String,
+) -> Result<RevokeApiKeyResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .revoke_api_key(&key_id)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_export(
+    config: ServerConnectionConfig,
+    export_type: String,
+    start_date: Option<i64>,
+    end_date: Option<i64>,
+    org_name: Option<String>,
+) -> Result<ExportResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .export_events(&export_type, start_date, end_date, org_name.as_deref())
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_list_exports(config: ServerConnectionConfig) -> Result<Vec<ExportLogEntry>, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .list_exports()
         .map_err(|e| to_command_error(e, "SERVER_ERROR"))
 }

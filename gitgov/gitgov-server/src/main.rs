@@ -2,6 +2,7 @@ mod auth;
 mod db;
 mod handlers;
 mod models;
+mod notifications;
 
 use axum::{
     body::Body,
@@ -414,6 +415,12 @@ async fn main() {
         }
     });
 
+    let alert_webhook_url = std::env::var("GITGOV_ALERT_WEBHOOK_URL").ok();
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("failed to build HTTP client for notifications");
+
     let state = Arc::new(AppState {
         db: Arc::clone(&db),
         jwt_secret,
@@ -422,6 +429,8 @@ async fn main() {
         jira_webhook_secret,
         start_time: Instant::now(),
         worker_id: worker_id_clone.clone(),
+        http_client,
+        alert_webhook_url,
     });
     
     let worker_id_for_log = worker_id_clone;
@@ -520,7 +529,10 @@ async fn main() {
         .route("/policy/{repo_name}/history", get(handlers::get_policy_history))
         .route("/policy/{repo_name}/override", put(handlers::override_policy))
         .route("/export", post(handlers::export_events))
-        .route("/api-keys", post(handlers::create_api_key))
+        .route("/exports", get(handlers::list_exports))
+        .route("/me", get(handlers::get_me))
+        .route("/api-keys", get(handlers::list_api_keys).post(handlers::create_api_key))
+        .route("/api-keys/{id}/revoke", post(handlers::revoke_api_key))
         .route(
             "/events",
             post(handlers::ingest_client_events).layer(middleware::from_fn_with_state(

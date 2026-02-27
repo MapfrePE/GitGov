@@ -1,5 +1,54 @@
 # GitGov - Registro de Progreso
 
+## Actualización Reciente (2026-02-27) — Enterprise Gaps v1
+
+### Resumen ejecutivo
+Cuatro gaps enterprise implementados end-to-end (backend + Tauri + frontend):
+
+| Gap | Implementación | Estado |
+|-----|----------------|--------|
+| Sin revocación de API keys | `GET/POST /api-keys`, `POST /api-keys/:id/revoke`, `GET /me`, `ApiKeyManagerWidget` | ✅ |
+| Export compliance-grade | `get_events_for_export` (hasta 50k registros, sin límite 100), `GET /exports`, `ExportPanel` | ✅ |
+| Sin notificaciones salientes | `notifications.rs`, `reqwest` fire-and-forget en `blocked_push` y `confirm_signal` | ✅ |
+| Instalación enterprise | `tauri.conf.json` code signing, `build-signed.yml` CI, `docs/ENTERPRISE_DEPLOY.md` | ✅ |
+
+### Fase 1 — API Key Revocation + UI de Gestión
+- **`gitgov-server/src/models.rs`**: `ApiKeyInfo`, `MeResponse`, `RevokeApiKeyResponse` structs
+- **`gitgov-server/src/db.rs`**: `list_api_keys()`, `revoke_api_key()` — soft-delete con `is_active = FALSE`
+- **`gitgov-server/src/handlers.rs`**: handlers `get_me`, `list_api_keys`, `revoke_api_key`
+- **`gitgov-server/src/main.rs`**: rutas `/me`, `/api-keys` (GET+POST), `/api-keys/:id/revoke`
+- **`src-tauri/src/control_plane/server.rs`**: structs espejo + `get_me()`, `list_api_keys()`, `revoke_api_key()`
+- **`src-tauri/src/commands/server_commands.rs`**: `cmd_server_get_me`, `cmd_server_list_api_keys`, `cmd_server_revoke_api_key`
+- **`src/store/useControlPlaneStore.ts`**: `userRole`, `apiKeys`, `loadMe()`, `loadApiKeys()`, `revokeApiKey()`
+- **`src/components/control_plane/ApiKeyManagerWidget.tsx`**: tabla con revocación two-click, visible solo si `isAdmin`
+
+### Fase 2 — Notificaciones Salientes por Webhook
+- **`gitgov-server/Cargo.toml`**: `reqwest = "0.12"` con `rustls-tls`
+- **`gitgov-server/src/notifications.rs`**: `send_alert()`, `format_blocked_push_alert()`, `format_signal_confirmed_alert()`
+- **`AppState`**: `http_client: reqwest::Client`, `alert_webhook_url: Option<String>` (de `GITGOV_ALERT_WEBHOOK_URL`)
+- Triggers: `tokio::spawn` fire-and-forget en `ingest_client_events` (BlockedPush) y `confirm_signal`
+- Compatible con Slack, Teams, Discord, PagerDuty (payload Slack Incoming Webhooks)
+
+### Fase 3 — Export Compliance-Grade
+- **`gitgov-server/src/db.rs`**: `get_events_for_export()` (hasta 50,000 registros), `list_export_logs()`
+- **`gitgov-server/src/handlers.rs`**: `export_events` ahora aplica `org_name` filter; `list_exports` handler
+- **`gitgov-server/src/main.rs`**: ruta `GET /exports`
+- **`src-tauri`**: `cmd_server_export`, `cmd_server_list_exports` + structs `ExportResponse`, `ExportLogEntry`
+- **`src/components/control_plane/ExportPanel.tsx`**: date range picker + blob download + historial de exports
+
+### Fase 4 — Firma de Código + Instalación Enterprise
+- **`src-tauri/tauri.conf.json`**: `bundle.windows` con `digestAlgorithm: "sha256"`, `timestampUrl: Digicert`
+- **`.github/workflows/build-signed.yml`**: CI para builds firmados en tags `v*` (Windows MSI+NSIS, macOS DMG)
+- **`docs/ENTERPRISE_DEPLOY.md`**: Guía completa IT — NSIS silent, MSI GPO, Intune, env vars, SHA256, firewall
+
+### Validación
+- `cargo test`: 36/36 tests OK ✅
+- `tsc -b`: 0 errores TypeScript ✅
+- ESLint: 0 errores en código nuevo (18 errores pre-existentes en archivos no modificados) ✅
+- Golden Path preservado: `validate_api_key` en `auth.rs` ya filtra `is_active = TRUE` → revocación inmediata ✅
+
+---
+
 ## Actualización Reciente (2026-02-26)
 
 ### Pruebas E2E, Bug offset, Tests de Contrato y CI

@@ -835,6 +835,64 @@ impl Database {
         Ok(events)
     }
 
+    /// Same as get_combined_events but without the 100-record default cap.
+    /// Used for compliance exports — returns up to 50,000 records.
+    pub async fn get_events_for_export(&self, filter: &EventFilter) -> Result<Vec<CombinedEvent>, DbError> {
+        let limit = if filter.limit == 0 { 50_000_i32 } else { filter.limit.min(50_000) as i32 };
+        let export_filter = EventFilter {
+            limit: limit as usize,
+            offset: 0,
+            ..filter.clone()
+        };
+        self.get_combined_events(&export_filter).await
+    }
+
+    pub async fn list_export_logs(&self, org_id: Option<&str>) -> Result<Vec<ExportLog>, DbError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id::text,
+                org_id::text,
+                exported_by,
+                export_type,
+                EXTRACT(EPOCH FROM date_range_start)::bigint * 1000 AS date_range_start_ms,
+                EXTRACT(EPOCH FROM date_range_end)::bigint * 1000 AS date_range_end_ms,
+                COALESCE(filters, 'null'::jsonb) AS filters,
+                record_count,
+                content_hash,
+                file_path,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms
+            FROM export_logs
+            WHERE ($1::uuid IS NULL OR org_id = $1::uuid)
+            ORDER BY created_at DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let logs = rows
+            .iter()
+            .map(|row| ExportLog {
+                id: row.get("id"),
+                org_id: row.get("org_id"),
+                exported_by: row.get("exported_by"),
+                export_type: row.get("export_type"),
+                date_range_start: row.get("date_range_start_ms"),
+                date_range_end: row.get("date_range_end_ms"),
+                filters: row.get("filters"),
+                record_count: row.get("record_count"),
+                content_hash: row.get("content_hash"),
+                file_path: row.get("file_path"),
+                created_at: row.get("created_at_ms"),
+            })
+            .collect();
+
+        Ok(logs)
+    }
+
     // ========================================================================
     // PIPELINE EVENTS (V1.2-A Jenkins Integration)
     // ========================================================================
@@ -1747,6 +1805,63 @@ impl Database {
 
         let count: i64 = result.get("count");
         Ok(count)
+    }
+
+    pub async fn list_api_keys(&self, org_id: Option<&str>) -> Result<Vec<ApiKeyInfo>, DbError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id::text,
+                client_id,
+                role,
+                org_id::text,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM last_used)::bigint * 1000 AS last_used_ms,
+                is_active
+            FROM api_keys
+            WHERE ($1::uuid IS NULL OR org_id = $1::uuid)
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let keys = rows
+            .iter()
+            .map(|row| ApiKeyInfo {
+                id: row.get("id"),
+                client_id: row.get("client_id"),
+                role: row.get("role"),
+                org_id: row.get("org_id"),
+                created_at: row.get::<i64, _>("created_at_ms"),
+                last_used: row.get("last_used_ms"),
+                is_active: row.get("is_active"),
+            })
+            .collect();
+
+        Ok(keys)
+    }
+
+    pub async fn revoke_api_key(&self, id: &str, org_id: Option<&str>) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE api_keys
+            SET is_active = FALSE
+            WHERE
+                id = $1::uuid
+                AND is_active = TRUE
+                AND ($2::uuid IS NULL OR org_id = $2::uuid)
+            "#,
+        )
+        .bind(id)
+        .bind(org_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     // ========================================================================

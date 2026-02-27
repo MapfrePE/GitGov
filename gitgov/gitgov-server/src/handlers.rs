@@ -1,6 +1,7 @@
 use crate::auth::{require_admin, AuthUser};
 use crate::db::{Database, DbError, JobMetrics, Job};
 use crate::models::*;
+use crate::notifications;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
@@ -13,6 +14,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use subtle::ConstantTimeEq;
@@ -36,6 +38,8 @@ pub struct AppState {
     pub jira_webhook_secret: Option<String>,
     pub start_time: Instant,
     pub worker_id: String,
+    pub http_client: reqwest::Client,
+    pub alert_webhook_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -835,6 +839,19 @@ pub async fn confirm_signal(
     ).await {
         Ok(violation_id) => {
             tracing::info!("Signal {} confirmed as violation {} by {}", signal_id, violation_id, auth_user.client_id);
+            // Fire-and-forget alert
+            if let Some(ref webhook_url) = state.alert_webhook_url {
+                let text = notifications::format_signal_confirmed_alert(
+                    &payload.severity,
+                    &auth_user.client_id,
+                    None,
+                );
+                let client = state.http_client.clone();
+                let url = webhook_url.clone();
+                tokio::spawn(async move {
+                    notifications::send_alert(&client, &url, text).await;
+                });
+            }
             (StatusCode::OK, Json(json!({
                 "success": true,
                 "violation_id": violation_id
@@ -1053,13 +1070,14 @@ pub async fn export_events(
     let mut filter = EventFilter {
         start_date: payload.start_date,
         end_date: payload.end_date,
+        org_name: payload.org_name.clone(),
         ..Default::default()
     };
     if auth_user.role != UserRole::Admin {
         filter.user_login = Some(auth_user.client_id.clone());
     }
 
-    let events = match state.db.get_combined_events(&filter).await {
+    let events = match state.db.get_events_for_export(&filter).await {
         Ok(e) => e,
         Err(_) => {
             return (
@@ -1106,6 +1124,24 @@ pub async fn export_events(
     };
 
     (StatusCode::OK, Json(response))
+}
+
+pub async fn list_exports(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    match state.db.list_export_logs(auth_user.org_id.as_deref()).await {
+        Ok(logs) => (StatusCode::OK, Json(logs)).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "Internal database error" })),
+        )
+            .into_response(),
+    }
 }
 
 // ============================================================================
@@ -1534,7 +1570,30 @@ pub async fn ingest_client_events(
     }
 
     match state.db.insert_client_events_batch(&events).await {
-        Ok(response) => (StatusCode::OK, Json(response)),
+        Ok(response) => {
+            // Fire-and-forget alert for blocked_push events
+            if let Some(ref webhook_url) = state.alert_webhook_url {
+                let accepted_event_ids: HashSet<&str> =
+                    response.accepted.iter().map(String::as_str).collect();
+                for event in &events {
+                    if event.event_type == ClientEventType::BlockedPush
+                        && accepted_event_ids.contains(event.event_uuid.as_str())
+                    {
+                        let text = notifications::format_blocked_push_alert(
+                            &event.user_login,
+                            event.repo_id.as_deref().unwrap_or("unknown"),
+                            event.branch.as_deref().unwrap_or("unknown"),
+                        );
+                        let client = state.http_client.clone();
+                        let url = webhook_url.clone();
+                        tokio::spawn(async move {
+                            notifications::send_alert(&client, &url, text).await;
+                        });
+                    }
+                }
+            }
+            (StatusCode::OK, Json(response))
+        }
         Err(e) => {
             tracing::error!("Failed to insert client events batch: {}", e);
             (
@@ -2056,6 +2115,76 @@ pub async fn create_api_key(
                 error: Some("Internal database error".to_string()),
             }),
         ),
+    }
+}
+
+pub async fn get_me(
+    Extension(auth_user): Extension<AuthUser>,
+) -> impl IntoResponse {
+    let response = MeResponse {
+        client_id: auth_user.client_id,
+        role: auth_user.role.as_str().to_string(),
+        org_id: auth_user.org_id,
+    };
+    (StatusCode::OK, Json(response))
+}
+
+pub async fn list_api_keys(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    match state.db.list_api_keys(auth_user.org_id.as_deref()).await {
+        Ok(keys) => (StatusCode::OK, Json(keys)).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "Internal database error" })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn revoke_api_key(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(key_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    match state
+        .db
+        .revoke_api_key(&key_id, auth_user.org_id.as_deref())
+        .await
+    {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(RevokeApiKeyResponse {
+                success: true,
+                message: "API key revoked".to_string(),
+            }),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(RevokeApiKeyResponse {
+                success: false,
+                message: "API key not found or already revoked".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RevokeApiKeyResponse {
+                success: false,
+                message: "Internal database error".to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 

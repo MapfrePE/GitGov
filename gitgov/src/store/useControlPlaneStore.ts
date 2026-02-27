@@ -117,6 +117,50 @@ interface JiraCoverageFilters {
   branch: string
 }
 
+export interface ApiKeyInfo {
+  id: string
+  client_id: string
+  role: string
+  org_id: string | null
+  created_at: number
+  last_used: number | null
+  is_active: boolean
+}
+
+interface MeResponse {
+  client_id: string
+  role: string
+  org_id: string | null
+}
+
+interface RevokeApiKeyResponse {
+  success: boolean
+  message: string
+}
+
+export interface ExportResponse {
+  id: string
+  export_type: string
+  record_count: number
+  content_hash: string
+  data?: unknown
+  created_at: number
+}
+
+export interface ExportLogEntry {
+  id: string
+  org_id: string | null
+  exported_by: string
+  export_type: string
+  date_range_start: number | null
+  date_range_end: number | null
+  filters: unknown
+  record_count: number
+  content_hash: string | null
+  file_path: string | null
+  created_at: number
+}
+
 interface ControlPlaneState {
   serverConfig: ServerConfig | null
   serverStats: ServerStats | null
@@ -127,6 +171,10 @@ interface ControlPlaneState {
   jiraTicketDetails: Record<string, JiraTicketDetail | null>
   jiraTicketDetailFetchedAt: Record<string, number>
   jiraTicketDetailLoading: Record<string, boolean>
+  userRole: string | null
+  apiKeys: ApiKeyInfo[]
+  isLoadingApiKeys: boolean
+  exportLogs: ExportLogEntry[]
   isConnected: boolean
   isLoading: boolean
   isRefreshingDashboard: boolean
@@ -145,6 +193,11 @@ interface ControlPlaneActions {
   applyTicketCoverageFilters: (filters: Partial<JiraCoverageFilters>) => Promise<void>
   correlateJiraTickets: (params?: { hours?: number; limit?: number; repo_full_name?: string; org_name?: string }) => Promise<JiraCorrelateResponse | null>
   loadJiraTicketDetail: (ticketId: string) => Promise<JiraTicketDetail | null>
+  loadMe: () => Promise<void>
+  loadApiKeys: () => Promise<void>
+  revokeApiKey: (keyId: string) => Promise<boolean>
+  exportAuditData: (params: { exportType?: string; startDate?: number; endDate?: number; orgName?: string }) => Promise<ExportResponse | null>
+  loadExportLogs: () => Promise<void>
   clearError: () => void
   disconnect: () => void
 }
@@ -271,6 +324,10 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   jiraTicketDetails: {},
   jiraTicketDetailFetchedAt: {},
   jiraTicketDetailLoading: {},
+  userRole: null,
+  apiKeys: [],
+  isLoadingApiKeys: false,
+  exportLogs: [],
   isConnected: false,
   isLoading: false,
   isRefreshingDashboard: false,
@@ -301,6 +358,9 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     try {
       const healthy = await tauriInvoke<boolean>('cmd_server_health', { config: serverConfig })
       set({ isConnected: healthy, isLoading: false })
+      if (healthy) {
+        void get().loadMe()
+      }
     } catch (e) {
       set({ error: parseCommandError(String(e)).message, isLoading: false, isConnected: false })
     }
@@ -486,6 +546,79 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     }
   },
 
+  exportAuditData: async (params) => {
+    const { serverConfig } = get()
+    if (!serverConfig) return null
+    try {
+      const result = await tauriInvoke<ExportResponse>('cmd_server_export', {
+        config: serverConfig,
+        exportType: params.exportType ?? 'events',
+        startDate: params.startDate ?? null,
+        endDate: params.endDate ?? null,
+        orgName: params.orgName ?? null,
+      })
+      await get().loadExportLogs()
+      return result
+    } catch (e) {
+      set({ error: parseCommandError(String(e)).message })
+      return null
+    }
+  },
+
+  loadExportLogs: async () => {
+    const { serverConfig } = get()
+    if (!serverConfig) return
+    try {
+      const logs = await tauriInvoke<ExportLogEntry[]>('cmd_server_list_exports', { config: serverConfig })
+      set({ exportLogs: logs })
+    } catch {
+      // Non-fatal
+    }
+  },
+
+  loadMe: async () => {
+    const { serverConfig } = get()
+    if (!serverConfig) return
+    try {
+      const me = await tauriInvoke<MeResponse>('cmd_server_get_me', { config: serverConfig })
+      set({ userRole: me.role })
+    } catch {
+      // Non-fatal: role detection failure doesn't break dashboard
+    }
+  },
+
+  loadApiKeys: async () => {
+    const { serverConfig } = get()
+    if (!serverConfig) return
+    set({ isLoadingApiKeys: true })
+    try {
+      const keys = await tauriInvoke<ApiKeyInfo[]>('cmd_server_list_api_keys', { config: serverConfig })
+      set({ apiKeys: keys })
+    } catch (e) {
+      set({ error: parseCommandError(String(e)).message })
+    } finally {
+      set({ isLoadingApiKeys: false })
+    }
+  },
+
+  revokeApiKey: async (keyId) => {
+    const { serverConfig } = get()
+    if (!serverConfig) return false
+    try {
+      const resp = await tauriInvoke<RevokeApiKeyResponse>('cmd_server_revoke_api_key', {
+        config: serverConfig,
+        keyId,
+      })
+      if (resp.success) {
+        await get().loadApiKeys()
+      }
+      return resp.success
+    } catch (e) {
+      set({ error: parseCommandError(String(e)).message })
+      return false
+    }
+  },
+
   clearError: () => set({ error: null }),
 
   disconnect: () => {
@@ -502,6 +635,10 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       jiraTicketDetails: {},
       jiraTicketDetailFetchedAt: {},
       jiraTicketDetailLoading: {},
+      userRole: null,
+      apiKeys: [],
+      isLoadingApiKeys: false,
+      exportLogs: [],
       isRefreshingDashboard: false,
       error: null,
     })

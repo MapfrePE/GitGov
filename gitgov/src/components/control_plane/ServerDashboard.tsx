@@ -7,12 +7,16 @@ import { PipelineHealthWidget } from './PipelineHealthWidget'
 import { TicketCoverageWidget } from './TicketCoverageWidget'
 import { EventBreakdownGrid } from './EventBreakdownGrid'
 import { RecentCommitsTable } from './RecentCommitsTable'
+import { ApiKeyManagerWidget } from './ApiKeyManagerWidget'
+import { ExportPanel } from './ExportPanel'
 
 export function ServerDashboard() {
   const {
-    serverStats, ticketCoverage,
+    serverStats, ticketCoverage, userRole,
     isConnected, isRefreshingDashboard, refreshDashboardData,
   } = useControlPlaneStore()
+
+  const isAdmin = userRole === 'Admin'
 
   const [autoRefresh, setAutoRefresh] = useState(true)
 
@@ -92,6 +96,9 @@ export function ServerDashboard() {
           />
 
           <RecentCommitsTable />
+
+          {isAdmin && <ApiKeyManagerWidget />}
+          {isAdmin && <ExportPanel />}
         </>
       )}
     </div>

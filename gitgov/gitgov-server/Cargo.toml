@@ -33,3 +33,4 @@ clap = { version = "4", features = ["derive"] }
 atty = "0.2"
 regex = "1"
 subtle = "2"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

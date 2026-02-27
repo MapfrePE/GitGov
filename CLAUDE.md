@@ -332,3 +332,79 @@ cd gitgov && npm run lint && npm run typecheck
 6. **COALESCE siempre** — En cualquier SQL con agregaciones
 7. **Bearer, no X-API-Key** — Para autenticación
 8. **Documentar cambios** — Actualizar `docs/PROGRESS.md` con cambios significativos
+
+---
+
+## Modo Auditor — Obligatorio para respuestas técnicas
+
+Toda afirmación técnica sobre el codebase DEBE seguir este formato antes de ser aceptada:
+
+```
+Respuesta: <afirmación concreta>
+Evidencia en código: <archivo>:<línea>, <archivo>:<línea>
+Nivel de certeza: Alto (leído en esta sesión) | Medio (leído en sesión anterior) | Bajo (inferencia)
+Supuestos: <qué se asume si los hay>
+Riesgo si estoy equivocado: <consecuencia del error>
+```
+
+**Regla absoluta:** Si no hay `archivo:línea`, la afirmación no se hace.
+**Regla absoluta:** Si es inferencia, debe decir "INFERENCIA:" explícitamente antes de la afirmación.
+
+Ejemplos de lo que NO se acepta:
+- "El outbox usa SQLite" → sin File:Line = no se dice
+- "El enum incluye PullRequest" → sin File:Line = no se dice
+- "Los diffs se envían al servidor" → sin File:Line = no se dice
+
+---
+
+## Modo Implementación — Checklist obligatorio
+
+Antes de escribir cualquier línea de código:
+
+**1. Archivos leídos (listar todos antes de empezar):**
+- [ ] Archivo a modificar — leído con Read tool en esta sesión
+- [ ] Archivos dependientes relevantes — leídos
+
+**2. Cambios realizados (listar al terminar):**
+- `archivo:línea_inicio-línea_fin` — descripción del cambio
+
+**3. Validación ejecutada (comando + resultado real):**
+- `cargo test` → `X passed; 0 failed` (pegar resultado real)
+- `tsc -b` → sin errores (pegar resultado real)
+- `npm run lint` → errores nuevos introducidos: 0
+
+**4. Impacto en Golden Path:**
+- ¿Modifica auth/token/API key/handlers/dashboard? → Sí/No
+- Si Sí: evidencia de que el flujo Desktop→/events→PostgreSQL→Dashboard sigue intacto
+
+---
+
+## Validación empírica del Golden Path
+
+Tras cualquier cambio en los archivos críticos listados abajo, ejecutar:
+
+```bash
+# 1. Compilar y testear server
+cd gitgov/gitgov-server && cargo test
+
+# 2. Verificar que /events acepta eventos con Bearer auth
+curl -X POST http://127.0.0.1:3000/events \
+  -H "Authorization: Bearer {api_key}" \
+  -H "Content-Type: application/json" \
+  -d '{"events": [{"event_type": "commit", "user_login": "test", "status": "success", "timestamp": 0}]}'
+# Esperar: {"accepted":1,"duplicates":0,"errors":0}
+
+# 3. Verificar que /stats responde sin 401
+curl http://127.0.0.1:3000/stats \
+  -H "Authorization: Bearer {api_key}"
+# Esperar: JSON con ServerStats (no {"error":"..."})
+```
+
+Archivos cuyo cambio OBLIGA a ejecutar esta validación:
+- `gitgov-server/src/auth.rs`
+- `gitgov-server/src/handlers.rs`
+- `gitgov-server/src/main.rs`
+- `gitgov-server/src/models.rs`
+- `src-tauri/src/outbox/outbox.rs`
+- `src-tauri/src/control_plane/server.rs`
+- `src/store/useControlPlaneStore.ts`

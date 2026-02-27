@@ -151,6 +151,11 @@ pub fn run() {
             commands::cmd_server_get_jira_ticket_coverage,
             commands::cmd_server_correlate_jira_tickets,
             commands::cmd_server_get_jira_ticket_detail,
+            commands::cmd_server_get_me,
+            commands::cmd_server_list_api_keys,
+            commands::cmd_server_revoke_api_key,
+            commands::cmd_server_export,
+            commands::cmd_server_list_exports,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
