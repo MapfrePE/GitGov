@@ -14,7 +14,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use subtle::ConstantTimeEq;
@@ -34,6 +34,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub jwt_secret: String,
     pub github_webhook_secret: Option<String>,
+    pub github_personal_access_token: Option<String>,
     pub jenkins_webhook_secret: Option<String>,
     pub jira_webhook_secret: Option<String>,
     pub start_time: Instant,
@@ -839,6 +840,19 @@ pub async fn confirm_signal(
     ).await {
         Ok(violation_id) => {
             tracing::info!("Signal {} confirmed as violation {} by {}", signal_id, violation_id, auth_user.client_id);
+            // Admin audit log — append-only, non-fatal
+            let audit_entry = AdminAuditLogEntry {
+                id: Uuid::new_v4().to_string(),
+                actor_client_id: auth_user.client_id.clone(),
+                action: "confirm_signal".to_string(),
+                target_type: Some("signal".to_string()),
+                target_id: Some(signal_id.clone()),
+                metadata: serde_json::json!({ "violation_id": violation_id, "severity": payload.severity }),
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = state.db.insert_admin_audit_log(&audit_entry).await {
+                tracing::warn!("Failed to write admin audit log (confirm_signal): {}", e);
+            }
             // Fire-and-forget alert
             if let Some(ref webhook_url) = state.alert_webhook_url {
                 let text = notifications::format_signal_confirmed_alert(
@@ -1113,6 +1127,19 @@ pub async fn export_events(
     };
 
     let _ = state.db.create_export_log(&export_log).await;
+    // Admin audit log — append-only, non-fatal
+    let audit_entry = AdminAuditLogEntry {
+        id: Uuid::new_v4().to_string(),
+        actor_client_id: auth_user.client_id.clone(),
+        action: "export_events".to_string(),
+        target_type: Some("export_log".to_string()),
+        target_id: Some(export_log.id.clone()),
+        metadata: serde_json::json!({ "record_count": record_count, "export_type": export_log.export_type }),
+        created_at: chrono::Utc::now().timestamp_millis(),
+    };
+    if let Err(e) = state.db.insert_admin_audit_log(&audit_entry).await {
+        tracing::warn!("Failed to write admin audit log (export_events): {}", e);
+    }
 
     let response = ExportResponse {
         id: export_log.id,
@@ -1245,6 +1272,7 @@ pub async fn handle_github_webhook(
     let process_result = match event_type.as_str() {
         "push" => process_push_event(&state, &delivery_id, &payload).await,
         "create" => process_create_event(&state, &delivery_id, &payload).await,
+        "pull_request" => process_pull_request_event(&state, &delivery_id, &payload).await,
         _ => {
             tracing::debug!("Unhandled event type: {}", event_type);
             Ok(())
@@ -1430,6 +1458,215 @@ async fn process_create_event(
     );
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPrReviewUser {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPrReview {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    user: Option<GitHubPrReviewUser>,
+}
+
+fn extract_final_approvers(reviews: &[GitHubPrReview]) -> Vec<String> {
+    // GitHub reviews are evaluated per reviewer by latest review state.
+    let mut latest_state_by_user: HashMap<String, String> = HashMap::new();
+
+    for review in reviews {
+        let Some(user) = review.user.as_ref() else { continue };
+        let state = review
+            .state
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_uppercase();
+        if state.is_empty() {
+            continue;
+        }
+        latest_state_by_user.insert(user.login.clone(), state);
+    }
+
+    let mut approvers: Vec<String> = latest_state_by_user
+        .into_iter()
+        .filter_map(|(login, state)| (state == "APPROVED").then_some(login))
+        .collect();
+
+    approvers.sort();
+    approvers
+}
+
+async fn fetch_pr_approvers(
+    http_client: &reqwest::Client,
+    github_token: &str,
+    repo_full_name: &str,
+    pr_number: i32,
+) -> Result<Vec<String>, String> {
+    let mut all_reviews = Vec::new();
+    let mut page = 1u8;
+
+    loop {
+        let url = format!(
+            "https://api.github.com/repos/{}/pulls/{}/reviews?per_page=100&page={}",
+            repo_full_name, pr_number, page
+        );
+
+        let response = http_client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", github_token))
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "gitgov-server")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(|e| format!("GitHub reviews request failed: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("GitHub reviews API returned {}", status));
+        }
+
+        let reviews: Vec<GitHubPrReview> = response
+            .json()
+            .await
+            .map_err(|e| format!("GitHub reviews decode failed: {}", e))?;
+
+        let chunk_len = reviews.len();
+        all_reviews.extend(reviews);
+
+        if chunk_len < 100 || page >= 10 {
+            break;
+        }
+
+        page += 1;
+    }
+
+    Ok(extract_final_approvers(&all_reviews))
+}
+
+// Processes pull_request webhook events.
+// Only stores merged PRs (action == "closed" && pull_request.merged == true).
+// All other actions (opened, reviewed, etc.) are silently skipped — no error.
+async fn process_pull_request_event(
+    state: &Arc<AppState>,
+    delivery_id: &str,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let pr = match payload.get("pull_request") {
+        Some(pr) => pr,
+        None => {
+            tracing::debug!("pull_request event missing 'pull_request' field, delivery_id={}", delivery_id);
+            return Ok(());
+        }
+    };
+
+    // Only capture merged PRs
+    let merged = pr.get("merged").and_then(|v| v.as_bool()).unwrap_or(false);
+    if action != "closed" || !merged {
+        tracing::debug!("Skipping non-merged pull_request event: action={}, delivery_id={}", action, delivery_id);
+        return Ok(());
+    }
+
+    // Extract repository info for org/repo lookup
+    let repo_val = match payload.get("repository") {
+        Some(r) => r,
+        None => {
+            tracing::warn!("pull_request event missing 'repository' field, delivery_id={}", delivery_id);
+            return Ok(());
+        }
+    };
+    let repo: GitHubRepository = match serde_json::from_value(repo_val.clone()) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Failed to parse repository in pull_request event: {}, delivery_id={}", e, delivery_id);
+            return Ok(());
+        }
+    };
+
+    let (org_id, repo_id) = get_or_create_org_repo(&state.db, &repo).await?;
+
+    let pr_number = pr.get("number").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let pr_title = pr.get("title").and_then(|v| v.as_str()).map(String::from);
+    let author_login = pr.get("user").and_then(|u| u.get("login")).and_then(|v| v.as_str()).map(String::from);
+    let merged_by_login = pr.get("merged_by").and_then(|u| u.get("login")).and_then(|v| v.as_str()).map(String::from);
+    let head_sha = pr.get("head").and_then(|h| h.get("sha")).and_then(|v| v.as_str()).map(String::from);
+    let base_branch = pr.get("base").and_then(|b| b.get("ref")).and_then(|v| v.as_str()).map(String::from);
+    let approvers = match state.github_personal_access_token.as_deref() {
+        Some(token) => match fetch_pr_approvers(&state.http_client, token, &repo.full_name, pr_number).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    delivery_id = %delivery_id,
+                    repo = %repo.full_name,
+                    pr_number,
+                    error = %e,
+                    "Failed to fetch PR approvers from GitHub API"
+                );
+                vec![]
+            }
+        },
+        None => {
+            tracing::debug!(
+                delivery_id = %delivery_id,
+                repo = %repo.full_name,
+                pr_number,
+                "GITHUB_PERSONAL_ACCESS_TOKEN not configured; storing PR merge without approvers"
+            );
+            vec![]
+        }
+    };
+    let approvals_count = approvers.len() as i32;
+
+    let mut enriched_payload = payload.clone();
+    if let Some(obj) = enriched_payload.as_object_mut() {
+        obj.insert(
+            "gitgov".to_string(),
+            serde_json::json!({
+                "approvers": approvers,
+                "approvals_count": approvals_count
+            }),
+        );
+    }
+
+    let record = PrMergeRecord {
+        id: Uuid::new_v4().to_string(),
+        org_id: Some(org_id),
+        repo_id: Some(repo_id),
+        delivery_id: delivery_id.to_string(),
+        pr_number,
+        pr_title: pr_title.clone(),
+        author_login: author_login.clone(),
+        merged_by_login: merged_by_login.clone(),
+        head_sha,
+        base_branch,
+        payload: enriched_payload,
+        created_at: chrono::Utc::now().timestamp_millis(),
+    };
+
+    match state.db.insert_pr_merge(&record).await {
+        Ok(()) => {
+            tracing::info!(
+                "Processed PR merge: #{} '{}' by {} merged by {} (approvals={}), delivery_id={}",
+                pr_number,
+                pr_title.as_deref().unwrap_or(""),
+                author_login.as_deref().unwrap_or("unknown"),
+                merged_by_login.as_deref().unwrap_or("unknown"),
+                approvals_count,
+                delivery_id,
+            );
+            Ok(())
+        }
+        Err(DbError::Duplicate(_)) => {
+            tracing::debug!("Duplicate PR merge event ignored: delivery_id={}", delivery_id);
+            Ok(())
+        }
+        Err(e) => Err(format!("Failed to insert PR merge: {}", e)),
+    }
 }
 
 async fn get_or_create_org_repo(db: &Database, repo: &GitHubRepository) -> Result<(String, String), String> {
@@ -1629,7 +1866,7 @@ pub async fn get_logs(
 ) -> impl IntoResponse {
     // Non-admins can only see their own events
     let clamped_limit = if filter.limit == 0 { 100 } else { filter.limit.min(500) };
-    let filter = if auth_user.role != UserRole::Admin {
+    let mut filter = if auth_user.role != UserRole::Admin {
         EventFilter {
             user_login: Some(auth_user.client_id.clone()),
             limit: clamped_limit,
@@ -1641,6 +1878,51 @@ pub async fn get_logs(
             ..filter
         }
     };
+
+    // If the key is org-scoped, callers cannot request a different org_name explicitly.
+    if let (Some(scoped_org_id), Some(requested_org_name)) =
+        (auth_user.org_id.as_deref(), filter.org_name.as_deref())
+    {
+        match state.db.get_org_by_login(requested_org_name).await {
+            Ok(Some(org)) => {
+                if org.id != scoped_org_id {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(LogsResponse {
+                            events: vec![],
+                            error: Some("Requested org is outside API key scope".to_string()),
+                        }),
+                    );
+                }
+                // Preserve explicit org_name but also set org_id to avoid later lookup ambiguity.
+                filter.org_id = Some(org.id);
+            }
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(LogsResponse {
+                        events: vec![],
+                        error: Some("Organization not found".to_string()),
+                    }),
+                );
+            }
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(LogsResponse {
+                        events: vec![],
+                        error: Some("Internal database error".to_string()),
+                    }),
+                );
+            }
+        }
+    }
+
+    // Auto-scope by org: if the API key is org-scoped and the caller didn't request a specific
+    // org, propagate the key's org_id so only that org's events are returned.
+    if filter.org_id.is_none() && filter.org_name.is_none() {
+        filter.org_id = auth_user.org_id.clone();
+    }
 
     match state.db.get_combined_events(&filter).await {
         Ok(events) => (StatusCode::OK, Json(LogsResponse { events, error: None })),
@@ -1662,10 +1944,11 @@ pub async fn get_stats(
         return (StatusCode::FORBIDDEN, Json(AuditStats::default()));
     }
 
-    match state.db.get_stats().await {
+    let org_id = auth_user.org_id.as_deref();
+    match state.db.get_stats(org_id).await {
         Ok(mut stats) => {
-            stats.pipeline = state.db.get_pipeline_health_stats().await.unwrap_or_default();
-            stats.client_events.desktop_pushes_today = match state.db.get_desktop_pushes_today().await {
+            stats.pipeline = state.db.get_pipeline_health_stats(org_id).await.unwrap_or_default();
+            stats.client_events.desktop_pushes_today = match state.db.get_desktop_pushes_today(org_id).await {
                 Ok(count) => count,
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to compute desktop pushes today for /stats");
@@ -1695,10 +1978,12 @@ pub async fn get_dashboard(
         }));
     }
 
-    let stats = state.db.get_stats().await.unwrap_or_default();
+    let org_id = auth_user.org_id.as_deref();
+    let stats = state.db.get_stats(org_id).await.unwrap_or_default();
 
     let filter = EventFilter {
         limit: 10,
+        org_id: auth_user.org_id.clone(),
         ..Default::default()
     };
     let recent = state.db.get_combined_events(&filter).await.unwrap_or_default();
@@ -2024,16 +2309,35 @@ pub async fn override_policy(
     );
 
     match state.db.save_policy(&repo.id, &config, &checksum, &auth_user.client_id).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(PolicyApiResponse {
-                version: Some("1.0".to_string()),
-                checksum: Some(checksum),
-                config: Some(config),
-                updated_at: Some(chrono::Utc::now().timestamp_millis()),
-                error: None,
-            }),
-        ),
+        Ok(()) => {
+            // Admin audit log — append-only, non-fatal
+            let audit_entry = AdminAuditLogEntry {
+                id: Uuid::new_v4().to_string(),
+                actor_client_id: auth_user.client_id.clone(),
+                action: "policy_override".to_string(),
+                target_type: Some("repo".to_string()),
+                target_id: Some(repo.id.clone()),
+                metadata: serde_json::json!({
+                    "repo_name": repo_name,
+                    "checksum": checksum
+                }),
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = state.db.insert_admin_audit_log(&audit_entry).await {
+                tracing::warn!("Failed to write admin audit log (policy_override): {}", e);
+            }
+
+            (
+                StatusCode::OK,
+                Json(PolicyApiResponse {
+                    version: Some("1.0".to_string()),
+                    checksum: Some(checksum),
+                    config: Some(config),
+                    updated_at: Some(chrono::Utc::now().timestamp_millis()),
+                    error: None,
+                }),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(PolicyApiResponse {
@@ -2044,6 +2348,64 @@ pub async fn override_policy(
                 error: Some("Internal database error".to_string()),
             }),
         ),
+    }
+}
+
+// ============================================================================
+// ORGS (admin provisioning)
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateOrgRequest {
+    /// GitHub login / slug — must be unique (e.g. "rimac")
+    pub login: String,
+    /// Human-readable display name (e.g. "Rimac Seguros")
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateOrgResponse {
+    pub org_id: String,
+    pub login: String,
+    /// true = newly created, false = already existed (idempotent)
+    pub created: bool,
+}
+
+pub async fn create_org(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateOrgRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    // Check if org already exists — upsert_org is idempotent on (login)
+    let already_exists = state.db.get_org_by_login(&payload.login).await
+        .unwrap_or(None)
+        .is_some();
+
+    // Manually provisioned orgs must upsert by login (not by github_id) to avoid collisions.
+    match state
+        .db
+        .upsert_org_by_login(&payload.login, payload.name.as_deref(), None)
+        .await
+    {
+        Ok(org_id) => (
+            if already_exists { StatusCode::OK } else { StatusCode::CREATED },
+            Json(CreateOrgResponse {
+                org_id,
+                login: payload.login,
+                created: !already_exists,
+            }),
+        ).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, login = %payload.login, "Failed to upsert org");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            ).into_response()
+        }
     }
 }
 
@@ -2085,8 +2447,8 @@ pub async fn create_api_key(
 
     let role = UserRole::from_str(&payload.role);
 
-    // Get org ID if provided
-    let org_id = if let Some(ref org_name) = payload.org_name {
+    // Resolve requested org by login (if provided in payload).
+    let requested_org_id = if let Some(ref org_name) = payload.org_name {
         state.db.get_org_by_login(org_name).await
             .ok()
             .flatten()
@@ -2095,10 +2457,34 @@ pub async fn create_api_key(
         None
     };
 
+    // If admin key is org-scoped, key creation must stay inside that org.
+    let effective_org_id = if let Some(scoped_org_id) = auth_user.org_id.as_deref() {
+        match requested_org_id {
+            Some(ref requested) if requested == scoped_org_id => Some(requested.clone()),
+            Some(_) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(ApiKeyResponse {
+                        api_key: None,
+                        client_id: payload.client_id,
+                        error: Some("Requested org_name is outside API key scope".to_string()),
+                    }),
+                );
+            }
+            None => Some(scoped_org_id.to_string()),
+        }
+    } else {
+        requested_org_id
+    };
+
     let api_key = Uuid::new_v4().to_string();
     let key_hash = format!("{:x}", Sha256::digest(api_key.as_bytes()));
 
-    match state.db.create_api_key(&key_hash, &payload.client_id, org_id.as_deref(), &role).await {
+    match state
+        .db
+        .create_api_key(&key_hash, &payload.client_id, effective_org_id.as_deref(), &role)
+        .await
+    {
         Ok(()) => (
             StatusCode::CREATED,
             Json(ApiKeyResponse {
@@ -2161,14 +2547,29 @@ pub async fn revoke_api_key(
         .revoke_api_key(&key_id, auth_user.org_id.as_deref())
         .await
     {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(RevokeApiKeyResponse {
-                success: true,
-                message: "API key revoked".to_string(),
-            }),
-        )
-            .into_response(),
+        Ok(true) => {
+            // Admin audit log — append-only, non-fatal
+            let audit_entry = AdminAuditLogEntry {
+                id: Uuid::new_v4().to_string(),
+                actor_client_id: auth_user.client_id.clone(),
+                action: "revoke_api_key".to_string(),
+                target_type: Some("api_key".to_string()),
+                target_id: Some(key_id.clone()),
+                metadata: serde_json::Value::Null,
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = state.db.insert_admin_audit_log(&audit_entry).await {
+                tracing::warn!("Failed to write admin audit log (revoke_api_key): {}", e);
+            }
+            (
+                StatusCode::OK,
+                Json(RevokeApiKeyResponse {
+                    success: true,
+                    message: "API key revoked".to_string(),
+                }),
+            )
+                .into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(RevokeApiKeyResponse {
@@ -2506,10 +2907,91 @@ pub async fn retry_dead_job(
     }
 }
 
+// ============================================================================
+// PULL REQUEST MERGES EVIDENCE ENDPOINT
+// ============================================================================
+
+pub async fn list_pr_merges(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PrMergeEvidenceQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let limit = if query.limit == 0 { 50 } else { query.limit.min(500) } as i64;
+    let offset = query.offset as i64;
+
+    match state
+        .db
+        .list_pr_merge_evidence(
+            auth_user.org_id.as_deref(),
+            query.org_name.as_deref(),
+            query.repo_full_name.as_deref(),
+            query.merged_by.as_deref(),
+            limit,
+            offset,
+        )
+        .await
+    {
+        Ok((entries, total)) => (
+            StatusCode::OK,
+            Json(PrMergeEvidenceResponse { entries, total }),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "Internal database error" })),
+        )
+            .into_response(),
+    }
+}
+
+// ============================================================================
+// ADMIN AUDIT LOG ENDPOINT
+// ============================================================================
+
+pub async fn list_admin_audit_log(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AdminAuditLogQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let limit = if query.limit == 0 { 50 } else { query.limit } as i64;
+    let offset = query.offset as i64;
+
+    match state
+        .db
+        .list_admin_audit_logs(
+            query.actor.as_deref(),
+            query.action.as_deref(),
+            limit,
+            offset,
+        )
+        .await
+    {
+        Ok((entries, total)) => (
+            StatusCode::OK,
+            Json(AdminAuditLogResponse { entries, total }),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "Internal database error" })),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_ticket_ids, is_relevant_audit_action, make_audit_delivery_id, validate_github_signature,
+        extract_final_approvers, extract_ticket_ids, is_relevant_audit_action, make_audit_delivery_id,
+        validate_github_signature, GitHubPrReview, GitHubPrReviewUser,
     };
     use crate::models::GitHubAuditLogEntry;
     use hmac::Mac;
@@ -2614,5 +3096,65 @@ mod tests {
         ]);
 
         assert!(tickets.is_empty());
+    }
+
+    #[test]
+    fn pr_approvers_take_latest_review_state_per_user() {
+        let reviews = vec![
+            GitHubPrReview {
+                state: Some("APPROVED".to_string()),
+                user: Some(GitHubPrReviewUser {
+                    login: "alice".to_string(),
+                }),
+            },
+            GitHubPrReview {
+                state: Some("CHANGES_REQUESTED".to_string()),
+                user: Some(GitHubPrReviewUser {
+                    login: "alice".to_string(),
+                }),
+            },
+            GitHubPrReview {
+                state: Some("COMMENTED".to_string()),
+                user: Some(GitHubPrReviewUser {
+                    login: "bob".to_string(),
+                }),
+            },
+            GitHubPrReview {
+                state: Some("APPROVED".to_string()),
+                user: Some(GitHubPrReviewUser {
+                    login: "carol".to_string(),
+                }),
+            },
+        ];
+
+        let approvers = extract_final_approvers(&reviews);
+        assert_eq!(approvers, vec!["carol"]);
+    }
+
+    #[test]
+    fn pr_approvers_are_sorted_and_unique() {
+        let reviews = vec![
+            GitHubPrReview {
+                state: Some("APPROVED".to_string()),
+                user: Some(GitHubPrReviewUser {
+                    login: "zoe".to_string(),
+                }),
+            },
+            GitHubPrReview {
+                state: Some("APPROVED".to_string()),
+                user: Some(GitHubPrReviewUser {
+                    login: "anna".to_string(),
+                }),
+            },
+            GitHubPrReview {
+                state: Some("APPROVED".to_string()),
+                user: Some(GitHubPrReviewUser {
+                    login: "zoe".to_string(),
+                }),
+            },
+        ];
+
+        let approvers = extract_final_approvers(&reviews);
+        assert_eq!(approvers, vec!["anna", "zoe"]);
     }
 }

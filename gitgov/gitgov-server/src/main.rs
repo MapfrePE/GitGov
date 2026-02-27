@@ -222,6 +222,7 @@ async fn main() {
         .unwrap_or_else(|_| "gitgov-secret-key-change-in-production".to_string());
 
     let github_webhook_secret = std::env::var("GITHUB_WEBHOOK_SECRET").ok();
+    let github_personal_access_token = std::env::var("GITHUB_PERSONAL_ACCESS_TOKEN").ok();
     let jenkins_webhook_secret = std::env::var("JENKINS_WEBHOOK_SECRET").ok();
     let jira_webhook_secret = std::env::var("JIRA_WEBHOOK_SECRET").ok();
 
@@ -425,6 +426,7 @@ async fn main() {
         db: Arc::clone(&db),
         jwt_secret,
         github_webhook_secret,
+        github_personal_access_token,
         jenkins_webhook_secret,
         jira_webhook_secret,
         start_time: Instant::now(),
@@ -531,6 +533,7 @@ async fn main() {
         .route("/export", post(handlers::export_events))
         .route("/exports", get(handlers::list_exports))
         .route("/me", get(handlers::get_me))
+        .route("/orgs", post(handlers::create_org))
         .route("/api-keys", get(handlers::list_api_keys).post(handlers::create_api_key))
         .route("/api-keys/{id}/revoke", post(handlers::revoke_api_key))
         .route(
@@ -548,6 +551,11 @@ async fn main() {
             )),
         )
         .route("/governance-events", get(handlers::get_governance_events))
+        .route("/pr-merges", get(handlers::list_pr_merges).layer(middleware::from_fn_with_state(
+            Arc::clone(&admin_rate_limit),
+            rate_limit_middleware,
+        )))
+        .route("/admin-audit-log", get(handlers::list_admin_audit_log))
         .route("/jobs/metrics", get(handlers::get_job_metrics))
         .route("/jobs/dead", get(handlers::get_dead_jobs))
         .route("/jobs/{job_id}/retry", post(handlers::retry_dead_job))
@@ -577,6 +585,7 @@ async fn main() {
     tracing::info!("  --- Authenticated endpoints ---");
     tracing::info!("  POST /events                    - Client events (auth)");
     tracing::info!("  GET  /logs                      - Query events (auth, dev: own only)");
+    tracing::info!("  GET  /pr-merges                 - PR merge evidence (admin)");
     tracing::info!("  GET  /stats                     - Statistics (admin)");
     tracing::info!("  GET  /dashboard                 - Dashboard (admin)");
     tracing::info!("  POST /integrations/jenkins      - Jenkins pipeline ingest (admin)");
@@ -600,6 +609,7 @@ async fn main() {
     tracing::info!("  PUT  /policy/:repo/override     - Override policy (admin)");
     tracing::info!("  GET  /policy/:repo/history      - History (auth)");
     tracing::info!("  POST /export                    - Export (auth)");
+    tracing::info!("  POST /orgs                      - Create/upsert org (admin)");
     tracing::info!("  POST /api-keys                  - Create API key (admin)");
     tracing::info!("  POST /audit-stream/github       - GitHub audit log stream (admin)");
     tracing::info!("  (opt) JENKINS_WEBHOOK_SECRET    - Extra shared secret header x-gitgov-jenkins-secret");

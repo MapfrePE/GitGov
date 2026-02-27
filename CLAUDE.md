@@ -2,6 +2,19 @@
 
 > Este archivo se carga automáticamente en cada sesión. Léelo completo antes de hacer cualquier cambio.
 
+## Guardrail Ejecutivo (leer primero)
+
+1. **No inventar:** toda afirmación técnica requiere evidencia `archivo:línea`.
+2. **Si no se pudo verificar:** responder `NO VERIFICADO:` + bloqueadores concretos.
+3. **Golden Path no negociable:** commit/push/events/dashboard sin 401 deben seguir funcionando.
+4. **Auth obligatoria:** `Authorization: Bearer` (nunca `X-API-Key`).
+5. **SQL seguro:** tablas de auditoría append-only + `COALESCE` en agregaciones JSON.
+6. **Structs compartidas:** no romper contrato entre backend, Tauri y frontend.
+7. **Lint/testing mínimo:** `cargo test` + `tsc -b` + `0 errores nuevos` en archivos tocados.
+8. **No secretos:** nunca pegar tokens/keys/secrets en chat, logs o commits.
+9. **Anti split-brain local:** server local en `127.0.0.1:3000`; Docker server en `127.0.0.1:3001`.
+10. **Documentar cambios relevantes:** actualizar `docs/PROGRESS.md`.
+
 ---
 
 ## Qué es GitGov
@@ -75,6 +88,8 @@ cd gitgov/src-tauri && cargo clippy -- -D warnings
 # Frontend TypeScript
 cd gitgov && npm run lint && npm run typecheck
 ```
+
+> Si hay deuda histórica de lint en el repo, la regla de aceptación es: **0 errores nuevos en archivos tocados** (ejecutar ESLint sobre esos archivos), además de `npm run typecheck`.
 
 ---
 
@@ -326,12 +341,15 @@ cd gitgov && npm run lint && npm run typecheck
 
 1. **Leer antes de modificar** — No proponer cambios a código que no hayas leído
 2. **Golden Path primero** — Validar que el flujo base sigue funcionando
-3. **Linting antes de commit** — `cargo clippy` + `npm run lint`
+3. **Linting antes de commit** — `cargo clippy` + `npm run typecheck` + `0 errores nuevos` en ESLint de archivos tocados
 4. **No romper structs compartidas** — `ServerStats`, `CombinedEvent` deben coincidir en frontend y backend
 5. **Append-only** — No intentar UPDATE/DELETE en tablas de auditoría
 6. **COALESCE siempre** — En cualquier SQL con agregaciones
 7. **Bearer, no X-API-Key** — Para autenticación
 8. **Documentar cambios** — Actualizar `docs/PROGRESS.md` con cambios significativos
+9. **No inventar** — Si no se pudo verificar, responder `NO VERIFICADO` y listar exactamente qué falta para verificar
+10. **No exponer secretos** — Nunca pegar tokens/API keys/secrets en chat, logs o commits
+11. **Anti split-brain local** — Usar canónico `127.0.0.1:3000` para server local; Docker server en `127.0.0.1:3001`
 
 ---
 
@@ -349,6 +367,7 @@ Riesgo si estoy equivocado: <consecuencia del error>
 
 **Regla absoluta:** Si no hay `archivo:línea`, la afirmación no se hace.
 **Regla absoluta:** Si es inferencia, debe decir "INFERENCIA:" explícitamente antes de la afirmación.
+**Regla absoluta:** Si no se pudo validar, usar `NO VERIFICADO:` y detallar bloqueadores.
 
 Ejemplos de lo que NO se acepta:
 - "El outbox usa SQLite" → sin File:Line = no se dice
@@ -371,11 +390,16 @@ Antes de escribir cualquier línea de código:
 **3. Validación ejecutada (comando + resultado real):**
 - `cargo test` → `X passed; 0 failed` (pegar resultado real)
 - `tsc -b` → sin errores (pegar resultado real)
-- `npm run lint` → errores nuevos introducidos: 0
+- `npx eslint <archivos_tocados>` → errores nuevos introducidos: 0
+- Si `npm run lint` global falla por deuda histórica: reportar explícitamente que es preexistente y no causada por el cambio
 
 **4. Impacto en Golden Path:**
 - ¿Modifica auth/token/API key/handlers/dashboard? → Sí/No
 - Si Sí: evidencia de que el flujo Desktop→/events→PostgreSQL→Dashboard sigue intacto
+
+**5. Si no se pudo validar algo:**
+- Responder `NO VERIFICADO: <qué no se validó>`
+- Especificar comando faltante, entorno faltante y cómo reproducirlo
 
 ---
 
@@ -391,13 +415,24 @@ cd gitgov/gitgov-server && cargo test
 curl -X POST http://127.0.0.1:3000/events \
   -H "Authorization: Bearer {api_key}" \
   -H "Content-Type: application/json" \
-  -d '{"events": [{"event_type": "commit", "user_login": "test", "status": "success", "timestamp": 0}]}'
-# Esperar: {"accepted":1,"duplicates":0,"errors":0}
+  -d '{"events":[{"event_uuid":"00000000-0000-0000-0000-000000000001","event_type":"commit","user_login":"test","files":[],"status":"success","timestamp":0}],"client_version":"manual-check"}'
+# Esperar shape: {"accepted":["..."],"duplicates":[],"errors":[]}
 
 # 3. Verificar que /stats responde sin 401
 curl http://127.0.0.1:3000/stats \
   -H "Authorization: Bearer {api_key}"
 # Esperar: JSON con ServerStats (no {"error":"..."})
+
+# 4. Validar contrato /logs (sin romper compatibilidad)
+curl "http://127.0.0.1:3000/logs?limit=5&offset=0" \
+  -H "Authorization: Bearer {api_key}"
+# Esperar: {"events":[...]} (sin error de deserialización)
+
+# 5. Smoke contractual recomendado (live)
+cd gitgov/gitgov-server && make smoke
+
+# 6. E2E Golden Path recomendado
+cd gitgov/gitgov-server/tests && ./e2e_flow_test.sh
 ```
 
 Archivos cuyo cambio OBLIGA a ejecutar esta validación:

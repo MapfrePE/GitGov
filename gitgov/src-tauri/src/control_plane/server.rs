@@ -179,6 +179,45 @@ pub struct JenkinsCorrelationFilter {
     pub offset: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PrMergeEvidenceFilter {
+    pub org_name: Option<String>,
+    pub repo_full_name: Option<String>,
+    pub merged_by: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PrMergeEvidenceEntry {
+    pub id: String,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    #[serde(default)]
+    pub org_name: Option<String>,
+    #[serde(default)]
+    pub repo_id: Option<String>,
+    #[serde(default)]
+    pub repo_full_name: Option<String>,
+    pub delivery_id: String,
+    pub pr_number: i32,
+    #[serde(default)]
+    pub pr_title: Option<String>,
+    #[serde(default)]
+    pub author_login: Option<String>,
+    #[serde(default)]
+    pub merged_by_login: Option<String>,
+    #[serde(default)]
+    pub approvers: Vec<String>,
+    pub approvals_count: i32,
+    #[serde(default)]
+    pub head_sha: Option<String>,
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitPipelineRun {
     pub pipeline_event_id: String,
@@ -627,6 +666,53 @@ impl ControlPlaneClient {
             .map_err(|e| ServerError::SerializationError(e.to_string()))?;
 
         Ok(result.correlations)
+    }
+
+    pub fn get_pr_merges(
+        &self,
+        filter: &PrMergeEvidenceFilter,
+    ) -> Result<Vec<PrMergeEvidenceEntry>, ServerError> {
+        let url = format!("{}/pr-merges", self.config.url);
+
+        let mut query_params: Vec<(String, String)> = Vec::new();
+        if let Some(org_name) = &filter.org_name {
+            query_params.push(("org_name".to_string(), org_name.clone()));
+        }
+        if let Some(repo_full_name) = &filter.repo_full_name {
+            query_params.push(("repo_full_name".to_string(), repo_full_name.clone()));
+        }
+        if let Some(merged_by) = &filter.merged_by {
+            query_params.push(("merged_by".to_string(), merged_by.clone()));
+        }
+        query_params.push(("limit".to_string(), filter.limit.to_string()));
+        query_params.push(("offset".to_string(), filter.offset.to_string()));
+
+        let mut request = self.client.get(&url).query(&query_params);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct PrMergesResponse {
+            entries: Vec<PrMergeEvidenceEntry>,
+        }
+
+        let result: PrMergesResponse = response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))?;
+
+        Ok(result.entries)
     }
 
     pub fn get_jira_ticket_coverage(

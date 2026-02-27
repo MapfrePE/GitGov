@@ -23,6 +23,7 @@ interface CommitPipelineRun {
 export function RecentCommitsTable() {
   const {
     serverLogs, jenkinsCorrelations, ticketCoverage,
+    prMergeEvidence,
     jiraTicketDetails, jiraTicketDetailLoading,
     loadJiraTicketDetail,
   } = useControlPlaneStore()
@@ -42,6 +43,11 @@ export function RecentCommitsTable() {
   const pipelineByCommitSha = new Map(
     jenkinsCorrelations.filter((c) => c.pipeline && c.commit_sha).map((c) => [c.commit_sha.toLowerCase(), c.pipeline!]),
   )
+  const prEvidenceByHeadSha = new Map(
+    prMergeEvidence
+      .filter((entry) => entry.head_sha && entry.approvals_count >= 0)
+      .map((entry) => [entry.head_sha!.toLowerCase(), entry]),
+  )
 
   const findPipelineForLog = (log: CombinedEvent): CommitPipelineRun | null => {
     const sha = readDetailString(log, 'commit_sha')
@@ -51,6 +57,20 @@ export function RecentCommitsTable() {
     if (exact) return exact
     for (const [fullSha, p] of pipelineByCommitSha.entries()) {
       if (fullSha.startsWith(normalized) || normalized.startsWith(fullSha)) return p
+    }
+    return null
+  }
+
+  const findPrEvidenceForLog = (log: CombinedEvent): { approvals_count: number; pr_number: number } | null => {
+    const sha = readDetailString(log, 'commit_sha')
+    if (!sha) return null
+    const normalized = sha.toLowerCase()
+    const exact = prEvidenceByHeadSha.get(normalized)
+    if (exact) return { approvals_count: exact.approvals_count, pr_number: exact.pr_number }
+    for (const [fullSha, entry] of prEvidenceByHeadSha.entries()) {
+      if (fullSha.startsWith(normalized) || normalized.startsWith(fullSha)) {
+        return { approvals_count: entry.approvals_count, pr_number: entry.pr_number }
+      }
     }
     return null
   }
@@ -97,6 +117,7 @@ export function RecentCommitsTable() {
               <th className="pb-3 pr-4 font-medium">Detalle</th>
               <th className="pb-3 pr-4 font-medium">Repo</th>
               <th className="pb-3 pr-4 font-medium">Rama</th>
+              <th className="pb-3 pr-4 font-medium">Aprob.</th>
               <th className="pb-3 font-medium">Estado</th>
             </tr>
           </thead>
@@ -106,6 +127,7 @@ export function RecentCommitsTable() {
               const canExpandFiles = isCommit && attachedFiles.length > 0
               const isExpanded = !!expandedCommitRows[log.id]
               const pipelineRun = isCommit ? findPipelineForLog(log) : null
+              const prEvidence = isCommit ? findPrEvidenceForLog(log) : null
               const ticketIds = isCommit ? extractTicketIdsFromCommitLog(log) : []
               return (
                 <Fragment key={log.id}>
@@ -118,6 +140,7 @@ export function RecentCommitsTable() {
                           <Badge variant="neutral">{log.event_type}</Badge>
                           {isCommit && getShortCommitSha(log) && <code className="text-[9px] text-surface-500 mono-data">{getShortCommitSha(log)}</code>}
                           {pipelineRun && <Badge variant={pipelineRun.status === 'success' ? 'success' : pipelineRun.status === 'failure' ? 'danger' : 'warning'}>ci:{pipelineRun.status}</Badge>}
+                          {prEvidence && <Badge variant={prEvidence.approvals_count >= 2 ? 'success' : 'danger'}>PR #{prEvidence.pr_number}</Badge>}
                           {ticketIds.slice(0, 2).map((ticketId) => (
                             <button key={`${log.id}-${ticketId}`} type="button" onClick={() => selectTicket(selectedTicketId === ticketId ? null : ticketId)} className="inline-flex" title={`Ticket ${ticketId}`}>
                               <Badge variant="info" className="hover:ring-brand-400/30 transition-all cursor-pointer">{ticketId}</Badge>
@@ -136,12 +159,23 @@ export function RecentCommitsTable() {
                     </td>
                     <td className="py-2.5 pr-4 text-[10px] text-surface-500">{log.repo_name || '-'}</td>
                     <td className="py-2.5 pr-4 text-[10px] text-surface-500 mono-data">{log.branch || '-'}</td>
+                    <td className="py-2.5 pr-4">
+                      {isCommit && prEvidence
+                        ? (
+                          <Badge variant={prEvidence.approvals_count >= 2 ? 'success' : 'danger'}>
+                            {prEvidence.approvals_count >= 2
+                              ? `${prEvidence.approvals_count}/2+`
+                              : `${prEvidence.approvals_count}/2`}
+                          </Badge>
+                          )
+                        : <span className="text-[10px] text-surface-600">-</span>}
+                    </td>
                     <td className="py-2.5"><Badge variant={log.status === 'success' ? 'success' : log.status === 'blocked' ? 'danger' : 'warning'}>{log.status || '-'}</Badge></td>
                   </tr>
                   {canExpandFiles && isExpanded && (
                     <tr>
                       <td />
-                      <td colSpan={5} className="pb-3 pt-1">
+                      <td colSpan={6} className="pb-3 pt-1">
                         <div className="pl-3 border-l border-white/6 animate-slide-up">
                           <div className="text-[9px] text-surface-600 uppercase tracking-widest font-medium mb-1.5">Archivos del commit</div>
                           <div className="flex flex-col gap-0.5">
@@ -155,7 +189,7 @@ export function RecentCommitsTable() {
               )
             })}
             {dashboardRows.length === 0 && (
-              <tr><td colSpan={6} className="py-12 text-center"><GitCommit size={18} strokeWidth={1.5} className="mx-auto text-surface-700 mb-2" /><p className="text-[10px] text-surface-600">Sin commits aún</p></td></tr>
+              <tr><td colSpan={7} className="py-12 text-center"><GitCommit size={18} strokeWidth={1.5} className="mx-auto text-surface-700 mb-2" /><p className="text-[10px] text-surface-600">Sin commits aún</p></td></tr>
             )}
           </tbody>
         </table>

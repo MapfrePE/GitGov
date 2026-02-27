@@ -1,6 +1,19 @@
-||||||||||as# Guía para Agentes de IA - GitGov
+# Guía para Agentes de IA - GitGov
 
 > Este archivo proporciona contexto esencial para agentes de IA. Léelo completo antes de hacer cambios.
+
+## Guardrail Ejecutivo (leer primero)
+
+1. **No inventar:** toda afirmación técnica requiere evidencia `archivo:línea`.
+2. **Si no se pudo verificar:** responder `NO VERIFICADO:` + bloqueadores concretos.
+3. **Golden Path no negociable:** commit/push/events/dashboard sin 401 deben seguir funcionando.
+4. **Auth obligatoria:** `Authorization: Bearer` (nunca `X-API-Key`).
+5. **SQL seguro:** tablas de auditoría append-only + `COALESCE` en agregaciones JSON.
+6. **Structs compartidas:** no romper contrato entre backend, Tauri y frontend.
+7. **Lint/testing mínimo:** `cargo test` + `tsc -b` + `0 errores nuevos` en archivos tocados.
+8. **No secretos:** nunca pegar tokens/keys/secrets en chat, logs o commits.
+9. **Anti split-brain local:** server local en `127.0.0.1:3000`; Docker server en `127.0.0.1:3001`.
+10. **Documentar cambios relevantes:** actualizar `docs/PROGRESS.md`.
 
 ---
 
@@ -71,6 +84,8 @@ Antes de tocar auth, outbox, dashboard o endpoints del server, asumir que este f
 - Server Rust: `cd gitgov/gitgov-server && cargo clippy -- -D warnings`
 - Desktop Rust: `cd gitgov/src-tauri && cargo clippy -- -D warnings`
 - Frontend TS: `cd gitgov && npm run lint && npm run typecheck`
+
+> Si hay deuda histórica de lint en el repo, la regla de aceptación es: **0 errores nuevos en archivos tocados** (ejecutar ESLint sobre esos archivos), además de `npm run typecheck`.
 
 ---
 
@@ -250,6 +265,101 @@ Campos: id, source ("github" | "client"), event_type, created_at (timestamp ms),
 3. HTTPS obligatorio en producción
 4. Append-only - Eventos no se modifican
 5. Deduplicación - event_uuid único
+6. No exponer secretos en chat/logs/commits
+
+---
+
+## Reglas para Agentes (Obligatorias)
+
+1. **Leer antes de modificar** — No proponer cambios a código que no hayas leído
+2. **Golden Path primero** — Validar que el flujo base sigue funcionando
+3. **Linting antes de commit** — `cargo clippy` + `npm run typecheck` + `0 errores nuevos` en ESLint de archivos tocados
+4. **No romper structs compartidas** — `ServerStats`, `CombinedEvent` deben coincidir en frontend y backend
+5. **Append-only** — No intentar UPDATE/DELETE en tablas de auditoría
+6. **COALESCE siempre** — En cualquier SQL con agregaciones
+7. **Bearer, no X-API-Key** — Para autenticación
+8. **Documentar cambios** — Actualizar `docs/PROGRESS.md` con cambios significativos
+9. **No inventar** — Si no se pudo verificar, responder `NO VERIFICADO` y listar exactamente qué falta para verificar
+10. **Anti split-brain local** — Usar canónico `127.0.0.1:3000` para server local; Docker server en `127.0.0.1:3001`
+
+---
+
+## Modo Auditor — Obligatorio para respuestas técnicas
+
+Toda afirmación técnica sobre el codebase DEBE seguir este formato antes de ser aceptada:
+
+```
+Respuesta: <afirmación concreta>
+Evidencia en código: <archivo>:<línea>, <archivo>:<línea>
+Nivel de certeza: Alto (leído en esta sesión) | Medio (leído en sesión anterior) | Bajo (inferencia)
+Supuestos: <qué se asume si los hay>
+Riesgo si estoy equivocado: <consecuencia del error>
+```
+
+**Regla absoluta:** Si no hay `archivo:línea`, la afirmación no se hace.  
+**Regla absoluta:** Si es inferencia, debe decir `INFERENCIA:` explícitamente antes de la afirmación.  
+**Regla absoluta:** Si no se pudo validar, usar `NO VERIFICADO:` y detallar bloqueadores.
+
+---
+
+## Modo Implementación — Checklist obligatorio
+
+Antes de escribir cualquier línea de código:
+
+**1. Archivos leídos (listar todos antes de empezar):**
+- [ ] Archivo a modificar — leído con herramienta de lectura en esta sesión
+- [ ] Archivos dependientes relevantes — leídos
+
+**2. Cambios realizados (listar al terminar):**
+- `archivo:línea_inicio-línea_fin` — descripción del cambio
+
+**3. Validación ejecutada (comando + resultado real):**
+- `cargo test` → `X passed; 0 failed` (pegar resultado real)
+- `tsc -b` → sin errores (pegar resultado real)
+- `npx eslint <archivos_tocados>` → errores nuevos introducidos: 0
+- Si `npm run lint` global falla por deuda histórica: reportar explícitamente que es preexistente y no causada por el cambio
+
+**4. Impacto en Golden Path:**
+- ¿Modifica auth/token/API key/handlers/dashboard? → Sí/No
+- Si Sí: evidencia de que el flujo Desktop→/events→PostgreSQL→Dashboard sigue intacto
+
+**5. Si no se pudo validar algo:**
+- Responder `NO VERIFICADO: <qué no se validó>`
+- Especificar comando faltante, entorno faltante y cómo reproducirlo
+
+---
+
+## Validación empírica del Golden Path
+
+Tras cualquier cambio en archivos críticos (auth/handlers/main/models/outbox/control-plane store), ejecutar:
+
+```bash
+# 1. Compilar y testear server
+cd gitgov/gitgov-server && cargo test
+
+# 2. Verificar que /events acepta eventos con Bearer auth
+curl -X POST http://127.0.0.1:3000/events \
+  -H "Authorization: Bearer {api_key}" \
+  -H "Content-Type: application/json" \
+  -d '{"events":[{"event_uuid":"00000000-0000-0000-0000-000000000001","event_type":"commit","user_login":"test","files":[],"status":"success","timestamp":0}],"client_version":"manual-check"}'
+# Esperar shape: {"accepted":["..."],"duplicates":[],"errors":[]}
+
+# 3. Verificar que /stats responde sin 401
+curl http://127.0.0.1:3000/stats \
+  -H "Authorization: Bearer {api_key}"
+# Esperar: JSON con ServerStats (no {"error":"..."})
+
+# 4. Validar contrato /logs
+curl "http://127.0.0.1:3000/logs?limit=5&offset=0" \
+  -H "Authorization: Bearer {api_key}"
+# Esperar: {"events":[...]} (sin error de deserialización)
+
+# 5. Smoke contractual live (recomendado)
+cd gitgov/gitgov-server && make smoke
+
+# 6. E2E Golden Path (recomendado)
+cd gitgov/gitgov-server/tests && ./e2e_flow_test.sh
+```
 
 ---
 

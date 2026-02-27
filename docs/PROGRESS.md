@@ -1,5 +1,130 @@
 # GitGov - Registro de Progreso
 
+## Actualización Reciente (2026-02-27) — Badge de Aprobaciones en Dashboard + Cierre Golden Path
+
+### Qué se implementó
+- Se cableó `GET /pr-merges` end-to-end en Desktop/Tauri/Frontend para mostrar evidencia de aprobaciones de PR por commit.
+- `Commits Recientes` ahora muestra:
+  - **columna `Aprob.`** con badge visual (`>=2` en verde, `<2` en rojo),
+  - badge `PR #<n>` en el detalle del commit cuando existe correlación.
+- Correlación UI: se asocia por `commit_sha` del commit local contra `head_sha` de `pr-merges` (match exacto y prefix match corto/largo).
+
+### Archivos
+- `gitgov/src-tauri/src/control_plane/server.rs`
+  - `PrMergeEvidenceFilter`, `PrMergeEvidenceEntry`
+  - `get_pr_merges()`
+- `gitgov/src-tauri/src/commands/server_commands.rs`
+  - `cmd_server_get_pr_merges`
+- `gitgov/src-tauri/src/lib.rs`
+  - registro de `cmd_server_get_pr_merges` en `generate_handler!`
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - estado `prMergeEvidence`
+  - acción `loadPrMergeEvidence()`
+  - `refreshDashboardData()` incluye carga de PR merges
+- `gitgov/src/components/control_plane/RecentCommitsTable.tsx`
+  - columna `Aprob.`
+  - badge `PR #`
+  - regla visual de cumplimiento mínimo `2` aprobaciones
+
+### Cierre operativo (checklist empírico)
+- Se detectó y corrigió conflicto local de puertos antes de validar:
+  - `127.0.0.1:3000` estaba ocupado por `node` (web dev) y `/health` devolvía `404`.
+  - Se levantó `gitgov-server` en `127.0.0.1:3000` para evitar split-brain durante la validación.
+- Se aplicó migración `supabase_schema_v7.sql` en DB activa para habilitar tablas de PR evidence:
+  - `pull_request_merges`
+  - `admin_audit_log`
+
+### Smoke/Golden Path
+- `tests/smoke_contract.sh` corregido (header Bearer en Sección A):
+  - antes fallaba por no enviar Authorization correctamente en Bash/Windows,
+  - ahora usa `AUTH_HEADER=\"Authorization: Bearer ...\"`.
+- Resultado actual:
+  - `Results: 17 passed, 0 failed`
+  - `Exit: 0`
+
+### Validación
+- `cargo check` (`gitgov/src-tauri`) ✅
+- `npm run typecheck` (`gitgov`) ✅
+- `npm run build` (`gitgov`) ✅
+- `cargo check` (`gitgov/gitgov-server`) ✅
+- `tests/smoke_contract.sh` ✅ (17/17)
+
+## Actualización Reciente (2026-02-27) — Revisión de Org Scoping (Claude)
+
+### Hallazgos y correcciones
+- **Bug crítico corregido en `POST /orgs`:**
+  - `create_org` estaba usando `upsert_org(0, ...)`.
+  - `upsert_org` hace `ON CONFLICT (github_id)`, por lo que múltiples orgs manuales colisionaban en el mismo `github_id=0`.
+  - **Fix:** nuevo método `upsert_org_by_login()` en DB y `create_org` actualizado para usar conflicto por `login`.
+- **Hardening de aislamiento multi-tenant en `/logs`:**
+  - Se añadió validación para impedir que una API key org-scoped consulte `org_name` fuera de su scope.
+  - Si no se envía org explícita, se aplica auto-scope por `auth_user.org_id` (como estaba planeado).
+- **Hardening en creación de API keys:**
+  - Admin org-scoped ya no puede crear claves para otra org.
+  - Si omite `org_name`, la clave se crea por defecto en su propia org.
+
+### Validación
+- `cargo check` ✅
+- `cargo test` ✅ (38/38)
+
+## Actualización Reciente (2026-02-27) — PR Approvals Evidence (4-eyes)
+
+### Qué se implementó
+- Captura de aprobadores de PR al procesar webhook `pull_request` mergeado.
+- Enriquecimiento del payload guardado en `pull_request_merges` con:
+  - `gitgov.approvers` (array de logins aprobadores finales)
+  - `gitgov.approvals_count` (conteo final)
+- Nuevo endpoint admin para evidencia:
+  - `GET /pr-merges` con filtros `org_name`, `repo_full_name`, `merged_by`, `limit`, `offset`.
+
+### Archivos
+- `gitgov/gitgov-server/src/handlers.rs`
+  - `extract_final_approvers()`
+  - `fetch_pr_approvers()` (GitHub API `/pulls/{number}/reviews`)
+  - integración en `process_pull_request_event()`
+  - handler `list_pr_merges()`
+- `gitgov/gitgov-server/src/db.rs`
+  - `list_pr_merge_evidence()`
+- `gitgov/gitgov-server/src/models.rs`
+  - `PrMergeEvidenceEntry`, `PrMergeEvidenceResponse`, `PrMergeEvidenceQuery`
+- `gitgov/gitgov-server/src/main.rs`
+  - ruta `GET /pr-merges`
+  - carga opcional de env `GITHUB_PERSONAL_ACCESS_TOKEN`
+
+### Notas de comportamiento
+- Si `GITHUB_PERSONAL_ACCESS_TOKEN` no está configurado o GitHub API falla, el merge se guarda igual (non-fatal) pero con `approvers=[]`.
+- Regla aplicada: por cada reviewer se usa su **último** estado de review; solo `APPROVED` cuenta como aprobación final.
+
+### Validación
+- `cargo check` ✅
+- `cargo test` ✅ (38/38)
+
+## Actualización Reciente (2026-02-27) — Re-auditoría de Enterprise Gaps
+
+### Verificación de implementación (Claude)
+- Se validó en código la implementación de:
+  - tabla `pull_request_merges` (append-only)
+  - tabla `admin_audit_log` (append-only)
+  - ingestión de webhook `pull_request` para merges
+  - endpoint `GET /admin-audit-log` (admin)
+  - audit trail en `confirm_signal`, `export_events`, `revoke_api_key`
+- Validación local:
+  - `cargo check` ✅
+  - `cargo test` ✅ (36/36)
+
+### Corrección aplicada en esta re-auditoría
+- **Gap cerrado:** faltaba auditar `policy_override` (estaba en propuesta, no en código).
+- **Fix aplicado:** `override_policy` ahora escribe entrada append-only en `admin_audit_log`:
+  - `action: "policy_override"`
+  - `target_type: "repo"`
+  - `target_id: repo.id`
+  - `metadata: { repo_name, checksum }`
+- Patrón non-fatal preservado: si el insert de auditoría falla, se emite `warn!` y la operación principal continúa.
+
+### Riesgo pendiente (compliance)
+- La captura actual de PR guarda quién **mergeó** (`merged_by_login`), pero **no** quiénes aprobaron el PR (review approvals).
+- Para cubrir "4-eyes principle" completo (SOC2/ISO), falta correlación de aprobaciones (`pull_request_review`/GitHub API) y persistencia dedicada.
+
 ## Actualización Reciente (2026-02-27) — Enterprise Gaps v1
 
 ### Resumen ejecutivo
@@ -7,7 +132,7 @@ Cuatro gaps enterprise implementados end-to-end (backend + Tauri + frontend):
 
 | Gap | Implementación | Estado |
 |-----|----------------|--------|
-| Sin revocación de API keys | `GET/POST /api-keys`, `POST /api-keys/:id/revoke`, `GET /me`, `ApiKeyManagerWidget` | ✅ |
+| Sin revocación de API keys | `GET/POST /api-keys`, `POST /api-keys/{id}/revoke`, `GET /me`, `ApiKeyManagerWidget` | ✅ |
 | Export compliance-grade | `get_events_for_export` (hasta 50k registros, sin límite 100), `GET /exports`, `ExportPanel` | ✅ |
 | Sin notificaciones salientes | `notifications.rs`, `reqwest` fire-and-forget en `blocked_push` y `confirm_signal` | ✅ |
 | Instalación enterprise | `tauri.conf.json` code signing, `build-signed.yml` CI, `docs/ENTERPRISE_DEPLOY.md` | ✅ |
@@ -16,7 +141,7 @@ Cuatro gaps enterprise implementados end-to-end (backend + Tauri + frontend):
 - **`gitgov-server/src/models.rs`**: `ApiKeyInfo`, `MeResponse`, `RevokeApiKeyResponse` structs
 - **`gitgov-server/src/db.rs`**: `list_api_keys()`, `revoke_api_key()` — soft-delete con `is_active = FALSE`
 - **`gitgov-server/src/handlers.rs`**: handlers `get_me`, `list_api_keys`, `revoke_api_key`
-- **`gitgov-server/src/main.rs`**: rutas `/me`, `/api-keys` (GET+POST), `/api-keys/:id/revoke`
+- **`gitgov-server/src/main.rs`**: rutas `/me`, `/api-keys` (GET+POST), `/api-keys/{id}/revoke`
 - **`src-tauri/src/control_plane/server.rs`**: structs espejo + `get_me()`, `list_api_keys()`, `revoke_api_key()`
 - **`src-tauri/src/commands/server_commands.rs`**: `cmd_server_get_me`, `cmd_server_list_api_keys`, `cmd_server_revoke_api_key`
 - **`src/store/useControlPlaneStore.ts`**: `userRole`, `apiKeys`, `loadMe()`, `loadApiKeys()`, `revokeApiKey()`

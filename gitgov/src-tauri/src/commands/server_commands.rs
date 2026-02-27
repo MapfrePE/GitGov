@@ -1,8 +1,9 @@
 use crate::control_plane::{
     ApiKeyInfo, AuditFilter, CombinedEvent, CommitPipelineCorrelation, ControlPlaneClient,
     EventPayload, ExportLogEntry, ExportResponse, JenkinsCorrelationFilter, JiraCorrelateRequest,
-    JiraCorrelateResponse, MeResponse, RevokeApiKeyResponse, ServerConfig, ServerStats,
-    TicketCoverageQuery, TicketCoverageResponse, JiraTicketDetailResponse,
+    JiraCorrelateResponse, JiraTicketDetailResponse, MeResponse, PrMergeEvidenceEntry,
+    PrMergeEvidenceFilter, RevokeApiKeyResponse, ServerConfig, ServerStats, TicketCoverageQuery,
+    TicketCoverageResponse,
 };
 use crate::outbox::Outbox;
 use serde::{Deserialize, Serialize};
@@ -192,6 +193,21 @@ pub fn cmd_server_get_jenkins_correlations(
 
     client
         .get_jenkins_correlations(&filter)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_get_pr_merges(
+    config: ServerConnectionConfig,
+    filter: PrMergeEvidenceFilter,
+) -> Result<Vec<PrMergeEvidenceEntry>, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .get_pr_merges(&filter)
         .map_err(|e| to_command_error(e, "SERVER_ERROR"))
 }
 

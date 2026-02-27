@@ -342,6 +342,10 @@ pub struct EventFilter {
     pub branch: Option<String>,
     pub repo_full_name: Option<String>,
     pub org_name: Option<String>,
+    /// UUID string — set internally by handlers to scope by API key org without a DB roundtrip.
+    /// Takes precedence over org_name when org_name is absent.
+    #[serde(default)]
+    pub org_id: Option<String>,
     pub status: Option<String>,
     pub start_date: Option<i64>,
     pub end_date: Option<i64>,
@@ -1159,6 +1163,120 @@ pub const RELEVANT_AUDIT_ACTIONS: &[&str] = &[
     "org.update_member_repository_creation_permission",
     "org.update_default_repository_permission",
 ];
+
+// ============================================================================
+// PULL REQUEST MERGES (V1.3-A)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrMergeRecord {
+    pub id: String,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    #[serde(default)]
+    pub repo_id: Option<String>,
+    pub delivery_id: String,
+    pub pr_number: i32,
+    #[serde(default)]
+    pub pr_title: Option<String>,
+    #[serde(default)]
+    pub author_login: Option<String>,
+    #[serde(default)]
+    pub merged_by_login: Option<String>,
+    #[serde(default)]
+    pub head_sha: Option<String>,
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    pub payload: serde_json::Value,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrMergeEvidenceEntry {
+    pub id: String,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    #[serde(default)]
+    pub org_name: Option<String>,
+    #[serde(default)]
+    pub repo_id: Option<String>,
+    #[serde(default)]
+    pub repo_full_name: Option<String>,
+    pub delivery_id: String,
+    pub pr_number: i32,
+    #[serde(default)]
+    pub pr_title: Option<String>,
+    #[serde(default)]
+    pub author_login: Option<String>,
+    #[serde(default)]
+    pub merged_by_login: Option<String>,
+    #[serde(default)]
+    pub approvers: Vec<String>,
+    pub approvals_count: i32,
+    #[serde(default)]
+    pub head_sha: Option<String>,
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PrMergeEvidenceResponse {
+    pub entries: Vec<PrMergeEvidenceEntry>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PrMergeEvidenceQuery {
+    #[serde(default)]
+    pub org_name: Option<String>,
+    #[serde(default)]
+    pub repo_full_name: Option<String>,
+    #[serde(default)]
+    pub merged_by: Option<String>,
+    #[serde(default)]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+// ============================================================================
+// ADMIN AUDIT LOG (V1.3-A)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminAuditLogEntry {
+    pub id: String,
+    pub actor_client_id: String,
+    pub action: String,
+    #[serde(default)]
+    pub target_type: Option<String>,
+    #[serde(default)]
+    pub target_id: Option<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AdminAuditLogResponse {
+    pub entries: Vec<AdminAuditLogEntry>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AdminAuditLogQuery {
+    #[serde(default)]
+    pub actor: Option<String>,
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+// ============================================================================
 
 #[cfg(test)]
 mod tests {

@@ -148,6 +148,7 @@ pub fn run() {
             commands::cmd_server_get_logs,
             commands::cmd_server_get_stats,
             commands::cmd_server_get_jenkins_correlations,
+            commands::cmd_server_get_pr_merges,
             commands::cmd_server_get_jira_ticket_coverage,
             commands::cmd_server_correlate_jira_tickets,
             commands::cmd_server_get_jira_ticket_detail,

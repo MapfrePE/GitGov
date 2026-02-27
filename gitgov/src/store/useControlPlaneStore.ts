@@ -69,6 +69,24 @@ interface CommitPipelineCorrelation {
   pipeline?: CommitPipelineRun | null
 }
 
+interface PrMergeEvidenceEntry {
+  id: string
+  org_id?: string | null
+  org_name?: string | null
+  repo_id?: string | null
+  repo_full_name?: string | null
+  delivery_id: string
+  pr_number: number
+  pr_title?: string | null
+  author_login?: string | null
+  merged_by_login?: string | null
+  approvers: string[]
+  approvals_count: number
+  head_sha?: string | null
+  base_branch?: string | null
+  created_at: number
+}
+
 interface TicketCoverageItem extends Record<string, unknown> {}
 
 interface TicketCoverageStats {
@@ -166,6 +184,7 @@ interface ControlPlaneState {
   serverStats: ServerStats | null
   serverLogs: CombinedEvent[]
   jenkinsCorrelations: CommitPipelineCorrelation[]
+  prMergeEvidence: PrMergeEvidenceEntry[]
   ticketCoverage: TicketCoverageStats | null
   jiraCoverageFilters: JiraCoverageFilters
   jiraTicketDetails: Record<string, JiraTicketDetail | null>
@@ -189,6 +208,7 @@ interface ControlPlaneActions {
   loadStats: () => Promise<void>
   loadLogs: (limit?: number) => Promise<void>
   loadJenkinsCorrelations: (limit?: number) => Promise<void>
+  loadPrMergeEvidence: (limit?: number) => Promise<void>
   loadTicketCoverage: (params?: { hours?: number; repo_full_name?: string; branch?: string; org_name?: string }) => Promise<void>
   applyTicketCoverageFilters: (filters: Partial<JiraCoverageFilters>) => Promise<void>
   correlateJiraTickets: (params?: { hours?: number; limit?: number; repo_full_name?: string; org_name?: string }) => Promise<JiraCorrelateResponse | null>
@@ -319,6 +339,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   serverStats: null,
   serverLogs: [],
   jenkinsCorrelations: [],
+  prMergeEvidence: [],
   ticketCoverage: null,
   jiraCoverageFilters: readStoredJiraCoverageFilters(),
   jiraTicketDetails: {},
@@ -376,6 +397,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
         get().loadStats(),
         get().loadLogs(params?.logLimit ?? 50),
         get().loadJenkinsCorrelations(50),
+        get().loadPrMergeEvidence(200),
         get().loadTicketCoverage({
           hours: jiraCoverageFilters.hours,
           repo_full_name: jiraCoverageFilters.repo_full_name.trim() || undefined,
@@ -425,6 +447,21 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       set({ jenkinsCorrelations: correlations })
     } catch {
       // Non-fatal for the dashboard core flow; leave existing data as-is.
+    }
+  },
+
+  loadPrMergeEvidence: async (limit = 200) => {
+    const { serverConfig } = get()
+    if (!serverConfig) return
+
+    try {
+      const entries = await tauriInvoke<PrMergeEvidenceEntry[]>('cmd_server_get_pr_merges', {
+        config: serverConfig,
+        filter: { limit, offset: 0 },
+      })
+      set({ prMergeEvidence: entries })
+    } catch {
+      // Non-fatal: PR evidence is additive to the dashboard core flow.
     }
   },
 
@@ -630,6 +667,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       serverStats: null,
       serverLogs: [],
       jenkinsCorrelations: [],
+      prMergeEvidence: [],
       ticketCoverage: null,
       jiraCoverageFilters: readStoredJiraCoverageFilters(),
       jiraTicketDetails: {},

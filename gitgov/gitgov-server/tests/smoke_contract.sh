@@ -19,8 +19,7 @@ PASS=0
 
 pass() { echo "✅ $1"; PASS=$((PASS + 1)); }
 fail() { echo "❌ $1"; FAILED=$((FAILED + 1)); }
-
-auth() { printf -- '-H\nAuthorization: Bearer %s\n' "$API_KEY"; }
+AUTH_HEADER="Authorization: Bearer $API_KEY"
 
 echo "========================================"
 echo "GitGov API Smoke / Contract Test"
@@ -43,43 +42,43 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" "$SERVER_URL/health")
 [ "$CODE" = "200" ] && pass "/health → 200" || fail "/health → $CODE (expected 200)"
 
 # 2. /logs without offset (regression: was failing with 'missing field offset')
-RES=$(curl -s $(auth) "$SERVER_URL/logs?limit=5")
+RES=$(curl -s -H "$AUTH_HEADER" "$SERVER_URL/logs?limit=5")
 echo "$RES" | grep -q '"events"' \
   && pass "/logs?limit=5 (no offset) → has 'events' field" \
   || fail "/logs?limit=5 (no offset) → unexpected: ${RES:0:120}"
 
 # 3. /logs with explicit offset — backward compat
-RES=$(curl -s $(auth) "$SERVER_URL/logs?limit=5&offset=0")
+RES=$(curl -s -H "$AUTH_HEADER" "$SERVER_URL/logs?limit=5&offset=0")
 echo "$RES" | grep -q '"events"' \
   && pass "/logs?limit=5&offset=0 → has 'events' field" \
   || fail "/logs?limit=5&offset=0 → unexpected: ${RES:0:120}"
 
 # 4. /integrations/jenkins/correlations without offset (regression)
-RES=$(curl -s $(auth) "$SERVER_URL/integrations/jenkins/correlations?limit=5")
+RES=$(curl -s -H "$AUTH_HEADER" "$SERVER_URL/integrations/jenkins/correlations?limit=5")
 echo "$RES" | grep -q '"correlations"' \
   && pass "/integrations/jenkins/correlations?limit=5 (no offset) → has 'correlations' field" \
   || fail "/integrations/jenkins/correlations?limit=5 (no offset) → unexpected: ${RES:0:120}"
 
 # 5. /integrations/jenkins/correlations with explicit offset — backward compat
-RES=$(curl -s $(auth) "$SERVER_URL/integrations/jenkins/correlations?limit=5&offset=0")
+RES=$(curl -s -H "$AUTH_HEADER" "$SERVER_URL/integrations/jenkins/correlations?limit=5&offset=0")
 echo "$RES" | grep -q '"correlations"' \
   && pass "/integrations/jenkins/correlations?limit=5&offset=0 → has 'correlations' field" \
   || fail "/integrations/jenkins/correlations?limit=5&offset=0 → unexpected: ${RES:0:120}"
 
 # 6. /signals without offset
-RES=$(curl -s $(auth) "$SERVER_URL/signals?limit=5")
+RES=$(curl -s -H "$AUTH_HEADER" "$SERVER_URL/signals?limit=5")
 echo "$RES" | grep -q '"signals"' \
   && pass "/signals?limit=5 (no offset) → has 'signals' field" \
   || fail "/signals?limit=5 (no offset) → unexpected: ${RES:0:120}"
 
 # 7. /governance-events without offset
-RES=$(curl -s $(auth) "$SERVER_URL/governance-events?limit=5")
+RES=$(curl -s -H "$AUTH_HEADER" "$SERVER_URL/governance-events?limit=5")
 echo "$RES" | grep -q '"events"' \
   && pass "/governance-events?limit=5 (no offset) → has 'events' field" \
   || fail "/governance-events?limit=5 (no offset) → unexpected: ${RES:0:120}"
 
 # 8. /logs without ANY params — defaults must kick in
-RES=$(curl -s $(auth) "$SERVER_URL/logs")
+RES=$(curl -s -H "$AUTH_HEADER" "$SERVER_URL/logs")
 echo "$RES" | grep -q '"events"' \
   && pass "/logs (no params at all) → has 'events' field" \
   || fail "/logs (no params at all) → unexpected: ${RES:0:120}"
