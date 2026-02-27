@@ -26,7 +26,7 @@ Follow these steps to establish a secure link:
 Ensure the Control Plane service is active. If you are running the server manually:
 1. Open a terminal in the `gitgov-server` directory.
 2. Verify Rust is initialized.
-3. Start the service: `cargo run --release`.
+3. Start the service: `cargo run`.
 
 ### 2. Desktop Authentication
 1. Launch **GitGov Desktop**.
@@ -59,7 +59,7 @@ You can fine-tune how data is pushed to the server to balance between real-time 
 
 To ensure stable synchronization, your network environment must allow:
 - **Protocol**: HTTP/1.1 or HTTP/2.
-- **Port**: Default 3000 (Customizable in `config.toml`).
+- **Port**: Default 3000 (Customizable via `GITGOV_SERVER_ADDR` environment variable).
 - **Domain Whitelisting**: Ensure your local firewall allows outbound traffic to the Control Plane domain.
 
 ## Next Phase

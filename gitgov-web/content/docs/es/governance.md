@@ -33,32 +33,35 @@ Mantenga una estructura de repositorio limpia y fácil de buscar.
 - **Requisitos de Prefijo**: `feature/*`, `bugfix/*`, `hotfix/*`.
 - **Etiquetas de Propietario**: Incluya identificadores de desarrollador o equipo en los nombres de las ramas.
 
-### Identidad Criptográfica
-- **Commits Firmados**: Fuerza el uso de commits firmados con GPG o SSH para asegurar la autenticidad del autor.
-- **Estaciones Verificadas**: Solo permite pushes desde dispositivos registrados y autenticados con el Control Plane.
-
 ---
 
 ## Definiendo una Política (Ejemplo)
 
-Las políticas se definen en el Control Plane mediante YAML o la UI de gestión. Aquí un ejemplo de una política "Lista para Producción":
+Las políticas se almacenan por repositorio en un archivo `gitgov.toml`. Aquí un ejemplo para una rama de producción:
 
-```yaml
-name: "Standard Security Policy"
-target: "branches/main, branches/release/*"
-rules:
-  - id: "signed_commits"
-    enforcement: "block"
-  - id: "commit_message_format"
-    pattern: "^\[GITGOV-\d+\]: .+"
-    enforcement: "block"
-  - id: "max_diff_size"
-    limit: "500 lines"
-    enforcement: "advisory"
+```toml
+[policy]
+name = "Standard Security Policy"
+target_branches = ["main", "release/*"]
+
+[[policy.rules]]
+id = "commit_message_format"
+pattern = "^(feat|fix|refactor|docs|test|chore): .+"
+enforcement = "advisory"
+
+[[policy.rules]]
+id = "branch_naming"
+pattern = "^(feat|fix|hotfix|release)/.+"
+enforcement = "advisory"
+
+[[policy.rules]]
+id = "max_diff_size"
+limit_lines = 500
+enforcement = "advisory"
 ```
 
 > [!NOTE]
-> **Herencia de Políticas**: Los sub-equipos pueden definir sus propias políticas específicas que heredan y extienden las reglas de gobernanza globales de la organización.
+> **Advisory primero**: Todas las reglas actualmente operan en modo consultivo. El modo de aplicación (bloqueante en la estación de trabajo) está en el roadmap. Usa el modo consultivo ahora para recopilar métricas de cumplimiento base antes de endurecer la política.
 
 ---
 

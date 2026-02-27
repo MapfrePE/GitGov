@@ -1,5 +1,6 @@
 import React from 'react';
 import { generatePageMetadata } from '@/lib/seo/metadata';
+import { siteConfig } from '@/lib/config/site';
 import { HomeClient } from '@/components/marketing/HomeClient';
 
 export const metadata = generatePageMetadata({
@@ -8,6 +9,29 @@ export const metadata = generatePageMetadata({
     path: '/',
 });
 
+const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'SoftwareApplication',
+    name: siteConfig.name,
+    description: siteConfig.description,
+    url: siteConfig.url,
+    applicationCategory: 'DeveloperApplication',
+    operatingSystem: 'Windows',
+    offers: {
+        '@type': 'Offer',
+        price: '0',
+        priceCurrency: 'USD',
+    },
+};
+
 export default function HomePage() {
-    return <HomeClient />;
+    return (
+        <>
+            <script
+                type="application/ld+json"
+                dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+            />
+            <HomeClient />
+        </>
+    );
 }

@@ -10,8 +10,8 @@ export const translations = {
 
     // ═══ Hero ═══
     'hero.badge': { en: 'Desktop Available', es: 'Desktop Disponible' },
-    'hero.title1': { en: 'Git Governance,', es: 'Gobernanza Git,' },
-    'hero.title2': { en: 'Unified.', es: 'Unificada.' },
+    'hero.title1': { en: 'Git Governance and', es: 'Gobernanza y trazabilidad' },
+    'hero.title2': { en: 'Operational Traceability', es: 'operativa de Git' },
     'hero.subtitle': {
         en: 'Full traceability from commit to CI to compliance. One platform for engineering teams that take operational evidence seriously.',
         es: 'Trazabilidad completa desde el commit hasta CI hasta compliance. Una plataforma para equipos de ingeniería que toman en serio la evidencia operativa.',
@@ -206,10 +206,20 @@ export const translations = {
         en: "Map commits and CI runs to Jira tickets. Identify untraceable changes that aren't linked to any ticket.",
         es: 'Mapea commits y ejecuciones CI a tickets de Jira. Identifica cambios no rastreables que no están vinculados a ningún ticket.',
     },
+    'features.offline.title': { en: 'Offline Resilience', es: 'Resiliencia Offline' },
+    'features.offline.desc': {
+        en: 'Events are queued locally when the server is unreachable. Automatic retry with exponential backoff ensures zero event loss.',
+        es: 'Los eventos se encolan localmente cuando el servidor no está disponible. El reintento automático con backoff exponencial garantiza cero pérdida de eventos.',
+    },
+    'features.dashboard.title': { en: 'Admin Dashboard', es: 'Panel de Administración' },
+    'features.dashboard.desc': {
+        en: 'Built-in dashboard with recent commits table, Jenkins Pipeline Health widget (7-day view), Jira ticket badges, and 30-second auto-refresh.',
+        es: 'Panel integrado con tabla de commits recientes, widget de salud de pipeline Jenkins (vista 7 días), badges de tickets Jira y auto-actualización cada 30 segundos.',
+    },
     'features.github.title': { en: 'GitHub Webhooks', es: 'Webhooks de GitHub' },
     'features.github.desc': {
-        en: 'Receive and process GitHub events for additional context. Pull requests, reviews, and status checks.',
-        es: 'Recibe y procesa eventos de GitHub para contexto adicional. Pull requests, reviews y verificaciones de estado.',
+        en: 'Receive and process GitHub events for additional context. Push events, pull requests, reviews, and status checks.',
+        es: 'Recibe y procesa eventos de GitHub para contexto adicional. Push, pull requests, reviews y verificaciones de estado.',
     },
     'features.cta.title': { en: 'See it in', es: 'Verlo en' },
     'features.cta.titleAccent': { en: 'Action', es: 'Acción' },
@@ -346,6 +356,7 @@ export const translations = {
     'advisory': { en: 'Advisory', es: 'Consultivo' },
     'preview': { en: 'Preview', es: 'Vista Previa' },
     'inProgress': { en: 'In Progress', es: 'En Progreso' },
+    'available': { en: 'Available', es: 'Disponible' },
     'challenge': { en: 'Challenge', es: 'Desafío' },
     'withGitGov': { en: 'With GitGov', es: 'Con GitGov' },
 } as const;

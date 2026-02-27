@@ -21,12 +21,12 @@ GitGov establece un vínculo bidireccional entre su código fuente y sus entorno
 ## Integraciones Soportadas
 
 ### Integración con Jenkins
-GitGov proporciona un plugin ligero para Jenkins (y una librería compartida) que reporta automáticamente eventos de construcción al Control Plane.
-- **Inyección Automática de Metadatos**: Inyecta la URL del build y el nombre del job en el flujo de eventos de GitGov.
-- **Análisis de Fallos**: Correlaciona cambios específicos de código con regresiones en la construcción.
+GitGov se integra con Jenkins mediante una llamada REST API desde tu `Jenkinsfile`. Después de cada build, un paso `curl` envía el resultado al endpoint `/integrations/jenkins` del Control Plane.
+- **Inyección Automática de Metadatos**: Se capturan nombre del job, commit SHA, rama, duración del build y resultados por stage.
+- **Análisis de Fallos**: Correlaciona cambios específicos de código con regresiones en la construcción y stages fallidos.
 
 ### Webhooks de GitHub
-Conecte sus repositorios para recibir eventos de push y pull request en tiempo real. Esto permite a GitGov verificar que cada pull request haya sido auditado y aprobado según las políticas de su organización.
+Conecta tus repositorios para recibir eventos de push, pull requests y reviews en tiempo real. Esto permite a GitGov verificar que cada pull request haya sido auditado y aprobado según las políticas de tu organización.
 
 ---
 
@@ -42,30 +42,53 @@ Al utilizar la trazabilidad de CI, puede generar informes automatizados para aud
 
 ## Ejemplo de Configuración
 
-Para habilitar la trazabilidad de CI en su `Jenkinsfile`, simplemente añada el wrapper de GitGov:
+Agrega un paso `post` a tu `Jenkinsfile` que llame directamente a la API REST del Control Plane:
 
 ```groovy
 pipeline {
     agent any
+    environment {
+        GITGOV_URL    = 'http://tu-control-plane:3000'
+        GITGOV_KEY    = credentials('gitgov-admin-api-key')
+    }
     stages {
-        stage('Audit') {
+        stage('Build') {
             steps {
-                // Notifica a GitGov que este build está iniciando para un commit específico
-                gitgovNotify(status: 'STARTING', serverUrl: 'https://gitgov.internal')
+                // ... tus pasos de build existentes ...
             }
         }
-        // ... pasos de build ...
     }
     post {
         always {
-            gitgovNotify(status: currentBuild.result)
+            script {
+                def result = currentBuild.result ?: 'SUCCESS'
+                def ts     = System.currentTimeMillis()
+                sh """
+                    curl -s -X POST \${GITGOV_URL}/integrations/jenkins \\
+                      -H "Authorization: Bearer \${GITGOV_KEY}" \\
+                      -H "Content-Type: application/json" \\
+                      -d '{
+                        "pipeline_id": "\${env.BUILD_TAG}",
+                        "job_name": "\${env.JOB_NAME}",
+                        "status": "\${result.toLowerCase()}",
+                        "commit_sha": "\${env.GIT_COMMIT}",
+                        "branch": "\${env.GIT_BRANCH}",
+                        "repo_full_name": "TuOrg/TuRepo",
+                        "duration_ms": \${currentBuild.duration},
+                        "triggered_by": "\${env.BUILD_USER_ID ?: 'ci'}",
+                        "timestamp": \${ts}
+                      }'
+                """
+            }
         }
     }
 }
 ```
 
+Guarda la API key como credencial Jenkins (`gitgov-admin-api-key`) de tipo **Secret text**. El endpoint requiere un Bearer token con rol admin.
+
 > [!IMPORTANT]
-> **Garantía de Integridad**: Una vez que un build se vincula a un commit en GitGov, el registro queda bloqueado. Cualquier intento de "volver a etiquetar" un build existente a un nuevo commit activará una alerta de seguridad de alta prioridad.
+> **Garantía de Integridad**: Una vez que un build se vincula a un commit en GitGov, el registro queda bloqueado. Cualquier intento de "re-etiquetar" un build existente a un nuevo commit quedará registrado en el trail de auditoría.
 
 ---
 

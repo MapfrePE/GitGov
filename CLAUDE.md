@@ -42,7 +42,15 @@ cd gitgov/gitgov-server && cargo run
 # Web App (marketing/docs)
 cd gitgov-web && pnpm dev     # o npm run dev
 
-# Tests E2E
+# Tests unitarios server (sin DB, sin server — también corre en CI)
+cd gitgov/gitgov-server && cargo test
+# o con Makefile:
+cd gitgov/gitgov-server && make test
+
+# Smoke / contrato live (requiere server corriendo)
+cd gitgov/gitgov-server && make smoke
+
+# Tests E2E completos
 cd gitgov/gitgov-server/tests && ./e2e_flow_test.sh
 
 # Jenkins integration test
@@ -170,6 +178,11 @@ cd gitgov && npm run lint && npm run typecheck
 
 ## Errores Comunes (NO REPETIR)
 
+### Failed to deserialize query string: missing field `offset`
+- **Causa:** Los structs de query (`EventFilter`, `JenkinsCorrelationFilter`, `SignalFilter`, `GovernanceEventFilter`) tenían `offset: usize` como campo requerido. Si el cliente no lo mandaba, serde fallaba.
+- **Fix aplicado (Feb 2026):** `#[serde(default)]` en los campos `limit` y `offset` de los 4 structs. `usize::default() = 0`. Los handlers ya manejaban `0` con fallbacks. Backward compatible.
+- **Regla:** Al añadir nuevos campos de paginación en query structs, usar siempre `#[serde(default)]` o `Option<T>`.
+
 ### JWT_SECRET inseguro en producción
 - **Causa:** `GITGOV_JWT_SECRET` tiene un default hardcodeado: `"gitgov-secret-key-change-in-production"`
 - **Fix:** SIEMPRE establecer un secreto fuerte y único en producción (`openssl rand -hex 32`)
@@ -269,10 +282,16 @@ cd gitgov && npm run lint && npm run typecheck
 - V1.2-A (Jenkins MVP): ingesta, correlación, widget Pipeline Health, policy/check advisory
 - V1.2-B Preview (Jira): ingesta, correlación batch, ticket coverage, badges
 
+### Tests (estado actual)
+- `cargo test` — 36 unit tests en CI (models, handlers, auth) — **funcional**
+- `smoke_contract.sh` — 14 contract checks live (paginación + Golden Path) — **funcional, local**
+- E2E scripts (`e2e_flow_test.sh`, `jenkins_integration_test.sh`, `jira_integration_test.sh`) — **manuales**
+- Tests de integración con DB mock — **pendiente**
+
 ### Pendiente (Alta Prioridad)
-- Endurecer pruebas E2E reales Jenkins + Jira
 - Correlación de `related_prs` automática
-- Tests automatizados backend (cobertura)
+- HTTPS en EC2 (dominio + Let's Encrypt)
+- Tests de integración backend con DB mock (sin Supabase real)
 
 ### Roadmap
 - V1.2-A: Jenkins-first MVP (funcional)

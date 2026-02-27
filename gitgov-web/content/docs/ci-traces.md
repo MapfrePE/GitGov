@@ -21,12 +21,12 @@ GitGov establishes a bidirectional link between your source code and your deploy
 ## Supported Integrations
 
 ### Jenkins Integration
-GitGov provides a lightweight Jenkins plugin (and shared library) that automatically reports build events to the Control Plane.
-- **Automatic Metadata Injection**: Injects the build URL and job name into the GitGov event stream.
-- **Failure Analysis**: Correlates specific code changes with build regressions.
+GitGov integrates with Jenkins via a REST API call from your `Jenkinsfile`. After each build, a `curl` step posts the result to the Control Plane's `/integrations/jenkins` endpoint.
+- **Automatic Metadata Injection**: Job name, commit SHA, branch, build duration, and stage results are captured.
+- **Failure Analysis**: Correlates specific code changes with build regressions and failed stages.
 
 ### GitHub Webhooks
-Connect your repositories to receive real-time push and pull request events. This allows GitGov to verify that every pull request has been audited and approved according to your organization's policies.
+Connect your repositories to receive real-time push, pull request, and review events. This allows GitGov to verify that every pull request has been audited and approved according to your organization's policies.
 
 ---
 
@@ -40,32 +40,55 @@ By using CI Traceability, you can generate automated reports for compliance audi
 
 ---
 
-## Configuration Highlight
+## Configuration Example
 
-To enable CI traceability in your `Jenkinsfile`, you simply add the GitGov wrapper:
+Add a `post` step to your `Jenkinsfile` that calls the Control Plane REST API directly:
 
 ```groovy
 pipeline {
     agent any
+    environment {
+        GITGOV_URL    = 'http://your-control-plane:3000'
+        GITGOV_KEY    = credentials('gitgov-admin-api-key')
+    }
     stages {
-        stage('Audit') {
+        stage('Build') {
             steps {
-                // Notifies GitGov that this build is starting for a specific commit
-                gitgovNotify(status: 'STARTING', serverUrl: 'https://gitgov.internal')
+                // ... your existing build steps ...
             }
         }
-        // ... build steps ...
     }
     post {
         always {
-            gitgovNotify(status: currentBuild.result)
+            script {
+                def result = currentBuild.result ?: 'SUCCESS'
+                def ts     = System.currentTimeMillis()
+                sh """
+                    curl -s -X POST \${GITGOV_URL}/integrations/jenkins \\
+                      -H "Authorization: Bearer \${GITGOV_KEY}" \\
+                      -H "Content-Type: application/json" \\
+                      -d '{
+                        "pipeline_id": "\${env.BUILD_TAG}",
+                        "job_name": "\${env.JOB_NAME}",
+                        "status": "\${result.toLowerCase()}",
+                        "commit_sha": "\${env.GIT_COMMIT}",
+                        "branch": "\${env.GIT_BRANCH}",
+                        "repo_full_name": "YourOrg/YourRepo",
+                        "duration_ms": \${currentBuild.duration},
+                        "triggered_by": "\${env.BUILD_USER_ID ?: 'ci'}",
+                        "timestamp": \${ts}
+                      }'
+                """
+            }
         }
     }
 }
 ```
 
+Store the API key as a Jenkins credential (`gitgov-admin-api-key`) of type **Secret text**. The endpoint requires an admin-role Bearer token.
+
 > [!IMPORTANT]
-> **Integrity Guarantee**: Once a build is linked to a commit in GitGov, the record is locked. Any attempt to "re-tag" an existing build to a new commit will trigger a high-priority security alert.
+> **Integrity Guarantee**: Once a build is linked to a commit in GitGov, the record is locked. Any attempt to "re-tag" an existing build to a new commit will be flagged in the audit trail.
 
 ---
 

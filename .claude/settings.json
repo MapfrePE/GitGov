@@ -33,7 +33,8 @@
       "Read(//c//**)",
       "Read(//c/Users/PC/**)",
       "Bash(find:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(/c/Users/PC/AppData/Roaming/fnm/node-versions/v22.12.0/installation/node.exe ./node_modules/.bin/tsc --noEmit)"
     ]
   }
 }

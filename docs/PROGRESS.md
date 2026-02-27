@@ -2,6 +2,81 @@
 
 ## Actualización Reciente (2026-02-26)
 
+### Pruebas E2E, Bug offset, Tests de Contrato y CI
+
+#### Bug corregido: `offset` obligatorio en endpoints paginados
+
+`/logs`, `/integrations/jenkins/correlations`, `/signals`, `/governance-events` fallaban con `"missing field offset"` si el cliente no lo mandaba. Causa: los structs `EventFilter`, `JenkinsCorrelationFilter`, `SignalFilter`, `GovernanceEventFilter` tenían `limit: usize` y `offset: usize` como campos requeridos en serde.
+
+**Fix:** `#[serde(default)]` en los 4 structs → `usize::default() = 0`. Los handlers ya tenían `if limit == 0 { fallback }` así que no requirieron cambio. Backward compatible: si el cliente manda offset explícito, se respeta.
+
+Defaults resultantes por endpoint:
+
+| Endpoint | `limit` default | `offset` default |
+|----------|----------------|-----------------|
+| `/logs` | 100 | 0 |
+| `/integrations/jenkins/correlations` | 20 | 0 |
+| `/signals` | 100 | 0 |
+| `/governance-events` | 100 | 0 |
+
+#### Tests E2E ejecutados (Golden Path + Jenkins + Jira)
+
+Suite completa corrida manualmente contra servidor real (Supabase):
+
+| Suite | Tests | Resultado |
+|-------|-------|-----------|
+| Golden Path (`e2e_flow_test.sh`) | Health, auth, event ingest, logs, stats | ✅ |
+| Jenkins V1.2-A (`jenkins_integration_test.sh`) | Status, ingest válido, duplicado, auth reject, correlations | ✅ |
+| Jira V1.2-B (`jira_integration_test.sh`) | Status, ingest PROJ-123, auth reject, batch correlate, coverage, detail | ✅ |
+| Correlación regex Jira | Commit con `"PROJ-123"` + branch `"feat/PROJ-123-dashboard"` → `correlations_created:1`, ticket con `related_commits` y `related_branches` poblados | ✅ |
+| `/health/detailed` | `latency_ms:268`, `pending_events:0` | ✅ |
+
+Datos reales en DB: 26 commits últimas 72h, 1 con ticket, 3.8% coverage.
+
+También se corrigieron los scripts de test que tenían el bug de `offset`:
+- `e2e_flow_test.sh` — `uuidgen` fallback para Windows + `&offset=0` en 2 llamadas a `/logs`
+- `jenkins_integration_test.sh` — `&offset=0` en `/integrations/jenkins/correlations`
+
+#### Tests unitarios de contrato (36 tests, 11 nuevos)
+
+Añadidos en `models.rs` `#[cfg(test)]`:
+
+**5 tests de paginación (regresión offset):**
+- `event_filter_offset_optional_defaults_to_zero`
+- `event_filter_all_pagination_optional`
+- `event_filter_explicit_offset_respected`
+- `jenkins_correlation_filter_offset_optional`
+- `jenkins_correlation_filter_all_pagination_optional`
+
+**6 tests Golden Path (contrato de payload):**
+- `golden_path_stage_files_contract` — files no vacío, event_uuid presente
+- `golden_path_commit_contract` — commit_sha presente
+- `golden_path_attempt_push_contract` — branch correcto
+- `golden_path_successful_push_contract` — status success, uuid
+- `golden_path_response_accepted_shape` — `ClientEventResponse` {accepted, duplicates, errors}
+- `golden_path_duplicate_detected_in_response` — UUID en `duplicates[]` al reenviar
+
+Resultado: `36 passed; 0 failed; 0.00s`. Pure-serde — no requieren DB ni server.
+
+#### smoke_contract.sh — validación live
+
+`gitgov/gitgov-server/tests/smoke_contract.sh` con dos secciones:
+- **A (8 checks):** endpoints sin params opcionales → responden correcto; backward compat con params explícitos
+- **B (6 checks):** Golden Path live — `stage_files → commit → attempt_push → successful_push` aceptados, los 4 visibles en `/logs`, reenvío detectado en `duplicates[]`
+
+Corrida contra servidor real: `exit 0` ✅
+
+#### Infraestructura de testing añadida
+
+| Archivo | Qué es |
+|---------|--------|
+| `gitgov/gitgov-server/Makefile` | `make check`, `make test`, `make smoke`, `make all` |
+| `gitgov/gitgov-server/tests/smoke_contract.sh` | 14 contract checks (8 paginación + 6 Golden Path) |
+| `.github/workflows/ci.yml` | `cargo test` añadido al job `server-lint` + artifact upload en failure |
+| `docs/GOLDEN_PATH_CHECKLIST.md` | Sección "Antes de release: make test + make smoke" |
+
+---
+
 ### Análisis Exhaustivo del Proyecto — Hallazgos de Arquitectura
 
 Se realizó un análisis milimétrico del codebase completo. Principales hallazgos documentados:
@@ -502,7 +577,7 @@ Esto crea un historial completo de cada violación.
 
 | Componente | Qué falta |
 |------------|-----------|
-| Tests automatizados backend | Cobertura de integraciones Jira/Jenkins |
+| Tests automatizados backend | Cobertura de integraciones Jira/Jenkins (parcial: 36 unit tests + smoke_contract.sh; falta integración real con DB mock) |
 | Desktop Updater | Servidor de releases S3/CloudFront para tauri-plugin-updater |
 | Correlation Engine V2 | GitHub webhooks + desktop + Jira + Jenkins en una sola vista (V1.2-C) |
 | Drift Detection | Detectar cuando configuración difiere de política |

@@ -33,32 +33,35 @@ Maintain a clean and searchable repository structure.
 - **Prefix Requirements**: `feature/*`, `bugfix/*`, `hotfix/*`.
 - **Owner Tags**: Include developer or team identifiers in branch names.
 
-### Cryptographic Identity
-- **Signed Commits**: Enforce the use of GPG or SSH-signed commits to ensure author authenticity.
-- **Verified Workstations**: Only allow pushes from devices registered and authenticated with the Control Plane.
-
 ---
 
 ## Defining a Policy (Example)
 
-Policies are defined in the Control Plane via YAML or the Management UI. Here is an example of a "Production Ready" policy:
+Policies are stored per-repository in a `gitgov.toml` file. Here is an example policy for a production branch:
 
-```yaml
-name: "Standard Security Policy"
-target: "branches/main, branches/release/*"
-rules:
-  - id: "signed_commits"
-    enforcement: "block"
-  - id: "commit_message_format"
-    pattern: "^\[GITGOV-\d+\]: .+"
-    enforcement: "block"
-  - id: "max_diff_size"
-    limit: "500 lines"
-    enforcement: "advisory"
+```toml
+[policy]
+name = "Standard Security Policy"
+target_branches = ["main", "release/*"]
+
+[[policy.rules]]
+id = "commit_message_format"
+pattern = "^(feat|fix|refactor|docs|test|chore): .+"
+enforcement = "advisory"
+
+[[policy.rules]]
+id = "branch_naming"
+pattern = "^(feat|fix|hotfix|release)/.+"
+enforcement = "advisory"
+
+[[policy.rules]]
+id = "max_diff_size"
+limit_lines = 500
+enforcement = "advisory"
 ```
 
 > [!NOTE]
-> **Policy Inheritance**: Sub-teams can define their own specific policies that inherit from and extend the global organization-wide governance rules.
+> **Advisory-first**: All rules currently operate in advisory mode. Enforcement mode (blocking at the workstation) is on the roadmap. Use advisory mode now to collect baseline compliance metrics before tightening policy.
 
 ---
 

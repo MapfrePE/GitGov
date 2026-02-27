@@ -26,7 +26,7 @@ Siga estos pasos para establecer un enlace seguro:
 Asegúrese de que el servicio del Control Plane esté activo. Si está ejecutando el servidor manualmente:
 1. Abra una terminal en el directorio `gitgov-server`.
 2. Verifique que Rust esté inicializado.
-3. Inicie el servicio: `cargo run --release`.
+3. Inicie el servicio: `cargo run`.
 
 ### 2. Autenticación en Desktop
 1. Inicie **GitGov Desktop**.
@@ -59,7 +59,7 @@ Puede ajustar cómo se envían los datos al servidor para equilibrar la visibili
 
 Para asegurar una sincronización estable, su entorno de red debe permitir:
 - **Protocolo**: HTTP/1.1 o HTTP/2.
-- **Puerto**: Predeterminado 3000 (Personalizable en `config.toml`).
+- **Puerto**: Predeterminado 3000 (Personalizable mediante la variable de entorno `GITGOV_SERVER_ADDR`).
 - **Lista Blanca de Dominios**: Asegúrese de que su firewall local permita tráfico saliente al dominio del Control Plane.
 
 ## Siguiente Fase

@@ -664,6 +664,73 @@ Los jobs (tareas en background) pasan por varios estados:
 
 ---
 
+## Pruebas y Contratos
+
+El servidor tiene tres capas de testing con distintos requisitos de infraestructura:
+
+### Capa 1 — Unit tests (sin DB, sin server)
+
+```bash
+cd gitgov/gitgov-server
+cargo test        # 36 tests, ~0.01s
+make test         # equivalente con Makefile
+```
+
+Ubicación: bloques `#[cfg(test)]` en `src/models.rs`, `src/handlers.rs`, `src/auth.rs`.
+
+| Suite | Qué valida |
+|-------|-----------|
+| `auth::tests` (5) | `require_admin`, `require_same_user_or_admin` con todos los roles |
+| `handlers::tests` (10) | Validación HMAC GitHub, extracción de ticket IDs, audit delivery ID |
+| `models::tests::pagination` (5) | `EventFilter` y `JenkinsCorrelationFilter` sin `offset`/`limit` → defaults correctos |
+| `models::tests::golden_path` (6) | Payload de cada evento del Golden Path + `ClientEventResponse` shape |
+| `models::tests::roundtrip` (10) | Enums `UserRole`, `ClientEventType`, `EventStatus`, `PipelineStatus`, `SignalType`, etc. |
+
+Estos tests corren en CI en cada push/PR (job `server-lint`). Si fallan, se sube un artefacto con el output completo.
+
+### Capa 2 — Smoke / contrato live (requiere server + DB)
+
+```bash
+cd gitgov/gitgov-server
+make smoke
+# o directamente:
+SERVER_URL=http://127.0.0.1:3000 API_KEY=<key> bash tests/smoke_contract.sh
+```
+
+Script `tests/smoke_contract.sh` con 14 checks en dos secciones:
+
+**Sección A — Paginación (8 checks):** verifica que los endpoints de lectura responden correctamente sin `offset`/`limit`, con `offset` explícito (compat), y sin ningún parámetro.
+
+**Sección B — Golden Path (6 checks):** envía los 4 eventos del flujo principal al servidor real, verifica que aparecen en `/logs`, y confirma que un reenvío del mismo UUID aparece en `duplicates[]`.
+
+Este script NO corre en CI (requiere DB Supabase real).
+
+### Capa 3 — Integración completa (scripts E2E)
+
+```bash
+cd gitgov/gitgov-server/tests
+bash e2e_flow_test.sh                                          # Golden Path base
+API_KEY=<key> bash jenkins_integration_test.sh                # V1.2-A Jenkins
+API_KEY=<key> bash jira_integration_test.sh                   # V1.2-B Jira
+```
+
+Scripts más completos que ejercitan ingesta, deduplicación, correlaciones y autenticación.
+
+### Defaults de paginación (tras corrección Feb 2026)
+
+Todos los endpoints de lectura paginada aceptan `offset` y `limit` como opcionales:
+
+| Endpoint | `limit` default | max |
+|----------|----------------|-----|
+| `/logs` | 100 | 500 |
+| `/integrations/jenkins/correlations` | 20 | — |
+| `/signals` | 100 | — |
+| `/governance-events` | 100 | — |
+
+Si `offset` no se envía, equivale a `offset=0`.
+
+---
+
 ## Próximos Pasos
 
 Para más información:
