@@ -279,13 +279,13 @@ export function PrivacyClient() {
                     <ul className="space-y-1.5 list-disc list-inside text-xs">
                         <li><strong className="text-gray-300">Access</strong> — Request a copy of event records associated with their user login.</li>
                         <li><strong className="text-gray-300">Rectification</strong> — Request correction of inaccurate metadata (e.g., incorrect user_login attribution).</li>
-                        <li><strong className="text-gray-300">Erasure</strong> — Request deletion of event records, subject to the deploying organization's legal obligations to maintain audit trails.</li>
+                        <li><strong className="text-gray-300">Erasure</strong> — Request deletion of event records, subject to the deploying organization&apos;s legal obligations to maintain audit trails.</li>
                         <li><strong className="text-gray-300">Restriction</strong> — Request that processing be restricted pending resolution of an accuracy dispute.</li>
                         <li><strong className="text-gray-300">Portability</strong> — Request event data in machine-readable format via the <code className="text-brand-400 bg-white/5 px-1 rounded">POST /export</code> endpoint.</li>
                         <li><strong className="text-gray-300">Objection</strong> — Object to processing based on legitimate interests grounds.</li>
                     </ul>
                     <p className="text-xs text-gray-500">
-                        Requests should be directed to the deploying organization's Data Protection Officer or HR department. GitGov operators can only fulfill data requests upon written instruction from the deploying organization acting as data controller.
+                        Requests should be directed to the deploying organization&apos;s Data Protection Officer or HR department. GitGov operators can only fulfill data requests upon written instruction from the deploying organization acting as data controller.
                     </p>
                 </div>
             ),
