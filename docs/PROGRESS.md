@@ -2,6 +2,41 @@
 
 ---
 
+## Actualización Reciente (2026-02-28) — Hotfix CI estricto (dead_code + unused variables)
+
+### Qué se corrigió
+- `gitgov-server` volvía a fallar con `cargo clippy -- -D warnings` por tipos públicos sin referencia en runtime (`dead_code`).
+- `src-tauri` fallaba por variables `bak_path` no usadas en Linux (`unused-variables`) aunque eran necesarias en bloque `#[cfg(windows)]`.
+
+### Cambios aplicados
+- `gitgov/gitgov-server/src/handlers.rs`
+  - `get_job_metrics` ahora devuelve tipos fuertemente tipados:
+    - éxito: `JobMetricsResponse`
+    - error: `ErrorResponse`
+  - Con esto ambos structs quedan usados en código real.
+- `gitgov/gitgov-server/src/models.rs`
+  - Se añadió `touch_contract_types()` que referencia explícitamente tipos públicos/legacy que siguen siendo parte del contrato compartido.
+- `gitgov/gitgov-server/src/main.rs`
+  - Se llama `models::touch_contract_types()` al inicio del arranque para mantener esos tipos enlazados bajo clippy estricto.
+- `gitgov/src-tauri/src/outbox/queue.rs`
+  - `bak_path` se movió dentro de bloques `#[cfg(windows)]` en ambos paths de persistencia atómica.
+  - Resultado: Linux deja de reportarlo como variable no usada, Windows mantiene la lógica de rollback/backup.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` → OK
+- `cd gitgov/gitgov-server && cargo test` → `52 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` → OK
+- `cd gitgov && npm run typecheck` → OK
+- `cd gitgov && npm run lint` → OK
+- `cd gitgov-web && pnpm run lint` → OK
+- `cd gitgov-web && pnpm run build` → OK
+
+### Impacto en Golden Path
+- No se modificó auth (`Authorization: Bearer`), ingestión `/events`, ni contratos `ServerStats`/`CombinedEvent`.
+- No hay cambios de comportamiento en commit/push/outbox; solo correcciones de tipado/compilación estricta.
+
+---
+
 ## Actualización Reciente (2026-02-28) — Guardrails de identidad git (3 capas)
 
 ### Qué se implementó

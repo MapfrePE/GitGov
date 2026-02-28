@@ -244,7 +244,6 @@ impl Outbox {
                 .map_err(|_| OutboxError::IoError("File lock poisoned".to_string()))?;
 
             let tmp_path = self.path.with_extension("jsonl.tmp");
-            let bak_path = self.path.with_extension("jsonl.bak");
 
             // Write to temp file
             {
@@ -280,6 +279,7 @@ impl Outbox {
 
             #[cfg(windows)]
             {
+                let bak_path = self.path.with_extension("jsonl.bak");
                 // Windows: backup original, rename tmp, delete backup
                 if self.path.exists() {
                     let _ = std::fs::rename(&self.path, &bak_path);
@@ -656,7 +656,6 @@ impl Outbox {
             .map_err(|_| OutboxError::IoError("File lock poisoned".to_string()))?;
 
         let tmp_path = path.with_extension("jsonl.tmp");
-        let bak_path = path.with_extension("jsonl.bak");
 
         // Write to temp
         {
@@ -686,6 +685,7 @@ impl Outbox {
 
         #[cfg(windows)]
         {
+            let bak_path = path.with_extension("jsonl.bak");
             if path.exists() {
                 let _ = std::fs::rename(path, &bak_path);
             }

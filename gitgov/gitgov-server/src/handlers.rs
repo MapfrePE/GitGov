@@ -3259,24 +3259,31 @@ pub async fn get_job_metrics(
     if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error": "Admin access required"})),
-        );
+            Json(ErrorResponse {
+                error: "Admin access required".to_string(),
+                code: "FORBIDDEN".to_string(),
+            }),
+        )
+            .into_response();
     }
 
     match state.db.get_job_metrics().await {
-        Ok(metrics) => {
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "worker_id": state.worker_id,
-                    "metrics": metrics
-                })),
-            )
-        }
+        Ok(metrics) => (
+            StatusCode::OK,
+            Json(JobMetricsResponse {
+                worker_id: state.worker_id.clone(),
+                metrics,
+            }),
+        )
+            .into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Failed to get job metrics"})),
-        ),
+            Json(ErrorResponse {
+                error: "Failed to get job metrics".to_string(),
+                code: "INTERNAL_ERROR".to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 

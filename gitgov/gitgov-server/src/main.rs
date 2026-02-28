@@ -211,7 +211,10 @@ async fn rate_limit_middleware(
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-    
+
+    // Keep shared/legacy API model types linked under strict clippy settings.
+    models::touch_contract_types();
+
     let args = Args::parse();
 
     tracing_subscriber::registry()
