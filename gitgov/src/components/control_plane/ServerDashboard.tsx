@@ -4,6 +4,7 @@ import { Server } from 'lucide-react'
 import { DashboardHeader } from './DashboardHeader'
 import { MetricsGrid } from './MetricsGrid'
 import { PipelineHealthWidget } from './PipelineHealthWidget'
+import { DailyActivityWidget } from './DailyActivityWidget'
 import { TicketCoverageWidget } from './TicketCoverageWidget'
 import { EventBreakdownGrid } from './EventBreakdownGrid'
 import { RecentCommitsTable } from './RecentCommitsTable'
@@ -12,7 +13,7 @@ import { ExportPanel } from './ExportPanel'
 
 export function ServerDashboard() {
   const {
-    serverStats, ticketCoverage, userRole,
+    serverStats, dailyActivity, ticketCoverage, userRole,
     isConnected, isRefreshingDashboard, refreshDashboardData,
   } = useControlPlaneStore()
 
@@ -61,6 +62,9 @@ export function ServerDashboard() {
         onRefresh={() => void refreshDashboardData({ logLimit: 50 })}
         isRefreshing={isRefreshingDashboard}
       />
+      <div className="flex justify-end">
+        <span className="text-[9px] text-surface-500 uppercase tracking-widest bg-white/4 px-2 py-0.5 rounded font-medium">Timezone: UTC</span>
+      </div>
 
       {serverStats && (
         <>
@@ -75,7 +79,7 @@ export function ServerDashboard() {
             activeDevsWeek={serverStats.active_devs_week}
           />
 
-          <div className="grid grid-cols-[3fr_2fr] gap-3">
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
             <PipelineHealthWidget
               total={pipelineTotal}
               failure={pipeline?.failure_7d ?? 0}
@@ -83,6 +87,7 @@ export function ServerDashboard() {
               reposWithFailures={pipeline?.repos_with_failures_7d ?? 0}
               successRate={pipelineSuccessRate}
             />
+            <DailyActivityWidget points={dailyActivity} />
             <TicketCoverageWidget />
           </div>
 

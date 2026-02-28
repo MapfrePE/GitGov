@@ -158,6 +158,51 @@ echo "$RES" | grep -q '"duplicates":\["' \
   || fail "GP duplicate not detected: ${RES:0:150}"
 
 echo ""
+echo "── Section C: Read-only extended checks (new endpoints) ─────────────────"
+
+# C-1: GET /stats/daily?days=14 → HTTP 200 + JSON array with exactly 14 day entries
+#   No migration required (uses client_events, core table since v1).
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH_HEADER" "$SERVER_URL/stats/daily?days=14")
+if [ "$CODE" = "200" ]; then
+  RES=$(curl -s -H "$AUTH_HEADER" "$SERVER_URL/stats/daily?days=14")
+  COUNT=$(echo "$RES" | grep -o '"day"' | wc -l | tr -d ' \r\n\t')
+  [ "$COUNT" = "14" ] \
+    && pass "/stats/daily?days=14 → HTTP 200, array with 14 day entries" \
+    || fail "/stats/daily?days=14 → expected 14 day entries, got ${COUNT}: ${RES:0:150}"
+else
+  fail "/stats/daily?days=14 → HTTP $CODE (expected 200)"
+fi
+
+# C-2: GET /clients → HTTP 200 + has 'sessions' field
+#   REQUIRES schema v8: client_sessions table (supabase_schema_v8.sql).
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH_HEADER" "$SERVER_URL/clients")
+if [ "$CODE" = "200" ]; then
+  RES=$(curl -s -H "$AUTH_HEADER" "$SERVER_URL/clients")
+  echo "$RES" | grep -q '"sessions"' \
+    && pass "/clients → HTTP 200, has 'sessions' field" \
+    || fail "/clients → HTTP 200 but no 'sessions' field: ${RES:0:150}"
+else
+  fail "/clients → HTTP $CODE (expected 200) — MIGRATION REQUIRED: apply supabase_schema_v8.sql (client_sessions table)"
+fi
+
+# C-3: GET /identities/aliases → HTTP 200 + valid JSON array
+#   REQUIRES schema v8: identity_aliases table (supabase_schema_v8.sql).
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH_HEADER" "$SERVER_URL/identities/aliases")
+if [ "$CODE" = "200" ]; then
+  RES=$(curl -s -H "$AUTH_HEADER" "$SERVER_URL/identities/aliases")
+  if echo "$RES" | grep -q '"error"'; then
+    fail "/identities/aliases → HTTP 200 but body contains error — MIGRATION REQUIRED: apply supabase_schema_v8.sql: ${RES:0:150}"
+  else
+    FIRST=$(echo "$RES" | tr -d ' \r\n' | cut -c1)
+    [ "$FIRST" = "[" ] \
+      && pass "/identities/aliases → HTTP 200, valid JSON array" \
+      || fail "/identities/aliases → HTTP 200 but unexpected shape (not array): ${RES:0:150}"
+  fi
+else
+  fail "/identities/aliases → HTTP $CODE (expected 200) — MIGRATION REQUIRED: apply supabase_schema_v8.sql (identity_aliases table)"
+fi
+
+echo ""
 echo "========================================"
 echo "Results: $PASS passed, $FAILED failed"
 if [ "$FAILED" -eq 0 ]; then

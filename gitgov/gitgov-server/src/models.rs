@@ -104,6 +104,9 @@ pub struct PushEvent {
     pub repository: GitHubRepository,
     pub sender: GitHubUser,
     pub commits: Vec<GitHubCommit>,
+    /// GitHub sets this to true when the push rewrites history (git push --force / --force-with-lease).
+    #[serde(default)]
+    pub forced: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +185,7 @@ pub enum ClientEventType {
     AttemptPush,
     BlockedPush,
     SuccessfulPush,
+    Heartbeat,
     CreateBranch,
     BlockedBranch,
     StageFiles,
@@ -197,6 +201,7 @@ impl ClientEventType {
             ClientEventType::AttemptPush => "attempt_push",
             ClientEventType::BlockedPush => "blocked_push",
             ClientEventType::SuccessfulPush => "successful_push",
+            ClientEventType::Heartbeat => "heartbeat",
             ClientEventType::CreateBranch => "create_branch",
             ClientEventType::BlockedBranch => "blocked_branch",
             ClientEventType::StageFiles => "stage_files",
@@ -212,6 +217,7 @@ impl ClientEventType {
             "attempt_push" => ClientEventType::AttemptPush,
             "blocked_push" => ClientEventType::BlockedPush,
             "successful_push" => ClientEventType::SuccessfulPush,
+            "heartbeat" => ClientEventType::Heartbeat,
             "create_branch" => ClientEventType::CreateBranch,
             "blocked_branch" => ClientEventType::BlockedBranch,
             "stage_files" => ClientEventType::StageFiles,
@@ -364,6 +370,19 @@ pub struct AuditStats {
     pub pipeline: PipelineHealthStats,
     pub active_devs_week: i64,
     pub active_repos: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DailyActivityPoint {
+    pub day: String,
+    pub commits: i64,
+    pub pushes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DailyActivityQuery {
+    #[serde(default)]
+    pub days: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1277,6 +1296,99 @@ pub struct AdminAuditLogQuery {
 }
 
 // ============================================================================
+// GDPR — T2
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EraseUserResponse {
+    pub user_login: String,
+    pub client_events_erased: i64,
+    pub github_events_erased: i64,
+    pub erased_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportUserResponse {
+    pub user_login: String,
+    pub events: Vec<CombinedEvent>,
+    pub total: usize,
+    pub exported_at: i64,
+}
+
+// ============================================================================
+// CLIENT SESSIONS — T3.A
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClientSession {
+    pub client_id: String,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    pub last_seen_at: i64,
+    #[serde(default)]
+    pub device_metadata: serde_json::Value,
+    pub created_at: i64,
+    /// true if last_seen_at is within the last 24 hours
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClientSessionsResponse {
+    pub sessions: Vec<ClientSession>,
+    pub total: usize,
+}
+
+// ============================================================================
+// IDENTITY ALIASES — T3.B
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityAlias {
+    pub canonical_login: String,
+    pub alias_login: String,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateIdentityAliasRequest {
+    pub canonical: String,
+    pub alias: String,
+    #[serde(default)]
+    pub org_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateIdentityAliasResponse {
+    pub canonical_login: String,
+    pub alias_login: String,
+    pub created: bool,
+}
+
+// ============================================================================
+// IDENTITY ALIAS HELPERS
+// ============================================================================
+
+/// Expands a canonical login to include all associated alias logins.
+///
+/// Returns a `Vec` with `canonical` as the first element followed by every
+/// `alias_login` where `alias.canonical_login == canonical`.
+///
+/// Used when querying events: a developer who has multiple GitHub accounts
+/// linked via identity aliases should have their events surfaced by searching
+/// for the canonical login.
+pub fn expand_login_aliases(canonical: &str, aliases: &[IdentityAlias]) -> Vec<String> {
+    let mut logins = vec![canonical.to_string()];
+    for alias in aliases {
+        if alias.canonical_login == canonical {
+            logins.push(alias.alias_login.clone());
+        }
+    }
+    logins
+}
+
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1302,6 +1414,7 @@ mod tests {
             ClientEventType::AttemptPush,
             ClientEventType::BlockedPush,
             ClientEventType::SuccessfulPush,
+            ClientEventType::Heartbeat,
             ClientEventType::CreateBranch,
             ClientEventType::BlockedBranch,
             ClientEventType::StageFiles,
@@ -1531,5 +1644,60 @@ mod tests {
         let f: JenkinsCorrelationFilter = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(f.offset, 0);
         assert_eq!(f.limit, 0); // 0 → handler uses its fallback default (20)
+    }
+
+    // ── Identity alias expansion (get_combined_events with aliases) ───────────
+
+    #[test]
+    fn expand_aliases_canonical_only_when_no_aliases() {
+        let result = expand_login_aliases("alice", &[]);
+        assert_eq!(result, vec!["alice"]);
+    }
+
+    #[test]
+    fn expand_aliases_includes_all_matching_aliases() {
+        // Filtering by canonical "alice" must also return events for her aliases.
+        let aliases = vec![
+            IdentityAlias {
+                canonical_login: "alice".to_string(),
+                alias_login: "alice-personal".to_string(),
+                org_id: None,
+                created_at: 0,
+            },
+            IdentityAlias {
+                canonical_login: "alice".to_string(),
+                alias_login: "alice-work".to_string(),
+                org_id: None,
+                created_at: 0,
+            },
+        ];
+        let result = expand_login_aliases("alice", &aliases);
+        assert_eq!(result, vec!["alice", "alice-personal", "alice-work"]);
+    }
+
+    #[test]
+    fn expand_aliases_ignores_aliases_for_different_canonical() {
+        let aliases = vec![IdentityAlias {
+            canonical_login: "bob".to_string(),
+            alias_login: "bob-work".to_string(),
+            org_id: None,
+            created_at: 0,
+        }];
+        let result = expand_login_aliases("alice", &aliases);
+        assert_eq!(result, vec!["alice"]);
+    }
+
+    #[test]
+    fn expand_aliases_canonical_is_always_first_element() {
+        let aliases = vec![IdentityAlias {
+            canonical_login: "carol".to_string(),
+            alias_login: "carol-oss".to_string(),
+            org_id: Some("uuid-org".to_string()),
+            created_at: 1_700_000_000_000,
+        }];
+        let result = expand_login_aliases("carol", &aliases);
+        assert_eq!(result[0], "carol");
+        assert_eq!(result[1], "carol-oss");
+        assert_eq!(result.len(), 2);
     }
 }

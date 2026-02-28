@@ -121,6 +121,13 @@ pub struct ServerStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DailyActivityPoint {
+    pub day: String,
+    pub commits: i64,
+    pub pushes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GitHubEventStats {
     pub total: i64,
     pub today: i64,
@@ -177,6 +184,12 @@ pub struct JenkinsCorrelationFilter {
     pub user_login: Option<String>,
     pub limit: usize,
     pub offset: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DailyActivityFilter {
+    pub days: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -534,6 +547,37 @@ impl ControlPlaneClient {
 
         let mut request = self.client.get(&url);
 
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn get_daily_activity(
+        &self,
+        filter: &DailyActivityFilter,
+    ) -> Result<Vec<DailyActivityPoint>, ServerError> {
+        let url = format!("{}/stats/daily", self.config.url);
+        let mut query_params: Vec<(String, String)> = Vec::new();
+        if let Some(days) = filter.days {
+            query_params.push(("days".to_string(), days.to_string()));
+        }
+
+        let mut request = self.client.get(&url).query(&query_params);
         if let Some(ref api_key) = self.config.api_key {
             request = request.header("Authorization", format!("Bearer {}", api_key));
         }

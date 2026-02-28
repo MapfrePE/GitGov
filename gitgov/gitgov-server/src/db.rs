@@ -696,7 +696,7 @@ impl Database {
                     'github'::TEXT AS source,
                     g.event_type,
                     g.created_at,
-                    g.actor_login AS user_login,
+                    COALESCE(iga.canonical_login, g.actor_login) AS user_login,
                     r.full_name AS repo_name,
                     g.ref_name AS branch,
                     NULL::TEXT AS status,
@@ -706,11 +706,14 @@ impl Database {
                     ) AS details
                 FROM github_events g
                 LEFT JOIN repos r ON g.repo_id = r.id
+                LEFT JOIN identity_aliases iga
+                  ON iga.alias_login = g.actor_login
+                 AND ($1::uuid IS NULL OR iga.org_id = $1::uuid)
                 WHERE ($1::uuid IS NULL OR g.org_id = $1::uuid)
                   AND ($2::uuid IS NULL OR g.repo_id = $2::uuid)
                   AND ($3::text IS NULL OR $3 = 'github')
                   AND ($4::text IS NULL OR g.event_type = $4)
-                  AND ($5::text IS NULL OR g.actor_login = $5)
+                  AND ($5::text IS NULL OR g.actor_login = $5 OR COALESCE(iga.canonical_login, g.actor_login) = $5)
                   AND ($6::text IS NULL OR g.ref_name = $6)
                   AND ($7::timestamptz IS NULL OR g.created_at >= $7)
                   AND ($8::timestamptz IS NULL OR g.created_at <= $8)
@@ -723,7 +726,7 @@ impl Database {
                     'client'::TEXT AS source,
                     c.event_type,
                     c.created_at,
-                    c.user_login,
+                    COALESCE(ica.canonical_login, c.user_login) AS user_login,
                     r.full_name AS repo_name,
                     c.branch,
                     c.status,
@@ -733,11 +736,14 @@ impl Database {
                     ) AS details
                 FROM client_events c
                 LEFT JOIN repos r ON c.repo_id = r.id
+                LEFT JOIN identity_aliases ica
+                  ON ica.alias_login = c.user_login
+                 AND ($1::uuid IS NULL OR ica.org_id = $1::uuid)
                 WHERE ($1::uuid IS NULL OR c.org_id = $1::uuid)
                   AND ($2::uuid IS NULL OR c.repo_id = $2::uuid)
                   AND ($3::text IS NULL OR $3 = 'client')
                   AND ($4::text IS NULL OR c.event_type = $4)
-                  AND ($5::text IS NULL OR c.user_login = $5)
+                  AND ($5::text IS NULL OR c.user_login = $5 OR COALESCE(ica.canonical_login, c.user_login) = $5)
                   AND ($6::text IS NULL OR c.branch = $6)
                   AND ($7::timestamptz IS NULL OR c.created_at >= $7)
                   AND ($8::timestamptz IS NULL OR c.created_at <= $8)
@@ -1645,6 +1651,50 @@ impl Database {
         Ok(count)
     }
 
+    pub async fn get_daily_activity(
+        &self,
+        org_id: Option<&str>,
+        days: i64,
+    ) -> Result<Vec<DailyActivityPoint>, DbError> {
+        let rows = sqlx::query(
+            r#"
+            WITH series AS (
+              SELECT generate_series(
+                (date_trunc('day', NOW() AT TIME ZONE 'UTC') - (($1::int - 1) * INTERVAL '1 day')),
+                date_trunc('day', NOW() AT TIME ZONE 'UTC'),
+                INTERVAL '1 day'
+              )::date AS day_utc
+            )
+            SELECT
+              to_char(s.day_utc, 'YYYY-MM-DD') AS day,
+              COALESCE(SUM(CASE WHEN ce.event_type = 'commit' THEN 1 ELSE 0 END), 0)::bigint AS commits,
+              COALESCE(SUM(CASE WHEN ce.event_type = 'successful_push' THEN 1 ELSE 0 END), 0)::bigint AS pushes
+            FROM series s
+            LEFT JOIN client_events ce
+              ON (ce.created_at AT TIME ZONE 'UTC')::date = s.day_utc
+             AND ($2::uuid IS NULL OR ce.org_id = $2::uuid)
+            GROUP BY s.day_utc
+            ORDER BY s.day_utc DESC
+            "#,
+        )
+        .bind(days as i32)
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let points = rows
+            .into_iter()
+            .map(|row| DailyActivityPoint {
+                day: row.get("day"),
+                commits: row.get("commits"),
+                pushes: row.get("pushes"),
+            })
+            .collect();
+
+        Ok(points)
+    }
+
     // ========================================================================
     // POLICIES
     // ========================================================================
@@ -2172,7 +2222,7 @@ impl Database {
 
     pub async fn get_noncompliance_signals(
         &self,
-        org_name: Option<&str>,
+        org_id: Option<&str>,
         confidence: Option<&str>,
         status: Option<&str>,
         signal_type: Option<&str>,
@@ -2183,8 +2233,8 @@ impl Database {
         let mut conditions = Vec::new();
         let mut param_count = 1;
 
-        if org_name.is_some() {
-            conditions.push(format!("ns.org_id = (SELECT id FROM orgs WHERE login = ${})", param_count));
+        if org_id.is_some() {
+            conditions.push(format!("ns.org_id = ${}::uuid", param_count));
             param_count += 1;
         }
 
@@ -2218,7 +2268,7 @@ impl Database {
         
         let mut count_sql = sqlx::query(&count_query);
         
-        if let Some(org) = org_name {
+        if let Some(org) = org_id {
             count_sql = count_sql.bind(org);
         }
         if let Some(c) = confidence {
@@ -2261,7 +2311,7 @@ impl Database {
 
         let mut data_sql = sqlx::query(&data_query);
         
-        if let Some(org) = org_name {
+        if let Some(org) = org_id {
             data_sql = data_sql.bind(org);
         }
         if let Some(c) = confidence {
@@ -3300,6 +3350,233 @@ impl Database {
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
         Ok(row.map(|r| (r.get("org_id"), r.get("user_login"))))
+    }
+
+    // ========================================================================
+    // GDPR — T2 (art. 17 erasure, art. 20 export, TTL cleanup)
+    // ========================================================================
+
+    /// Register GDPR erasure request for a user.
+    /// Audit tables are append-only, so this records intent and returns scoped counts only.
+    /// Returns (client_events_matched, github_events_matched).
+    pub async fn erase_user_data(
+        &self,
+        user_login: &str,
+        org_id: Option<&str>,
+    ) -> Result<(i64, i64), DbError> {
+        let client_count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM client_events
+            WHERE user_login = $1
+              AND ($2::uuid IS NULL OR org_id = $2::uuid)
+            "#,
+        )
+        .bind(user_login)
+        .bind(org_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let github_count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM github_events
+            WHERE actor_login = $1
+              AND ($2::uuid IS NULL OR org_id = $2::uuid)
+            "#,
+        )
+        .bind(user_login)
+        .bind(org_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        // Only record erasure intent if there is data in the visible scope.
+        if client_count > 0 || github_count > 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO user_pseudonyms (user_login, erased_at)
+                VALUES ($1, NOW())
+                ON CONFLICT (user_login) DO UPDATE SET erased_at = NOW()
+                "#,
+            )
+            .bind(user_login)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        }
+
+        Ok((client_count, github_count))
+    }
+
+    /// Export all events for a user (GDPR art. 20 data portability).
+    pub async fn export_user_data(
+        &self,
+        user_login: &str,
+        org_id: Option<&str>,
+    ) -> Result<Vec<CombinedEvent>, DbError> {
+        let filter = EventFilter {
+            user_login: Some(user_login.to_string()),
+            org_id: org_id.map(str::to_string),
+            limit: 50_000,
+            ..Default::default()
+        };
+        self.get_combined_events(&filter).await
+    }
+
+    /// Delete client session rows older than `retention_days` days.
+    /// Audit events remain append-only by design.
+    /// Returns number of rows deleted.
+    pub async fn delete_old_events(&self, retention_days: i64) -> Result<i64, DbError> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM client_sessions
+            WHERE last_seen_at < NOW() - ($1::bigint * INTERVAL '1 day')
+            "#,
+        )
+        .bind(retention_days)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(result.rows_affected() as i64)
+    }
+
+    // ========================================================================
+    // CLIENT SESSIONS — T3.A (heartbeat / last_seen)
+    // ========================================================================
+
+    /// Upsert client session — called on every inbound event + heartbeat.
+    pub async fn upsert_client_session(
+        &self,
+        client_id: &str,
+        org_id: Option<&str>,
+        device_metadata: &serde_json::Value,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            r#"
+            INSERT INTO client_sessions (client_id, org_id, last_seen_at, device_metadata)
+            VALUES ($1, $2::uuid, NOW(), $3::jsonb)
+            ON CONFLICT (client_id) DO UPDATE SET
+                last_seen_at    = NOW(),
+                device_metadata = EXCLUDED.device_metadata,
+                org_id          = COALESCE(EXCLUDED.org_id, client_sessions.org_id)
+            "#,
+        )
+        .bind(client_id)
+        .bind(org_id)
+        .bind(device_metadata.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// List client sessions (for GET /clients), scoped by org.
+    pub async fn get_client_sessions(
+        &self,
+        org_id: Option<&str>,
+    ) -> Result<Vec<ClientSession>, DbError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                client_id,
+                org_id::text,
+                EXTRACT(EPOCH FROM last_seen_at)::bigint * 1000 AS last_seen_ms,
+                COALESCE(device_metadata, '{}')::text            AS device_metadata,
+                EXTRACT(EPOCH FROM created_at)::bigint  * 1000  AS created_at_ms
+            FROM client_sessions
+            WHERE ($1::uuid IS NULL OR org_id = $1::uuid)
+            ORDER BY last_seen_at DESC
+            LIMIT 500
+            "#,
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let sessions = rows
+            .iter()
+            .map(|r| {
+                let last_seen_ms: i64 = r.get("last_seen_ms");
+                ClientSession {
+                    client_id: r.get("client_id"),
+                    org_id: r.get("org_id"),
+                    last_seen_at: last_seen_ms,
+                    device_metadata: serde_json::from_str(
+                        r.get::<&str, _>("device_metadata"),
+                    )
+                    .unwrap_or_default(),
+                    created_at: r.get("created_at_ms"),
+                    is_active: last_seen_ms > (now_ms - 86_400_000), // active = seen in last 24h
+                }
+            })
+            .collect();
+
+        Ok(sessions)
+    }
+
+    // ========================================================================
+    // IDENTITY ALIASES — T3.B
+    // ========================================================================
+
+    /// Map alias_login → canonical_login (idempotent on alias conflict).
+    /// Returns true if newly created, false if alias already mapped.
+    pub async fn create_identity_alias(
+        &self,
+        canonical: &str,
+        alias: &str,
+        org_id: Option<&str>,
+    ) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO identity_aliases (canonical_login, alias_login, org_id)
+            VALUES ($1, $2, $3::uuid)
+            ON CONFLICT (alias_login) DO NOTHING
+            "#,
+        )
+        .bind(canonical)
+        .bind(alias)
+        .bind(org_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// List identity aliases, optionally scoped by org.
+    pub async fn list_identity_aliases(
+        &self,
+        org_id: Option<&str>,
+    ) -> Result<Vec<IdentityAlias>, DbError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT canonical_login, alias_login, org_id::text,
+                   EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms
+            FROM identity_aliases
+            WHERE ($1::uuid IS NULL OR org_id = $1::uuid)
+            ORDER BY canonical_login, alias_login
+            "#,
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|r| IdentityAlias {
+                canonical_login: r.get("canonical_login"),
+                alias_login: r.get("alias_login"),
+                org_id: r.get("org_id"),
+                created_at: r.get("created_at_ms"),
+            })
+            .collect())
     }
 }
 

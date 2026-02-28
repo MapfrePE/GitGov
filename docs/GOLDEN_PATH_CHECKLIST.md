@@ -65,6 +65,38 @@ API_KEY="TU_API_KEY_ADMIN" JENKINS_SECRET="tu_secreto" ./jenkins_integration_tes
 
 ---
 
+## E. Diagnóstico de Topología Local (anti split-brain)
+
+Antes de cualquier sesión de desarrollo, verifica que no haya dos servidores
+compitiendo en los puertos 3000/3001:
+
+```powershell
+# Desde la raíz del repo
+.\scripts\check_local_topology.ps1
+```
+
+**Salida esperada (estado limpio):**
+```
+[OK] Solo un server activo en 3000. Sin riesgo de split-brain.
+```
+
+**Señal de alerta:**
+```
+[WARN] Procesos en AMBOS puertos 3000 y 3001.
+       Riesgo de SPLIT-BRAIN ...
+```
+
+| Puerto | Rol canónico |
+|--------|-------------|
+| `127.0.0.1:3000` | Server local dev (`cargo run`) |
+| `127.0.0.1:3001` | Server Docker / alternativo |
+
+> Si aparece `[WARN]`, detén el proceso incorrecto antes de usar el dashboard.
+> El script también hace `GET /health` en cada puerto para confirmar que el
+> proceso que escucha es realmente un server GitGov.
+
+---
+
 ## Regla Operativa
 
 Si un cambio rompe cualquiera de los checks A/B/C, **se considera regresión del core** y debe corregirse antes de continuar con nuevas features.

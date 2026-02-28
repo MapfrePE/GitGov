@@ -1,5 +1,5 @@
 import { Fragment, useState, useCallback } from 'react'
-import { GitCommit, X, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react'
+import { GitCommit, X, ChevronDown, ChevronRight, ChevronLeft, ExternalLink } from 'lucide-react'
 import { Badge } from '@/components/shared/Badge'
 import { Spinner } from '@/components/shared/Spinner'
 import { useControlPlaneStore } from '@/store/useControlPlaneStore'
@@ -26,6 +26,7 @@ export function RecentCommitsTable() {
     prMergeEvidence,
     jiraTicketDetails, jiraTicketDetailLoading,
     loadJiraTicketDetail,
+    logsPage, logsPageSize, setLogsPage,
   } = useControlPlaneStore()
 
   const [expandedCommitRows, setExpandedCommitRows] = useState<Record<string, boolean>>({})
@@ -38,7 +39,11 @@ export function RecentCommitsTable() {
     if (ticketId) void loadJiraTicketDetail(ticketId)
   }, [loadJiraTicketDetail])
 
-  const dashboardRows: DashboardRow[] = buildDashboardRows(serverLogs).slice(0, 10)
+  const allRows: DashboardRow[] = buildDashboardRows(serverLogs)
+  const totalRows = allRows.length
+  const totalPages = Math.max(1, Math.ceil(totalRows / logsPageSize))
+  const safePage = Math.min(logsPage, totalPages - 1)
+  const dashboardRows = allRows.slice(safePage * logsPageSize, (safePage + 1) * logsPageSize)
 
   const pipelineByCommitSha = new Map(
     jenkinsCorrelations.filter((c) => c.pipeline && c.commit_sha).map((c) => [c.commit_sha.toLowerCase(), c.pipeline!]),
@@ -89,10 +94,11 @@ export function RecentCommitsTable() {
 
   return (
     <div className="glass-panel p-5">
-      <div className="card-header mb-4">
+      <div className="card-header mb-1">
         <GitCommit size={11} strokeWidth={1.5} className="text-surface-400" />
         Commits Recientes
       </div>
+      <p className="text-[10px] text-surface-600 mb-4">Mostrando ventana reciente, no histórico completo</p>
 
       {/* Ticket detail panel */}
       {selectedTicketId && (
@@ -194,6 +200,36 @@ export function RecentCommitsTable() {
           </tbody>
         </table>
       </div>
+
+      {/* Pagination controls */}
+      {totalRows > 0 && (
+        <div className="flex items-center justify-between mt-3 pt-3 border-t border-white/4">
+          <span className="text-[10px] text-surface-600">
+            Página {safePage + 1} de {totalPages}
+            <span className="ml-1 text-surface-700">({totalRows} total)</span>
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={safePage === 0}
+              onClick={() => setLogsPage(safePage - 1)}
+              className="flex items-center gap-0.5 px-2 py-1 rounded text-[10px] text-surface-400 hover:text-surface-200 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              <ChevronLeft size={11} />
+              Prev
+            </button>
+            <button
+              type="button"
+              disabled={safePage >= totalPages - 1}
+              onClick={() => setLogsPage(safePage + 1)}
+              className="flex items-center gap-0.5 px-2 py-1 rounded text-[10px] text-surface-400 hover:text-surface-200 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              Next
+              <ChevronRight size={11} />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

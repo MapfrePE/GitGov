@@ -8,7 +8,18 @@
       "mcp__tailwindcss__get_tailwind_colors",
       "Bash(npm run lint)",
       "Bash(export PATH:*)",
-      "Bash(export PATH=\"/c/Program Files/nodejs:/usr/bin:$PATH\")"
+      "Bash(export PATH=\"/c/Program Files/nodejs:/usr/bin:$PATH\")",
+      "Bash(bash smoke_contract.sh)",
+      "Bash(Get-Item \"c:\\\\Users\\\\PC\\\\Desktop\\\\GitGov\\\\gitgov\\\\gitgov-server\\\\src\\\\handlers.rs\")",
+      "Bash(Select-Object Name, Length)",
+      "Bash(Get-Item \"c:\\\\Users\\\\PC\\\\Desktop\\\\GitGov\\\\gitgov\\\\gitgov-server\\\\src\\\\models.rs\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\PC\\\\Desktop\\\\GitGov\\\\scripts\\\\check_local_topology.ps1\")",
+      "Bash(tee:*)",
+      "Read(//c/tmp/**)",
+      "Bash(bash -n:*)",
+      "Bash(bash.exe -n /c/Users/PC/Desktop/GitGov/gitgov/gitgov-server/tests/smoke_contract.sh)",
+      "Bash(bash --version)",
+      "Bash(Get-Content:*)"
     ]
   }
 }

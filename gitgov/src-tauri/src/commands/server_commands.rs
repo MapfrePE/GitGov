@@ -1,9 +1,9 @@
 use crate::control_plane::{
     ApiKeyInfo, AuditFilter, CombinedEvent, CommitPipelineCorrelation, ControlPlaneClient,
-    EventPayload, ExportLogEntry, ExportResponse, JenkinsCorrelationFilter, JiraCorrelateRequest,
-    JiraCorrelateResponse, JiraTicketDetailResponse, MeResponse, PrMergeEvidenceEntry,
-    PrMergeEvidenceFilter, RevokeApiKeyResponse, ServerConfig, ServerStats, TicketCoverageQuery,
-    TicketCoverageResponse,
+    DailyActivityFilter, DailyActivityPoint, EventPayload, ExportLogEntry, ExportResponse,
+    JenkinsCorrelationFilter, JiraCorrelateRequest, JiraCorrelateResponse, JiraTicketDetailResponse,
+    MeResponse, PrMergeEvidenceEntry, PrMergeEvidenceFilter, RevokeApiKeyResponse, ServerConfig,
+    ServerStats, TicketCoverageQuery, TicketCoverageResponse,
 };
 use crate::outbox::Outbox;
 use serde::{Deserialize, Serialize};
@@ -178,6 +178,21 @@ pub fn cmd_server_get_stats(config: ServerConnectionConfig) -> Result<ServerStat
 
     client
         .get_stats()
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_get_daily_activity(
+    config: ServerConnectionConfig,
+    filter: DailyActivityFilter,
+) -> Result<Vec<DailyActivityPoint>, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .get_daily_activity(&filter)
         .map_err(|e| to_command_error(e, "SERVER_ERROR"))
 }
 

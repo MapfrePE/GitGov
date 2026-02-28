@@ -48,6 +48,12 @@ interface ServerStats {
   active_repos: number
 }
 
+interface DailyActivityPoint {
+  day: string
+  commits: number
+  pushes: number
+}
+
 interface CommitPipelineRun {
   pipeline_event_id: string
   pipeline_id: string
@@ -87,7 +93,7 @@ interface PrMergeEvidenceEntry {
   created_at: number
 }
 
-interface TicketCoverageItem extends Record<string, unknown> {}
+type TicketCoverageItem = Record<string, unknown>
 
 interface TicketCoverageStats {
   org: string
@@ -183,8 +189,11 @@ interface ControlPlaneState {
   serverConfig: ServerConfig | null
   serverStats: ServerStats | null
   serverLogs: CombinedEvent[]
+  logsPage: number
+  logsPageSize: number
   jenkinsCorrelations: CommitPipelineCorrelation[]
   prMergeEvidence: PrMergeEvidenceEntry[]
+  dailyActivity: DailyActivityPoint[]
   ticketCoverage: TicketCoverageStats | null
   jiraCoverageFilters: JiraCoverageFilters
   jiraTicketDetails: Record<string, JiraTicketDetail | null>
@@ -206,7 +215,9 @@ interface ControlPlaneActions {
   checkConnection: () => Promise<void>
   refreshDashboardData: (params?: { logLimit?: number }) => Promise<void>
   loadStats: () => Promise<void>
-  loadLogs: (limit?: number) => Promise<void>
+  loadDailyActivity: (days?: number) => Promise<void>
+  loadLogs: (limit?: number, offset?: number) => Promise<void>
+  setLogsPage: (page: number) => void
   loadJenkinsCorrelations: (limit?: number) => Promise<void>
   loadPrMergeEvidence: (limit?: number) => Promise<void>
   loadTicketCoverage: (params?: { hours?: number; repo_full_name?: string; branch?: string; org_name?: string }) => Promise<void>
@@ -338,8 +349,11 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   serverConfig: null,
   serverStats: null,
   serverLogs: [],
+  logsPage: 0,
+  logsPageSize: 10,
   jenkinsCorrelations: [],
   prMergeEvidence: [],
+  dailyActivity: [],
   ticketCoverage: null,
   jiraCoverageFilters: readStoredJiraCoverageFilters(),
   jiraTicketDetails: {},
@@ -395,6 +409,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     try {
       await Promise.all([
         get().loadStats(),
+        get().loadDailyActivity(14),
         get().loadLogs(params?.logLimit ?? 50),
         get().loadJenkinsCorrelations(50),
         get().loadPrMergeEvidence(200),
@@ -421,19 +436,37 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     }
   },
 
-  loadLogs: async (limit = 100) => {
+  loadDailyActivity: async (days = 14) => {
+    const { serverConfig } = get()
+    if (!serverConfig) return
+
+    const safeDays = Number.isFinite(days) ? Math.max(1, Math.min(90, Math.floor(days))) : 14
+    try {
+      const points = await tauriInvoke<DailyActivityPoint[]>('cmd_server_get_daily_activity', {
+        config: serverConfig,
+        filter: { days: safeDays },
+      })
+      set({ dailyActivity: points })
+    } catch {
+      // Non-fatal: this widget should not break dashboard core flow.
+    }
+  },
+
+  loadLogs: async (limit = 100, offset = 0) => {
     const { serverConfig } = get()
     if (!serverConfig) return
     try {
       const logs = await tauriInvoke<CombinedEvent[]>('cmd_server_get_logs', {
         config: serverConfig,
-        filter: { limit, offset: 0 },
+        filter: { limit, offset },
       })
       set({ serverLogs: logs })
     } catch (e) {
       set({ error: parseCommandError(String(e)).message })
     }
   },
+
+  setLogsPage: (page) => set({ logsPage: page }),
 
   loadJenkinsCorrelations: async (limit = 50) => {
     const { serverConfig } = get()
@@ -666,8 +699,10 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       isConnected: false,
       serverStats: null,
       serverLogs: [],
+      logsPage: 0,
       jenkinsCorrelations: [],
       prMergeEvidence: [],
+      dailyActivity: [],
       ticketCoverage: null,
       jiraCoverageFilters: readStoredJiraCoverageFilters(),
       jiraTicketDetails: {},

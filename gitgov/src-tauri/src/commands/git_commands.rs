@@ -57,6 +57,16 @@ fn repo_workdir(repo: &Repository) -> Result<&std::path::Path, String> {
         .ok_or_else(|| to_command_error("Repositorio bare no soportado", "GIT_ERROR"))
 }
 
+fn device_metadata() -> serde_json::Value {
+    serde_json::json!({
+        "hostname": std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .ok(),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+    })
+}
+
 fn normalize_ignore_rule(rule: &str) -> Option<String> {
     let trimmed = rule.trim();
     if trimmed.is_empty() {
@@ -359,7 +369,8 @@ pub fn cmd_commit(
             )
             .with_commit_sha(commit_hash.clone())
             .with_metadata(serde_json::json!({
-                "commit_message": message.clone()
+                "commit_message": message.clone(),
+                "device": device_metadata()
             }))
             .with_user_name(author_name);
 
@@ -376,7 +387,8 @@ pub fn cmd_commit(
                 AuditStatus::Failed,
             )
             .with_metadata(serde_json::json!({
-                "commit_message": message.clone()
+                "commit_message": message.clone(),
+                "device": device_metadata()
             }))
             .with_reason(e.to_string());
 
@@ -405,7 +417,7 @@ pub fn cmd_push(
         developer_login.clone(),
         Some(branch.clone()),
         AuditStatus::Success,
-    );
+    ).with_metadata(serde_json::json!({"device": device_metadata()}));
     let attempt_uuid = outbox.add(attempt_event).ok();
 
     let config = load_config(&repo_path);
@@ -419,7 +431,8 @@ pub fn cmd_push(
                     Some(branch.clone()),
                     AuditStatus::Blocked,
                 )
-                .with_reason(format!("Rama protegida: {}", branch));
+                .with_reason(format!("Rama protegida: {}", branch))
+                .with_metadata(serde_json::json!({"device": device_metadata()}));
                 let _ = outbox.add(blocked_event);
             }
 
@@ -470,7 +483,7 @@ pub fn cmd_push(
                 developer_login.clone(),
                 Some(branch.clone()),
                 AuditStatus::Success,
-            );
+            ).with_metadata(serde_json::json!({"device": device_metadata()}));
             let _ = outbox.add(success_event);
 
             let entry = AuditLogEntry {
@@ -505,7 +518,8 @@ pub fn cmd_push(
                 Some(branch.clone()),
                 status.clone(),
             )
-            .with_reason(e.to_string());
+            .with_reason(e.to_string())
+            .with_metadata(serde_json::json!({"device": device_metadata()}));
             let _ = outbox.add(event);
 
             let entry = AuditLogEntry {

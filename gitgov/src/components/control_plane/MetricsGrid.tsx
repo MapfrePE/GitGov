@@ -1,4 +1,4 @@
-import { TrendingUp, Activity, AlertTriangle, Users } from 'lucide-react'
+import { TrendingUp, Activity, AlertTriangle, Users, Info } from 'lucide-react'
 import { Bar } from './dashboard-helpers'
 
 interface MetricsGridProps {
@@ -45,6 +45,7 @@ export function MetricsGrid({
         <div className="flex items-center gap-1.5">
           <Activity size={12} strokeWidth={1.5} className="text-success-400" />
           <span className="card-header">Pushes Hoy</span>
+          <span title="métrica diaria UTC" className="inline-flex"><Info size={10} strokeWidth={1.5} className="text-surface-600" /></span>
         </div>
         <div className="mt-4 space-y-2">
           <div className="flex items-end justify-between gap-3">

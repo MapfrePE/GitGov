@@ -437,6 +437,29 @@ async fn main() {
     
     let worker_id_for_log = worker_id_clone;
 
+    // TTL cleanup task — prunes stale client_sessions rows older than DATA_RETENTION_DAYS (default 365)
+    let db_ttl = Arc::clone(&db);
+    let retention_days = std::env::var("DATA_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(365);
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(tokio::time::Duration::from_secs(86_400)); // 24 h
+        interval.tick().await; // skip first tick (fires immediately)
+        loop {
+            interval.tick().await;
+            match db_ttl.delete_old_events(retention_days).await {
+                Ok(count) => tracing::info!(
+                    deleted = count,
+                    retention_days = retention_days,
+                    "TTL cleanup: deleted stale client sessions"
+                ),
+                Err(e) => tracing::warn!(error = %e, "TTL cleanup failed"),
+            }
+        }
+    });
+
     let events_rate_limit = Arc::new(InMemoryRateLimiter::new(
         "events",
         parse_u32_env("GITGOV_RATE_LIMIT_EVENTS_PER_MIN", 240),
@@ -488,6 +511,10 @@ async fn main() {
             rate_limit_middleware,
         )))
         .route("/stats", get(handlers::get_stats).layer(middleware::from_fn_with_state(
+            Arc::clone(&admin_rate_limit),
+            rate_limit_middleware,
+        )))
+        .route("/stats/daily", get(handlers::get_daily_activity).layer(middleware::from_fn_with_state(
             Arc::clone(&admin_rate_limit),
             rate_limit_middleware,
         )))
@@ -559,6 +586,13 @@ async fn main() {
         .route("/jobs/metrics", get(handlers::get_job_metrics))
         .route("/jobs/dead", get(handlers::get_dead_jobs))
         .route("/jobs/{job_id}/retry", post(handlers::retry_dead_job))
+        // GDPR — T2
+        .route("/users/{login}/erase", post(handlers::erase_user))
+        .route("/users/{login}/export", get(handlers::export_user))
+        // Client sessions — T3.A
+        .route("/clients", get(handlers::get_clients))
+        // Identity aliases — T3.B
+        .route("/identities/aliases", post(handlers::create_identity_alias).get(handlers::list_identity_aliases))
         .layer(middleware::from_fn_with_state(Arc::clone(&db), auth::auth_middleware));
 
     let app = Router::new()
@@ -587,6 +621,7 @@ async fn main() {
     tracing::info!("  GET  /logs                      - Query events (auth, dev: own only)");
     tracing::info!("  GET  /pr-merges                 - PR merge evidence (admin)");
     tracing::info!("  GET  /stats                     - Statistics (admin)");
+    tracing::info!("  GET  /stats/daily               - Daily commits/pushes series (admin)");
     tracing::info!("  GET  /dashboard                 - Dashboard (admin)");
     tracing::info!("  POST /integrations/jenkins      - Jenkins pipeline ingest (admin)");
     tracing::info!("  GET  /integrations/jenkins/status - Jenkins integration health (admin)");

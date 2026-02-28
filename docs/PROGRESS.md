@@ -1,5 +1,121 @@
 # GitGov - Registro de Progreso
 
+## Actualización Reciente (2026-02-28) — Scope Helpers Unificados (logs/signals/aliases)
+
+### Correcciones aplicadas
+- **Helper de scope unificado** en backend:
+  - Se añadieron `OrgScopeError`, `org_scope_status`, `check_org_scope_match` y `resolve_and_check_org_scope`.
+  - Se eliminó duplicación de lógica de scope en handlers.
+- **`GET /signals` corregido para org-scoped keys**:
+  - Ahora resuelve y aplica `org_id` efectivo (incluye caso admin org-scoped sin `org_name` explícito).
+  - Evita exposición cross-org por omisión de filtro.
+- **`GET /logs` ahora usa el helper común**:
+  - Misma semántica de 403/404/500 según scope y resolución de org.
+  - Preferencia por `org_id` (UUID) para evitar lookup redundante por `org_name`.
+- **`POST /identities/aliases` refactorizado**:
+  - Reutiliza helper de scope con regla `org_name` obligatorio para admin global.
+  - Mantiene respuestas contractuales: 400/403/404.
+- **DB signals filtrado por UUID**:
+  - `get_noncompliance_signals` pasó de `org_name` a `org_id`, con condición SQL `ns.org_id = $n::uuid`.
+
+### Archivos principales
+- `gitgov/gitgov-server/src/handlers.rs`
+- `gitgov/gitgov-server/src/db.rs`
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` → `52 passed; 0 failed`
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/RecentCommitsTable.tsx src/components/control_plane/MetricsGrid.tsx src/components/control_plane/ServerDashboard.tsx` → sin errores
+- `cd gitgov/gitgov-server && cargo clippy` → warnings preexistentes (sin errores de compilación)
+
+## Actualización Reciente (2026-02-28) — Hardening de GDPR / Heartbeat / Identity Aliases
+
+### Correcciones críticas aplicadas
+- **Heartbeat corregido**: `heartbeat` ya no se deserializa como `attempt_push`.
+  - Se añadió `ClientEventType::Heartbeat` en backend para preservar el tipo real.
+- **Identity aliasing funcional en `/logs`**:
+  - `get_combined_events` ahora proyecta `user_login` canónico vía `identity_aliases`.
+  - Filtrar por `user_login=<canonical>` incluye eventos de aliases del mismo org.
+- **Scope enforcement en aliases (multi-tenant)**:
+  - `POST /identities/aliases` ahora valida org explícitamente:
+    - key org-scoped no puede crear alias para otra org (`403`),
+    - `org_name` inexistente devuelve `404`,
+    - admin global debe enviar `org_name` (sin filas globales implícitas).
+- **Scope enforcement en GDPR export/erase**:
+  - `GET /users/{login}/export` y `POST /users/{login}/erase` ahora aplican `auth_user.org_id` cuando la key es org-scoped.
+  - Si el usuario no existe en el scope visible, responden `404`.
+- **Append-only respetado en GDPR/TTL**:
+  - Se eliminó la lógica que intentaba `UPDATE/DELETE` sobre `client_events`/`github_events`.
+  - `erase_user_data` ahora registra la solicitud y retorna conteos scoped.
+  - El job TTL ahora limpia `client_sessions` antiguos (no eventos de auditoría append-only).
+- **Compatibilidad de señales/stats preservada**:
+  - Webhook push mantiene `event_type="push"` (y `forced` en payload), evitando romper SQL existente de métricas/detección.
+
+### Archivos principales
+- `gitgov/gitgov-server/src/models.rs`
+- `gitgov/gitgov-server/src/db.rs`
+- `gitgov/gitgov-server/src/handlers.rs`
+- `gitgov/gitgov-server/src/main.rs`
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` → `38 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo check` → OK
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov/gitgov-server/tests && smoke_contract.sh` → `17 passed; 0 failed`
+- Verificación empírica adicional:
+  - heartbeat visible como `event_type=heartbeat` (sin contaminar `attempt_push`)
+  - alias canónico agrega eventos de alias en `/logs`
+  - bloqueo de cross-org en `POST /identities/aliases`
+  - `GET /users/{login}/export` con key scoped fuera de org → `404`
+
+## Actualización Reciente (2026-02-28) — Auditoría por Día (commits/pushes) en Dashboard
+
+### Qué se implementó
+- Endpoint backend nuevo: `GET /stats/daily?days=N` (admin-only, con scope por `org_id` de la API key).
+- Serie diaria en UTC (append-safe) de `commit` y `successful_push` desde `client_events`, con `generate_series` para devolver días sin actividad en `0`.
+- Cableado end-to-end en Desktop/Tauri/Frontend:
+  - comando Tauri `cmd_server_get_daily_activity`,
+  - estado `dailyActivity` en `useControlPlaneStore`,
+  - refresh del dashboard ahora carga los últimos `14` días,
+  - widget visual `Actividad diaria (UTC)` con barras `commits` vs `pushes`.
+- Publicación de ruta en server router:
+  - `GET /stats/daily` con el mismo rate-limit admin que `/stats`.
+
+### Archivos
+- `gitgov/gitgov-server/src/models.rs`
+  - `DailyActivityPoint`, `DailyActivityQuery`
+- `gitgov/gitgov-server/src/db.rs`
+  - `get_daily_activity(org_id, days)`
+- `gitgov/gitgov-server/src/handlers.rs`
+  - `get_daily_activity` (admin-only, clamp `days` 1..90)
+- `gitgov/gitgov-server/src/main.rs`
+  - ruta `GET /stats/daily`
+- `gitgov/src-tauri/src/control_plane/server.rs`
+  - `DailyActivityPoint`, `DailyActivityFilter`, `get_daily_activity()`
+- `gitgov/src-tauri/src/commands/server_commands.rs`
+  - `cmd_server_get_daily_activity`
+- `gitgov/src-tauri/src/lib.rs`
+  - registro de comando en `generate_handler!`
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - estado `dailyActivity`, acción `loadDailyActivity()`, refresh integrado
+- `gitgov/src/components/control_plane/DailyActivityWidget.tsx`
+  - widget nuevo de actividad diaria
+- `gitgov/src/components/control_plane/ServerDashboard.tsx`
+  - integración del widget en el layout principal
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` → `38 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo check` → OK
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ServerDashboard.tsx src/components/control_plane/DailyActivityWidget.tsx` → 0 errores
+
+### Checklist empírico (Golden Path)
+- `POST /events` con `Authorization: Bearer` → aceptado (`accepted` con UUID nuevo, `errors=[]`)
+- `GET /stats` con Bearer → 200 y shape válido
+- `GET /logs?limit=5&offset=0` con Bearer → 200 y `events`
+- `GET /stats/daily?days=14` con Bearer → 200 y 14 puntos (`YYYY-MM-DD`)
+- `gitgov/gitgov-server/tests/smoke_contract.sh` → `17 passed, 0 failed`
+
 ## Actualización Reciente (2026-02-27) — Badge de Aprobaciones en Dashboard + Cierre Golden Path
 
 ### Qué se implementó

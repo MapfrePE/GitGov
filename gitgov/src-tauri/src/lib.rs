@@ -94,6 +94,47 @@ pub fn run() {
     let outbox_clone = Arc::clone(&outbox);
     let worker_handle = outbox_clone.start_background_flush(60);
 
+    // Heartbeat timer — fires every 10 min to track last_seen on the Control Plane.
+    // Reads current_user.json from disk (same location as auth_commands.rs uses).
+    let outbox_hb = Arc::clone(&outbox);
+    std::thread::spawn(move || {
+        const HEARTBEAT_INTERVAL: std::time::Duration =
+            std::time::Duration::from_secs(600); // 10 minutes
+        loop {
+            std::thread::sleep(HEARTBEAT_INTERVAL);
+            let user_file = dirs::data_local_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("gitgov")
+                .join("current_user.json");
+            let login_opt = std::fs::read_to_string(&user_file)
+                .ok()
+                .and_then(|json| {
+                    serde_json::from_str::<models::AuthenticatedUser>(&json)
+                        .ok()
+                        .map(|u| u.login)
+                });
+            if let Some(user_login) = login_opt {
+                let event = outbox::OutboxEvent::new(
+                    "heartbeat".to_string(),
+                    user_login.clone(),
+                    None,
+                    models::AuditStatus::Success,
+                )
+                .with_metadata(serde_json::json!({
+                    "device": {
+                        "hostname": std::env::var("COMPUTERNAME")
+                            .or_else(|_| std::env::var("HOSTNAME"))
+                            .ok(),
+                        "os": std::env::consts::OS,
+                        "arch": std::env::consts::ARCH,
+                    }
+                }));
+                let _ = outbox_hb.add(event);
+                tracing::debug!(user_login = %user_login, "Heartbeat event queued");
+            }
+        }
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -147,6 +188,7 @@ pub fn run() {
             commands::cmd_server_send_event,
             commands::cmd_server_get_logs,
             commands::cmd_server_get_stats,
+            commands::cmd_server_get_daily_activity,
             commands::cmd_server_get_jenkins_correlations,
             commands::cmd_server_get_pr_merges,
             commands::cmd_server_get_jira_ticket_coverage,
