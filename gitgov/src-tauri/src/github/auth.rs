@@ -217,7 +217,12 @@ pub fn save_token(username: &str, token: &str, expires_in: Option<i64>) -> Resul
     if keyring_result.is_ok() || file_result.is_ok() {
         Ok(())
     } else {
-        Err(keyring_result.unwrap_err())
+        match keyring_result {
+            Err(err) => Err(err),
+            Ok(_) => Err(AuthError::KeyringError(
+                "Failed to save token to keyring and local backup file".to_string(),
+            )),
+        }
     }
 }
 

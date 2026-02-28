@@ -22,6 +22,26 @@ pub struct Database {
     pool: PgPool,
 }
 
+pub struct NoncomplianceSignalsQuery<'a> {
+    pub org_id: Option<&'a str>,
+    pub confidence: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub signal_type: Option<&'a str>,
+    pub actor_login: Option<&'a str>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+pub struct UpsertOrgUserInput<'a> {
+    pub org_id: &'a str,
+    pub login: &'a str,
+    pub display_name: Option<&'a str>,
+    pub email: Option<&'a str>,
+    pub role: &'a str,
+    pub status: &'a str,
+    pub actor: &'a str,
+}
+
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self, DbError> {
         let pool = PgPoolOptions::new()
@@ -197,7 +217,7 @@ impl Database {
         .bind(&event.delivery_id)
         .bind(&event.event_type)
         .bind(&event.actor_login)
-        .bind(&event.actor_id)
+        .bind(event.actor_id)
         .bind(&event.ref_name)
         .bind(&event.ref_type)
         .bind(&event.before_sha)
@@ -962,7 +982,7 @@ impl Database {
         .bind(&event.commit_sha)
         .bind(&event.branch)
         .bind(&event.repo_full_name)
-        .bind(&event.duration_ms)
+        .bind(event.duration_ms)
         .bind(&event.triggered_by)
         .bind(&stages_json)
         .bind(&artifacts_json)
@@ -2222,38 +2242,32 @@ impl Database {
 
     pub async fn get_noncompliance_signals(
         &self,
-        org_id: Option<&str>,
-        confidence: Option<&str>,
-        status: Option<&str>,
-        signal_type: Option<&str>,
-        actor_login: Option<&str>,
-        limit: i64,
-        offset: i64,
+        filter: &NoncomplianceSignalsQuery<'_>,
     ) -> Result<(Vec<NoncomplianceSignal>, i64), DbError> {
         let mut conditions = Vec::new();
         let mut param_count = 1;
 
-        if org_id.is_some() {
+        if filter.org_id.is_some() {
             conditions.push(format!("ns.org_id = ${}::uuid", param_count));
             param_count += 1;
         }
 
-        if confidence.is_some() {
+        if filter.confidence.is_some() {
             conditions.push(format!("ns.confidence = ${}", param_count));
             param_count += 1;
         }
-        if status.is_some() {
+        if filter.status.is_some() {
             conditions.push(format!(
                 "COALESCE((SELECT sd.decision FROM signal_decisions sd WHERE sd.signal_id = ns.id ORDER BY sd.created_at DESC LIMIT 1), ns.status) = ${}",
                 param_count
             ));
             param_count += 1;
         }
-        if signal_type.is_some() {
+        if filter.signal_type.is_some() {
             conditions.push(format!("ns.signal_type = ${}", param_count));
             param_count += 1;
         }
-        if actor_login.is_some() {
+        if filter.actor_login.is_some() {
             conditions.push(format!("ns.actor_login = ${}", param_count));
             param_count += 1;
         }
@@ -2268,19 +2282,19 @@ impl Database {
         
         let mut count_sql = sqlx::query(&count_query);
         
-        if let Some(org) = org_id {
+        if let Some(org) = filter.org_id {
             count_sql = count_sql.bind(org);
         }
-        if let Some(c) = confidence {
+        if let Some(c) = filter.confidence {
             count_sql = count_sql.bind(c);
         }
-        if let Some(s) = status {
+        if let Some(s) = filter.status {
             count_sql = count_sql.bind(s);
         }
-        if let Some(st) = signal_type {
+        if let Some(st) = filter.signal_type {
             count_sql = count_sql.bind(st);
         }
-        if let Some(actor) = actor_login {
+        if let Some(actor) = filter.actor_login {
             count_sql = count_sql.bind(actor);
         }
 
@@ -2311,22 +2325,22 @@ impl Database {
 
         let mut data_sql = sqlx::query(&data_query);
         
-        if let Some(org) = org_id {
+        if let Some(org) = filter.org_id {
             data_sql = data_sql.bind(org);
         }
-        if let Some(c) = confidence {
+        if let Some(c) = filter.confidence {
             data_sql = data_sql.bind(c);
         }
-        if let Some(s) = status {
+        if let Some(s) = filter.status {
             data_sql = data_sql.bind(s);
         }
-        if let Some(st) = signal_type {
+        if let Some(st) = filter.signal_type {
             data_sql = data_sql.bind(st);
         }
-        if let Some(actor) = actor_login {
+        if let Some(actor) = filter.actor_login {
             data_sql = data_sql.bind(actor);
         }
-        data_sql = data_sql.bind(limit).bind(offset);
+        data_sql = data_sql.bind(filter.limit).bind(filter.offset);
 
         let rows = data_sql
             .fetch_all(&self.pool)
@@ -2379,7 +2393,7 @@ impl Database {
             VALUES ($1::uuid, $2::uuid, $3, $4, $5, NOW())
             "#,
         )
-        .bind(&uuid::Uuid::new_v4().to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
         .bind(signal_id)
         .bind(status)
         .bind(decided_by)
@@ -2557,7 +2571,7 @@ impl Database {
             ON CONFLICT DO NOTHING
             "#,
         )
-        .bind(&uuid::Uuid::new_v4().to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
         .bind(signal_id)
         .bind(confirmed_by)
         .bind(severity)
@@ -2654,8 +2668,8 @@ impl Database {
         .bind(&export.org_id)
         .bind(&export.exported_by)
         .bind(&export.export_type)
-        .bind(export.date_range_start.map(|t| chrono::DateTime::from_timestamp_millis(t)))
-        .bind(export.date_range_end.map(|t| chrono::DateTime::from_timestamp_millis(t)))
+        .bind(export.date_range_start.map(chrono::DateTime::from_timestamp_millis))
+        .bind(export.date_range_end.map(chrono::DateTime::from_timestamp_millis))
         .bind(&export.filters)
         .bind(export.record_count)
         .bind(&export.content_hash)
@@ -3601,13 +3615,7 @@ impl Database {
 
     pub async fn upsert_org_user(
         &self,
-        org_id: &str,
-        login: &str,
-        display_name: Option<&str>,
-        email: Option<&str>,
-        role: &str,
-        status: &str,
-        actor: &str,
+        input: &UpsertOrgUserInput<'_>,
     ) -> Result<(OrgUser, bool), DbError> {
         let existing_id = sqlx::query(
             r#"
@@ -3617,8 +3625,8 @@ impl Database {
               AND login = $2
             "#,
         )
-        .bind(org_id)
-        .bind(login)
+        .bind(input.org_id)
+        .bind(input.login)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?
@@ -3652,11 +3660,11 @@ impl Database {
                 "#,
             )
             .bind(&id)
-            .bind(display_name)
-            .bind(email)
-            .bind(role)
-            .bind(status)
-            .bind(actor)
+            .bind(input.display_name)
+            .bind(input.email)
+            .bind(input.role)
+            .bind(input.status)
+            .bind(input.actor)
             .fetch_one(&self.pool)
             .await
             .map_err(|e| DbError::DatabaseError(e.to_string()))?
@@ -3681,13 +3689,13 @@ impl Database {
                     EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
                 "#,
             )
-            .bind(org_id)
-            .bind(login)
-            .bind(display_name)
-            .bind(email)
-            .bind(role)
-            .bind(status)
-            .bind(actor)
+            .bind(input.org_id)
+            .bind(input.login)
+            .bind(input.display_name)
+            .bind(input.email)
+            .bind(input.role)
+            .bind(input.status)
+            .bind(input.actor)
             .fetch_one(&self.pool)
             .await
             .map_err(|e| DbError::DatabaseError(e.to_string()))?

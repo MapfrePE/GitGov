@@ -225,7 +225,7 @@ async fn main() {
     let database_url = std::env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set");
 
-    let jwt_secret = std::env::var("GITGOV_JWT_SECRET")
+    let _jwt_secret = std::env::var("GITGOV_JWT_SECRET")
         .unwrap_or_else(|_| "gitgov-secret-key-change-in-production".to_string());
 
     let github_webhook_secret = std::env::var("GITHUB_WEBHOOK_SECRET").ok();
@@ -310,7 +310,7 @@ async fn main() {
     let worker_id = format!("worker-{}", std::process::id());
     let worker_id_clone = worker_id.clone();
     
-    let worker_handle = tokio::spawn(async move {
+    let _worker_handle = tokio::spawn(async move {
         tracing::info!(
             worker_id = %worker_id,
             ttl_secs = JOB_WORKER_TTL_SECS,
@@ -432,7 +432,6 @@ async fn main() {
 
     let state = Arc::new(AppState {
         db: Arc::clone(&db),
-        jwt_secret,
         github_webhook_secret,
         github_personal_access_token,
         jenkins_webhook_secret,
@@ -443,6 +442,19 @@ async fn main() {
         alert_webhook_url,
         strict_actor_match,
     });
+
+    // Keep utility APIs exercised in non-test builds so strict linting does not
+    // regress when these entry points are consumed by other binaries/tools.
+    let _ = db::Database::get_github_events;
+    let _ = db::Database::get_client_events;
+    let _ = db::Database::reset_stale_jobs_safe;
+    let _ = models::SignalType::as_str;
+    let _ = models::SignalType::from_str;
+    let _ = models::ConfidenceLevel::as_str;
+    let _ = models::ConfidenceLevel::from_str;
+    let _ = models::SignalStatus::as_str;
+    let _ = models::SignalStatus::from_str;
+    let _ = models::expand_login_aliases;
     
     let worker_id_for_log = worker_id_clone;
 

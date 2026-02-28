@@ -1,5 +1,5 @@
 import { TrendingUp, Activity, AlertTriangle, Users, Info } from 'lucide-react'
-import { Bar } from './dashboard-helpers'
+import { Bar } from './Bar'
 
 interface MetricsGridProps {
   totalGithubEvents: number

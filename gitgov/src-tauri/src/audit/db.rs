@@ -169,6 +169,7 @@ impl AuditDatabase {
             .date_naive()
             .and_hms_opt(0, 0, 0)
             .unwrap()
+            .and_utc()
             .timestamp_millis();
         let week_start = (now - chrono::Duration::days(7)).timestamp_millis();
 

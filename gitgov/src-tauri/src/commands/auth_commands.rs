@@ -131,7 +131,7 @@ pub fn cmd_get_current_user() -> Result<Option<AuthenticatedUser>, String> {
             if let Ok(gh_user) = get_authenticated_user(&token) {
                 let refreshed_user = AuthenticatedUser {
                     login: gh_user.login,
-                    name: gh_user.name.unwrap_or_else(|| session_user.name),
+                    name: gh_user.name.unwrap_or(session_user.name),
                     avatar_url: gh_user.avatar_url,
                     group: session_user.group,
                     is_admin: session_user.is_admin,

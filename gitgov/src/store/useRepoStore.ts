@@ -240,9 +240,11 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
         repoPath,
         name,
         fromBranch: from,
-        developerLogin,
-        isAdmin,
-        userGroup: group ?? null,
+        actor: {
+          developerLogin,
+          isAdmin,
+          userGroup: group ?? null,
+        },
       })
       await get().refreshBranches()
     } catch (e) {

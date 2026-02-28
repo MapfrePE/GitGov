@@ -1,7 +1,7 @@
 use crate::audit::AuditDatabase;
 use crate::config::{load_config, validate_commit_message};
 use crate::git::{
-    create_commit, get_file_diff, get_working_tree_changes, has_staged_changes, open_repository,
+    create_commit, get_working_tree_changes, has_staged_changes, open_repository,
     stage_files, unstage_all, unstage_files,
 };
 use crate::models::AuditStatus;
@@ -436,7 +436,7 @@ pub fn cmd_push(
 
     if let Ok(cfg) = &config {
         if cfg.branches.protected.iter().any(|p| p == &branch) {
-            if let Some(uuid) = &attempt_uuid {
+            if let Some(_uuid) = &attempt_uuid {
                 let blocked_event = OutboxEvent::new(
                     "blocked_push".to_string(),
                     developer_login.clone(),
@@ -528,7 +528,7 @@ pub fn cmd_push(
                 "push_failed".to_string(),
                 developer_login.clone(),
                 Some(branch.clone()),
-                status.clone(),
+                status,
             )
             .with_reason(e.to_string())
             .with_metadata(serde_json::json!({"device": device_metadata()}));

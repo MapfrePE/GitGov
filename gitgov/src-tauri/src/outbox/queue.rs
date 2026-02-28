@@ -129,6 +129,7 @@ struct WorkerControl {
 ///   1. Write complete file to .tmp
 ///   2. Sync to disk
 ///   3. Atomic rename to final location
+///
 /// On crash: Either old file exists (complete) or new file exists (complete)
 ///
 /// LOCK DISCIPLINE: Never hold two locks simultaneously.
@@ -162,7 +163,7 @@ impl Outbox {
         })
     }
 
-    pub fn with_server(mut self, url: String, api_key: Option<String>) -> Self {
+    pub fn with_server(self, url: String, api_key: Option<String>) -> Self {
         if let Ok(mut server_url) = self.server_url.lock() {
             *server_url = Some(url);
         }
@@ -229,7 +230,7 @@ impl Outbox {
 
             events
                 .iter()
-                .map(|e| serde_json::to_string(e))
+                .map(serde_json::to_string)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| OutboxError::SerializationError(e.to_string()))?
         };
@@ -423,9 +424,9 @@ impl Outbox {
                 .map_err(|_| OutboxError::IoError("Events lock poisoned".to_string()))?;
 
             for event in events.iter_mut() {
-                if response.accepted.contains(&event.event_uuid) {
-                    event.sent = true;
-                } else if response.duplicates.contains(&event.event_uuid) {
+                if response.accepted.contains(&event.event_uuid)
+                    || response.duplicates.contains(&event.event_uuid)
+                {
                     event.sent = true;
                 } else if response
                     .errors
@@ -578,7 +579,7 @@ impl Outbox {
                         client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                     };
 
-                    let mut request = client.post(&format!("{}/events", url)).json(&batch);
+                    let mut request = client.post(format!("{}/events", url)).json(&batch);
                     if let Some(ref key) = api_key_opt {
                         request = request.header("Authorization", format!("Bearer {}", key));
                     }

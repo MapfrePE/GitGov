@@ -382,7 +382,7 @@ export function FileList() {
   const gitgovHiddenTopRules = useMemo(() => {
     if (gitgovIgnoreRules.length === 0 || gitgovHiddenCount === 0) return [] as Array<{ rule: string; count: number }>
     const counts = new Map<string, number>()
-    for (const [_, matched] of gitgovHiddenRuleByPath) {
+    for (const [, matched] of gitgovHiddenRuleByPath) {
       counts.set(matched, (counts.get(matched) ?? 0) + 1)
     }
     return Array.from(counts.entries())

@@ -43,6 +43,38 @@ Prevención de mismatch de identidad git en tres capas para evitar errores de au
 
 ---
 
+## Actualización Reciente (2026-02-28) — Remediación de pipeline CI (sin desactivar reglas)
+
+### Qué se corrigió
+- Se corrigieron errores reales de lint/clippy en frontend, server y desktop para volver a estado verde en checks estrictos.
+- Frontend:
+  - Correcciones de accesibilidad (`label` + `htmlFor`/`id`) en formularios.
+  - Refactor de router para cumplir `react-refresh/only-export-components` sin desactivar regla.
+  - Separación de `Bar` a componente dedicado y helpers en módulo utilitario.
+  - Ajustes menores de `useRepoStore` para el nuevo payload de creación de rama.
+- Server (`gitgov-server`):
+  - Limpieza de variables no usadas y campo muerto de `AppState`.
+  - Refactor de firmas con exceso de argumentos en DB:
+    - `get_noncompliance_signals` ahora recibe `NoncomplianceSignalsQuery`.
+    - `upsert_org_user` ahora recibe `UpsertOrgUserInput`.
+  - Actualización de handlers llamadores sin cambiar contrato HTTP externo.
+- Desktop (`src-tauri`):
+  - Refactors automáticos de Clippy + fixes manuales (`unnecessary_unwrap`, deprecations, doc comments, ramas duplicadas en outbox).
+  - Refactor de `cmd_create_branch` para reducir argumentos (`BranchActorInput`) y actualización del caller frontend.
+  - Reorganización de módulo outbox (`outbox.rs` → `queue.rs`) para corregir `module_inception`.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` → OK
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` → OK
+- `cd gitgov && npm run lint` → OK
+- `cd gitgov && npx tsc -b` → OK
+- `cd gitgov/gitgov-server && cargo test` → `52 passed; 0 failed`
+
+### Nota
+- Esta remediación se hizo **sin desactivar reglas de calidad** (`clippy`/`eslint`) para pasar CI.
+
+---
+
 ## Actualización Reciente (2026-02-28) — Provisioning de usuarios por organización (admin)
 
 ### Qué se implementó

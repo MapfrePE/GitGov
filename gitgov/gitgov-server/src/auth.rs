@@ -80,6 +80,7 @@ pub fn require_admin(user: &AuthUser) -> Result<(), AuthError> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn require_same_user_or_admin(user: &AuthUser, target_login: &str) -> Result<(), AuthError> {
     if user.role == UserRole::Admin {
         return Ok(());

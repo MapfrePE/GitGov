@@ -99,7 +99,7 @@ pub fn create_commit(
 
     let parents: Vec<_> = parent_commit.iter().collect();
 
-    if parents.is_empty() && index.len() == 0 {
+    if parents.is_empty() && index.is_empty() {
         return Err(GitError::EmptyStaging);
     }
 

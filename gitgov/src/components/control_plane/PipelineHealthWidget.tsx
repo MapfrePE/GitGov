@@ -1,5 +1,6 @@
 import { Workflow } from 'lucide-react'
-import { Bar, formatDurationMs } from './dashboard-helpers'
+import { formatDurationMs } from './dashboard-helpers'
+import { Bar } from './Bar'
 
 interface PipelineHealthWidgetProps {
   total: number

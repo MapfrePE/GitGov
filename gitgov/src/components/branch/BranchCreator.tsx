@@ -70,11 +70,12 @@ export function BranchCreator({ userLogin, isAdmin, userGroup, onSuccess }: Bran
   return (
     <div className="space-y-4">
       <div>
-        <label className="block text-sm font-medium text-surface-300 mb-1">
+        <label htmlFor="branch-name-input" className="block text-sm font-medium text-surface-300 mb-1">
           Nombre de la rama
         </label>
         <div className="relative">
           <input
+            id="branch-name-input"
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -100,10 +101,11 @@ export function BranchCreator({ userLogin, isAdmin, userGroup, onSuccess }: Bran
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-surface-300 mb-1">
+        <label htmlFor="branch-from-select" className="block text-sm font-medium text-surface-300 mb-1">
           Crear desde
         </label>
         <select
+          id="branch-from-select"
           value={fromBranch}
           onChange={(e) => setFromBranch(e.target.value)}
           className="w-full px-3 py-2 bg-surface-900 border border-surface-700 rounded-lg text-white focus:outline-none focus:border-brand-500"

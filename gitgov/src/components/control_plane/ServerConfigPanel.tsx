@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Button } from '@/components/shared/Button'
 import { Server, Link, Unlink, RefreshCw } from 'lucide-react'
@@ -7,12 +7,6 @@ export function ServerConfigPanel() {
   const { serverConfig, isConnected, isLoading, error, setServerConfig, checkConnection, disconnect } = useControlPlaneStore()
   const [url, setUrl] = useState(serverConfig?.url || 'http://127.0.0.1:3000')
   const [apiKey, setApiKey] = useState(serverConfig?.api_key || '')
-
-  useEffect(() => {
-    if (!serverConfig) return
-    setUrl(serverConfig.url)
-    setApiKey(serverConfig.api_key || '')
-  }, [serverConfig])
 
   const handleConnect = () => {
     setServerConfig({
@@ -63,8 +57,9 @@ export function ServerConfigPanel() {
       
       <div className="space-y-3">
         <div>
-          <label className="block text-sm text-surface-400 mb-1">URL del servidor</label>
+          <label htmlFor="server-url-input" className="block text-sm text-surface-400 mb-1">URL del servidor</label>
           <input
+            id="server-url-input"
             type="text"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
@@ -74,8 +69,9 @@ export function ServerConfigPanel() {
         </div>
         
         <div>
-          <label className="block text-sm text-surface-400 mb-1">API Key (opcional)</label>
+          <label htmlFor="server-api-key-input" className="block text-sm text-surface-400 mb-1">API Key (opcional)</label>
           <input
+            id="server-api-key-input"
             type="password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}

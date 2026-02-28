@@ -407,11 +407,10 @@ fn normalize_loopback_url(url: &str) -> String {
         return trimmed.to_string();
     };
 
-    if parsed.host_str() == Some("localhost") {
-        if parsed.set_host(Some("127.0.0.1")).is_ok() {
+    if parsed.host_str() == Some("localhost")
+        && parsed.set_host(Some("127.0.0.1")).is_ok() {
             return parsed.to_string();
         }
-    }
 
     trimmed.to_string()
 }
@@ -979,11 +978,11 @@ impl EventPayload {
             timestamp: entry.timestamp,
             developer_login: entry.developer_login.clone(),
             developer_name: entry.developer_name.clone(),
-            action: entry.action.clone(),
+            action: entry.action,
             branch: entry.branch.clone(),
             files: entry.files.clone(),
             commit_hash: entry.commit_hash.clone(),
-            status: entry.status.clone(),
+            status: entry.status,
             reason: entry.reason.clone(),
             repo_name,
             repo_owner,

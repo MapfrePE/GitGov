@@ -21,11 +21,10 @@ fn normalize_loopback_url(url: &str) -> String {
         return trimmed.to_string();
     };
 
-    if parsed.host_str() == Some("localhost") {
-        if parsed.set_host(Some("127.0.0.1")).is_ok() {
+    if parsed.host_str() == Some("localhost")
+        && parsed.set_host(Some("127.0.0.1")).is_ok() {
             return parsed.to_string();
         }
-    }
 
     trimmed.to_string()
 }

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
-import { RouterProvider } from 'react-router-dom'
-import { router } from './router'
+import { AppRouter } from './router'
 import { useAuthStore } from './store/useAuthStore'
 import { useControlPlaneStore } from './store/useControlPlaneStore'
 import { useUpdateStore } from './store/useUpdateStore'
@@ -55,7 +54,7 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <RouterProvider router={router} />
+      <AppRouter />
       <ToastContainer />
     </ErrorBoundary>
   )

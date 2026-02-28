@@ -1,5 +1,7 @@
 use crate::auth::{require_admin, AuthUser};
-use crate::db::{Database, DbError, JobMetrics, Job};
+use crate::db::{
+    Database, DbError, Job, JobMetrics, NoncomplianceSignalsQuery, UpsertOrgUserInput,
+};
 use crate::models::*;
 use crate::notifications;
 use axum::{
@@ -32,7 +34,6 @@ fn sanitize_db_error(e: &DbError) -> String {
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Database>,
-    pub jwt_secret: String,
     pub github_webhook_secret: Option<String>,
     pub github_personal_access_token: Option<String>,
     pub jenkins_webhook_secret: Option<String>,
@@ -105,7 +106,7 @@ pub async fn ingest_jenkins_pipeline_event(
     headers: HeaderMap,
     Json(payload): Json<JenkinsPipelineEventInput>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(JenkinsPipelineEventResponse {
@@ -322,7 +323,7 @@ pub async fn ingest_jira_webhook(
     headers: HeaderMap,
     Json(payload): Json<JiraWebhookEvent>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(JiraWebhookIngestResponse {
@@ -396,7 +397,7 @@ pub async fn get_jira_integration_status(
     Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(JiraIntegrationStatusResponse::default()),
@@ -417,7 +418,7 @@ pub async fn get_jira_ticket_detail(
     State(state): State<Arc<AppState>>,
     Path(ticket_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(JiraTicketDetailResponse::default()),
@@ -452,7 +453,7 @@ pub async fn get_jenkins_integration_status(
     Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(JenkinsIntegrationStatusResponse {
@@ -486,7 +487,7 @@ pub async fn correlate_jira_tickets(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<JiraCorrelateRequest>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(JiraCorrelateResponse::default()),
@@ -590,7 +591,7 @@ pub async fn get_jira_ticket_coverage(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TicketCoverageQuery>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(TicketCoverageResponse::default()),
@@ -624,7 +625,7 @@ pub async fn get_jenkins_commit_correlations(
     State(state): State<Arc<AppState>>,
     Query(filter): Query<JenkinsCorrelationFilter>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(JenkinsCorrelationsResponse::default()),
@@ -657,7 +658,7 @@ pub async fn get_compliance_dashboard(
     State(state): State<Arc<AppState>>,
     Path(org_name): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_admin(&auth_user) {
+    if let Err(_e) = require_admin(&auth_user) {
         return (StatusCode::FORBIDDEN, Json(ComplianceDashboard::default()));
     }
 
@@ -728,15 +729,17 @@ pub async fn get_signals(
         }
     };
 
-    match state.db.get_noncompliance_signals(
-        scoped_org_id.as_deref(),
-        filter.confidence.as_deref(),
-        filter.status.as_deref(),
-        filter.signal_type.as_deref(),
-        filter_user.as_deref(),
+    let signals_query = NoncomplianceSignalsQuery {
+        org_id: scoped_org_id.as_deref(),
+        confidence: filter.confidence.as_deref(),
+        status: filter.status.as_deref(),
+        signal_type: filter.signal_type.as_deref(),
+        actor_login: filter_user.as_deref(),
         limit,
         offset,
-    ).await {
+    };
+
+    match state.db.get_noncompliance_signals(&signals_query).await {
         Ok((signals, total)) => (StatusCode::OK, Json(SignalsResponse { signals, total })),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(SignalsResponse { signals: vec![], total: 0 })),
     }
@@ -820,7 +823,7 @@ pub async fn confirm_signal(
     Path(signal_id): Path<String>,
     Json(payload): Json<ConfirmSignalRequest>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "Admin access required"})),
@@ -877,7 +880,7 @@ pub async fn trigger_detection(
     State(state): State<Arc<AppState>>,
     Path(org_name): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "Admin access required"})),
@@ -928,7 +931,7 @@ pub async fn add_violation_decision(
     Path(violation_id): Path<String>,
     Json(payload): Json<AddDecisionRequest>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "Admin access required"})),
@@ -1307,7 +1310,7 @@ pub async fn handle_github_webhook(
                 }),
             )
         }
-        Err(e) => (
+        Err(_e) => (
             StatusCode::OK,
             Json(WebhookResponse {
                 received: true,
@@ -1965,7 +1968,7 @@ pub async fn get_logs(
 
     match state.db.get_combined_events(&filter).await {
         Ok(events) => (StatusCode::OK, Json(LogsResponse { events, error: None })),
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(LogsResponse {
                 events: vec![],
@@ -1979,7 +1982,7 @@ pub async fn get_stats(
     Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (StatusCode::FORBIDDEN, Json(AuditStats::default()));
     }
 
@@ -2005,7 +2008,7 @@ pub async fn get_daily_activity(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DailyActivityQuery>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (StatusCode::FORBIDDEN, Json(Vec::<DailyActivityPoint>::new()));
     }
 
@@ -2031,7 +2034,7 @@ pub async fn get_dashboard(
     Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (StatusCode::FORBIDDEN, Json(DashboardResponse {
             stats: AuditStats::default(),
             recent_events: vec![],
@@ -2119,7 +2122,7 @@ pub async fn policy_check(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<PolicyCheckRequest>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(PolicyCheckResponse {
@@ -2247,7 +2250,7 @@ pub async fn get_policy(
                 }),
             );
         }
-        Err(e) => {
+        Err(_e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(PolicyApiResponse {
@@ -2282,7 +2285,7 @@ pub async fn get_policy(
                 error: Some("Policy not found".to_string()),
             }),
         ),
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(PolicyApiResponse {
                 version: None,
@@ -2301,7 +2304,7 @@ pub async fn override_policy(
     Path(repo_name): Path<String>,
     Json(config): Json<GitGovConfig>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(PolicyApiResponse {
@@ -2329,7 +2332,7 @@ pub async fn override_policy(
                 }),
             );
         }
-        Err(e) => {
+        Err(_e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(PolicyApiResponse {
@@ -2345,7 +2348,7 @@ pub async fn override_policy(
 
     let config_json = match serde_json::to_string(&config) {
         Ok(json) => json,
-        Err(e) => {
+        Err(_e) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(PolicyApiResponse {
@@ -2398,7 +2401,7 @@ pub async fn override_policy(
                 }),
             )
         }
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(PolicyApiResponse {
                 version: None,
@@ -2560,15 +2563,15 @@ pub async fn create_org_user(
 
     match state
         .db
-        .upsert_org_user(
-            &org_id,
-            &login,
-            payload.display_name.as_deref(),
-            payload.email.as_deref(),
-            role.as_str(),
-            &status,
-            &auth_user.client_id,
-        )
+        .upsert_org_user(&UpsertOrgUserInput {
+            org_id: &org_id,
+            login: &login,
+            display_name: payload.display_name.as_deref(),
+            email: payload.email.as_deref(),
+            role: role.as_str(),
+            status: &status,
+            actor: &auth_user.client_id,
+        })
         .await
     {
         Ok((user, created)) => {
@@ -2878,7 +2881,7 @@ pub async fn create_api_key(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ApiKeyRequest>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(ApiKeyResponse {
@@ -2937,7 +2940,7 @@ pub async fn create_api_key(
                 error: None,
             }),
         ),
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiKeyResponse {
                 api_key: None,
@@ -3042,7 +3045,7 @@ pub async fn ingest_audit_stream(
     State(state): State<Arc<AppState>>,
     Json(batch): Json<AuditStreamBatch>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(AuditStreamResponse {
@@ -3171,7 +3174,7 @@ pub async fn get_governance_events(
 
     match state.db.get_governance_events(org_id.as_deref(), filter.event_type.as_deref(), limit, offset).await {
         Ok(events) => (StatusCode::OK, Json(GovernanceEventsResponse { events })),
-        Err(e) => (
+        Err(_e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(GovernanceEventsResponse { events: vec![] }),
         ),
@@ -3216,7 +3219,7 @@ fn make_audit_delivery_id(entry: &GitHubAuditLogEntry, org_id: Option<&str>) -> 
     format!("audit-{}-{}", entry.timestamp, hash)
 }
 
-async fn get_repo_id_for_audit_entry(state: &Arc<AppState>, entry: &GitHubAuditLogEntry, org_id: Option<&str>) -> Option<String> {
+async fn get_repo_id_for_audit_entry(state: &Arc<AppState>, entry: &GitHubAuditLogEntry, _org_id: Option<&str>) -> Option<String> {
     let repo_name = entry.repo.as_ref()
         .or(entry.repository.as_ref())?;
 
@@ -3253,7 +3256,7 @@ pub async fn get_job_metrics(
     Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "Admin access required"})),
@@ -3288,7 +3291,7 @@ pub async fn get_dead_jobs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DeadJobsQuery>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(DeadJobsResponse { jobs: vec![], total: 0 }),
@@ -3319,7 +3322,7 @@ pub async fn retry_dead_job(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(_) = require_admin(&auth_user) {
+    if require_admin(&auth_user).is_err() {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "Admin access required"})),

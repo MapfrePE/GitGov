@@ -80,8 +80,9 @@ export function AuditLogView() {
       {/* Filters */}
       <div className="flex items-center gap-4 p-4 border-b border-surface-700">
         <div className="flex items-center gap-2">
-          <label className="text-sm text-surface-400">Desde:</label>
+          <label htmlFor="audit-date-from" className="text-sm text-surface-400">Desde:</label>
           <input
+            id="audit-date-from"
             type="date"
             value={dateFrom}
             onChange={(e) => setDateFrom(e.target.value)}
@@ -89,8 +90,9 @@ export function AuditLogView() {
           />
         </div>
         <div className="flex items-center gap-2">
-          <label className="text-sm text-surface-400">Hasta:</label>
+          <label htmlFor="audit-date-to" className="text-sm text-surface-400">Hasta:</label>
           <input
+            id="audit-date-to"
             type="date"
             value={dateTo}
             onChange={(e) => setDateTo(e.target.value)}

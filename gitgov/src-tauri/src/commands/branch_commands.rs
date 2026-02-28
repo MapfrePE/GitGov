@@ -10,6 +10,14 @@ use std::sync::Arc;
 use tauri::State;
 use uuid::Uuid;
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchActorInput {
+    pub developer_login: String,
+    pub is_admin: bool,
+    pub user_group: Option<String>,
+}
+
 fn to_command_error(e: impl std::fmt::Display, code: &str) -> String {
     serde_json::to_string(&serde_json::json!({
         "code": code,
@@ -61,9 +69,7 @@ pub fn cmd_create_branch(
     repo_path: String,
     name: String,
     from_branch: String,
-    developer_login: String,
-    is_admin: bool,
-    user_group: Option<String>,
+    actor: BranchActorInput,
     audit_db: State<'_, Arc<AuditDatabase>>,
     outbox: State<'_, Arc<Outbox>>,
 ) -> Result<(), String> {
@@ -71,7 +77,7 @@ pub fn cmd_create_branch(
 
     let attempt_event = OutboxEvent::new(
         "attempt_create_branch".to_string(),
-        developer_login.clone(),
+        actor.developer_login.clone(),
         Some(name.clone()),
         AuditStatus::Success,
     )
@@ -82,11 +88,11 @@ pub fn cmd_create_branch(
 
     if let Ok(cfg) = &config {
         let user = AuthenticatedUser {
-            login: developer_login.clone(),
-            name: developer_login.clone(),
+            login: actor.developer_login.clone(),
+            name: actor.developer_login.clone(),
             avatar_url: String::new(),
-            group: user_group,
-            is_admin,
+            group: actor.user_group,
+            is_admin: actor.is_admin,
         };
 
         let validation = validate_branch_name(&name, cfg, &user);
@@ -94,7 +100,7 @@ pub fn cmd_create_branch(
         if let crate::config::ValidationResult::Blocked(reason) = validation {
             let blocked_event = OutboxEvent::new(
                 "blocked_branch".to_string(),
-                developer_login.clone(),
+                actor.developer_login.clone(),
                 Some(name.clone()),
                 AuditStatus::Blocked,
             )
@@ -105,8 +111,8 @@ pub fn cmd_create_branch(
             let entry = AuditLogEntry {
                 id: Uuid::new_v4().to_string(),
                 timestamp: chrono::Utc::now().timestamp_millis(),
-                developer_login: developer_login.clone(),
-                developer_name: developer_login.clone(),
+                developer_login: actor.developer_login.clone(),
+                developer_name: actor.developer_login.clone(),
                 action: AuditAction::BlockedBranch,
                 branch: name.clone(),
                 files: vec![],
@@ -128,7 +134,7 @@ pub fn cmd_create_branch(
         Ok(()) => {
             let success_event = OutboxEvent::new(
                 "create_branch".to_string(),
-                developer_login.clone(),
+                actor.developer_login.clone(),
                 Some(name.clone()),
                 AuditStatus::Success,
             )
@@ -139,7 +145,7 @@ pub fn cmd_create_branch(
             let entry = AuditLogEntry {
                 id: Uuid::new_v4().to_string(),
                 timestamp: chrono::Utc::now().timestamp_millis(),
-                developer_login,
+                developer_login: actor.developer_login,
                 developer_name: String::new(),
                 action: AuditAction::BranchCreate,
                 branch: name,
@@ -157,7 +163,7 @@ pub fn cmd_create_branch(
         Err(e) => {
             let failed_event = OutboxEvent::new(
                 "branch_failed".to_string(),
-                developer_login,
+                actor.developer_login,
                 Some(name),
                 AuditStatus::Failed,
             )

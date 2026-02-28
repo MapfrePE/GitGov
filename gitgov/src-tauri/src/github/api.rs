@@ -56,7 +56,7 @@ pub fn get_repository_info(token: &str, owner: &str, repo: &str) -> Result<RepoI
     let client = Client::new();
 
     let response = client
-        .get(&format!("https://api.github.com/repos/{}/{}", owner, repo))
+        .get(format!("https://api.github.com/repos/{}/{}", owner, repo))
         .header("Authorization", format!("Bearer {}", token))
         .header("Accept", "application/json")
         .header("User-Agent", "GitGov/1.0")
@@ -118,7 +118,7 @@ pub fn setup_branch_protection(
     });
 
     let response = client
-        .put(&format!(
+        .put(format!(
             "https://api.github.com/repos/{}/{}/branches/{}/protection",
             owner, repo, branch
         ))

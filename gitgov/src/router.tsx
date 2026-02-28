@@ -1,4 +1,4 @@
-import { createBrowserRouter, Link } from 'react-router-dom'
+import { createBrowserRouter, Link, RouterProvider } from 'react-router-dom'
 import { MainLayout } from '@/components/layout/MainLayout'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { AuditPage } from '@/pages/AuditPage'
@@ -22,7 +22,7 @@ function NotFoundPage() {
   )
 }
 
-export const router = createBrowserRouter([
+const appRouter = createBrowserRouter([
   {
     path: '/',
     element: (
@@ -64,3 +64,7 @@ export const router = createBrowserRouter([
     ),
   },
 ])
+
+export function AppRouter() {
+  return <RouterProvider router={appRouter} />
+}

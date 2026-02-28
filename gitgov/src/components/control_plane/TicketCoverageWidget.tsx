@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Ticket } from 'lucide-react'
 import { Button } from '@/components/shared/Button'
-import { Bar } from './dashboard-helpers'
+import { Bar } from './Bar'
 import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 
 export function TicketCoverageWidget() {
