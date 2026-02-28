@@ -3,6 +3,7 @@ import { useAuthStore } from '@/store/useAuthStore'
 import { useRepoStore } from '@/store/useRepoStore'
 import { Sidebar } from './Sidebar'
 import { LoginScreen } from '@/components/auth/LoginScreen'
+import { PinUnlockScreen } from '@/components/auth/PinUnlockScreen'
 import { RepoSelector } from '@/components/repo/RepoSelector'
 import { Skeleton, SkeletonFileRow } from '@/components/shared/Skeleton'
 
@@ -11,7 +12,7 @@ interface MainLayoutProps {
 }
 
 export function MainLayout({ children }: MainLayoutProps) {
-  const { user, authStep, isLoading } = useAuthStore()
+  const { user, authStep, isLoading, isPinEnabled, pinUnlocked } = useAuthStore()
   const { repoPath } = useRepoStore()
 
   if (isLoading) {
@@ -52,6 +53,10 @@ export function MainLayout({ children }: MainLayoutProps) {
 
   if (!user || authStep !== 'authenticated') {
     return <LoginScreen />
+  }
+
+  if (isPinEnabled && !pinUnlocked) {
+    return <PinUnlockScreen />
   }
 
   if (!repoPath) {

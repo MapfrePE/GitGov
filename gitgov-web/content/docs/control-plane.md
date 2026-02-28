@@ -8,59 +8,87 @@ The Control Plane is the heart of the GitGov ecosystem. It acts as a secure, cen
 
 ---
 
+## Authentication
+
+GitGov Desktop communicates with the Control Plane via a REST API authenticated with a **Bearer token**. The token is derived from an API key that your administrator generates via the Control Plane's `/api-keys` endpoint.
+
+```
+Authorization: Bearer <api-key>
+```
+
+> [!IMPORTANT]
+> Always use the `Authorization: Bearer` header format. The `X-API-Key` header is **not** supported and will result in a `401 Unauthorized` response.
+
+---
+
 ## Connection Fundamentals
 
-GitGov Desktop communicates with the Control Plane via a high-performance REST API. For production environments, this connection is typically secured via TLS (HTTPS) and a rolling API Token.
+GitGov Desktop communicates via a high-performance REST API. For production environments, this connection should be secured with TLS (HTTPS).
 
-### Standard Endpoint
-By default, during development or local evaluation, the Control Plane listens on:
-`http://127.0.0.1:3000`
+The Desktop app connects automatically on launch using the server URL configured by your administrator. Your DevOps team will provide the correct server address for your organization.
 
 ---
 
 ## Configuration Workflow
 
-Follow these steps to establish a secure link:
+### 1. Verify Server State
+Ensure the Control Plane service is active and reachable. Your administrator can confirm via the health endpoint:
 
-### 1. Verification of Server State
-Ensure the Control Plane service is active. If you are running the server manually:
-1. Open a terminal in the `gitgov-server` directory.
-2. Verify Rust is initialized.
-3. Start the service: `cargo run`.
+```bash
+curl http://your-control-plane/health
+# Expected: {"status":"ok", ...}
+```
 
 ### 2. Desktop Authentication
 1. Launch **GitGov Desktop**.
 2. Navigate to **Settings > Sync & Control Plane**.
-3. Input the **Server URL** provided by your DevOps team.
-4. Input your **Security Token** (if required by your organization).
+3. Enter the **Server URL** provided by your DevOps team.
+4. Enter your **API Token**. The app will verify the connection immediately.
 
 ### 3. Connection Handshake
-Click the **"Test Connection"** button. GitGov will perform a lightweight health check to verify latency and protocol compatibility.
+GitGov performs a lightweight health check to verify latency and protocol compatibility. A green status indicator confirms a successful connection.
 
 ---
 
-## Advanced Sync Settings
+## Sync Behavior
 
-You can fine-tune how data is pushed to the server to balance between real-time visibility and network overhead.
+| Behaviour | Details |
+|-----------|---------|
+| **Event Dispatch** | Events are dispatched to the Control Plane as they occur, in batches via the `/events` endpoint. |
+| **Dashboard Refresh** | The Control Plane dashboard auto-refreshes every **30 seconds**. |
+| **Offline Buffer** | When the server is unreachable, the local outbox queues events in a JSONL file on disk. |
+| **Retry Logic** | Failed dispatches use exponential backoff, capped at **32×** the base interval. Events are never lost. |
+| **Rate Limit** | Default: **240 events/minute** per API key. Configurable via `GITGOV_RATE_LIMIT_EVENTS_PER_MIN`. |
 
-| Setting | Recommendation | Description |
-|---------|----------------|-------------|
-| **Sync Interval** | 5s - 15s | Frequency of data pushes. Lower for high-security environments. |
-| **Max Batch Size** | 100 events | Prevents large pushes from saturating local bandwidth. |
-| **Offline Buffer** | Enabled | Stores events locally if the server is unreachable. |
-| **Retry Logic** | Exponential | Automatically retries failed pushes with increasing delays. |
+---
 
-> [!IMPORTANT]
-> **Data Privacy**: GitGov only syncs metadata (hashes, timestamps, branch names, and diff summaries). Your actual source code (the file contents) **never** leaves your workstation unless specifically configured for deep security auditing.
+## Role-Based Access
+
+The Control Plane enforces role-based access on all authenticated endpoints:
+
+| Role | Access |
+|------|--------|
+| **Admin** | Full access — stats, dashboard, integrations, policy management, all events |
+| **Developer** | Scoped access — only sees their own events on `/logs` |
+| **Architect** | Reserved for future role restrictions |
+| **PM** | Reserved for future role restrictions |
+
+API keys carry a role assignment. Ensure your developers are issued keys with the `Developer` role, and your DevOps/security team with the `Admin` role.
+
+---
+
+## Data Privacy
+
+GitGov only syncs metadata: event type, commit SHA, branch name, author login, timestamp, and file counts. **Source code content never leaves the developer workstation.** Diff contents and file contents are not transmitted.
 
 ---
 
 ## Network Requirements
 
-To ensure stable synchronization, your network environment must allow:
 - **Protocol**: HTTP/1.1 or HTTP/2.
-- **Port**: Default 3000 (Customizable via `GITGOV_SERVER_ADDR` environment variable).
-- **Domain Whitelisting**: Ensure your local firewall allows outbound traffic to the Control Plane domain.
+- **Port**: Default `3000` (configurable via `GITGOV_SERVER_ADDR` on the server side).
+- **Firewall**: Allow outbound traffic from developer workstations to the Control Plane host on the configured port.
+- **Production**: TLS (HTTPS) is strongly recommended. HTTP is supported for local evaluation only.
 
 ## Next Phase
 

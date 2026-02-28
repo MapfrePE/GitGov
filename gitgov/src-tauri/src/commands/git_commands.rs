@@ -401,6 +401,18 @@ pub fn cmd_commit(
 }
 
 #[tauri::command]
+pub fn cmd_get_git_identity(repo_path: String) -> Result<serde_json::Value, String> {
+    let repo = open_repository(&repo_path).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+    let config = repo.config().map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+    let name = config.get_string("user.name").ok();
+    let email = config.get_string("user.email").ok();
+    Ok(serde_json::json!({
+        "name": name,
+        "email": email,
+    }))
+}
+
+#[tauri::command]
 pub fn cmd_push(
     repo_path: String,
     branch: String,

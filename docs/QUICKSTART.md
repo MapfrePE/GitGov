@@ -10,7 +10,34 @@
 
 ## Instalación (5 minutos)
 
-### 1. Clonar y configurar Desktop
+### 1. Setup de identidad git por repo
+
+**Obligatorio para todos los developers** (previene errores de autor en CI/Vercel):
+
+```powershell
+# Desde la raiz del repo GitGov
+.\scripts\setup-dev.ps1
+```
+
+El script:
+- Configura `user.name` y `user.email` **solo para este repo** (`--local`, sin tocar tu git global)
+- Activa el pre-commit hook que valida identidad antes de cada commit CLI
+- Es idempotente: puedes ejecutarlo varias veces sin problema
+
+Para configurar manualmente:
+```bash
+git config --local user.name  "Tu Nombre"
+git config --local user.email "tu@empresa.com"
+git config --local core.hooksPath ".githooks"
+```
+
+> **Por qué importa:** Si tienes varios repos con distintas identidades (ej. personal vs. org),
+> un autor incorrecto puede romper deploys en CI/Vercel. El hook `.githooks/pre-commit`
+> frena el commit antes de que eso ocurra.
+
+---
+
+### 2. Clonar y configurar Desktop
 
 ```bash
 cd gitgov

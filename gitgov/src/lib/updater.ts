@@ -15,7 +15,7 @@ export interface DesktopUpdateProgress {
   totalBytes?: number
 }
 
-const DEFAULT_FALLBACK_DOWNLOAD_URL = 'https://downloads.gitgov.com/desktop'
+const DEFAULT_FALLBACK_DOWNLOAD_URL = 'https://github.com/MapfrePE/GitGov/releases/latest'
 const UPDATE_CHANNEL_HEADER = 'x-gitgov-update-channel'
 
 function normalizeChannel(channel: string | undefined): DesktopUpdateChannel {
@@ -28,6 +28,9 @@ export function getDesktopUpdateFallbackUrl(channel?: DesktopUpdateChannel): str
   const base = envValue || DEFAULT_FALLBACK_DOWNLOAD_URL
   if (base.includes('{channel}')) {
     return base.replaceAll('{channel}', selectedChannel)
+  }
+  if (/\/releases\/latest$/i.test(base) || /\.exe$/i.test(base) || /\.json$/i.test(base)) {
+    return base
   }
   return `${base.replace(/\/+$/, '')}/${selectedChannel}`
 }

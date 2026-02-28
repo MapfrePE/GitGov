@@ -1,0 +1,11 @@
+﻿{
+    "version":  "0.1.0",
+    "notes":  "",
+    "pub_date":  "2026-02-28T07:59:18Z",
+    "platforms":  {
+                      "windows-x86_64":  {
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSOVplNHFFbWI0eDZHTk5HN1VZN3FZcE9rTEY0SDYrNkNTS2tDQ0FhNFNxcTZEMTJjWHpZVWpPY3FHVW1jb1doK0dZZXgzV3l6QzNZRkhpc1JDS3BZUlU1N2s1QlF6MndzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzcyMjY1NTQ4CWZpbGU6R2l0R292XzAuMS4wX3g2NC1zZXR1cC5leGUKc05IOWhXMGJrR2ZnOHNOSlFUc01MN1A1ZW44K3VESGcwRU40WEpyai9lVTJlbWo4U0JEc2JYbFZvSHA2TnFGU2lON3JYTXpzRFJBMUJiZitFcFNPQ2c9PQo=",
+                                             "url":  "https://github.com/MapfrePE/GitGov/releases/download/v0.1.0/GitGov_0.1.0_x64-setup.exe"
+                                         }
+                  }
+}

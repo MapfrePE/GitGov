@@ -53,8 +53,8 @@ export function Sidebar() {
           />
           <button
             onClick={logout}
-            title="Cerrar sesión"
-            aria-label="Cerrar sesión"
+            title="Cambiar usuario (cerrar sesión)"
+            aria-label="Cambiar usuario (cerrar sesión)"
             className="w-9 h-9 flex items-center justify-center rounded-lg text-surface-600 hover:text-surface-400 hover:bg-white/4 transition-all duration-200"
           >
             <LogOut size={16} strokeWidth={1.5} aria-hidden="true" />

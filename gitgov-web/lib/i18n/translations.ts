@@ -254,12 +254,12 @@ export const translations = {
         es: 'Descarga el instalador <code>.exe</code>',
     },
     'download.step2': {
-        en: 'Run the installer — Windows may show a SmartScreen warning (click "More info" → "Run anyway")',
-        es: 'Ejecuta el instalador — Windows puede mostrar una advertencia SmartScreen (haz clic en "Más información" → "Ejecutar de todas formas")',
+        en: 'Run the installer. If Windows displays a security verification prompt, follow the on-screen steps.',
+        es: 'Ejecuta el instalador. Si Windows muestra una verificación de seguridad, sigue los pasos en pantalla.',
     },
     'download.step3': {
-        en: 'Launch GitGov Desktop and connect to your Control Plane at <code>http://127.0.0.1:3000</code>',
-        es: 'Inicia GitGov Desktop y conéctate a tu Control Plane en <code>http://127.0.0.1:3000</code>',
+        en: 'Launch GitGov Desktop — it connects automatically',
+        es: 'Inicia GitGov Desktop — se conecta automáticamente',
     },
     'download.step4': {
         en: 'Start working — every Git operation will be captured automatically',
@@ -267,7 +267,58 @@ export const translations = {
     },
 
     'download.file': { en: 'File', es: 'Archivo' },
-    'download.checksum': { en: 'Checksum', es: 'Checksum' },
+    'download.checksum': { en: 'Integrity (SHA256)', es: 'Integridad (SHA256)' },
+    'download.copyChecksum': { en: 'Copy SHA256', es: 'Copiar SHA256' },
+    'download.copiedChecksum': { en: 'Copied', es: 'Copiado' },
+    'download.buttonMsi': { en: 'Download .msi', es: 'Descargar .msi' },
+    'download.unsignedBanner': {
+        en: 'Official GitGov installer (v0.1.0). If Windows shows a security verification prompt, follow the installation notes below.',
+        es: 'Instalador oficial de GitGov (v0.1.0). Si Windows muestra una verificación de seguridad, sigue las notas de instalación de abajo.',
+    },
+    'download.verifyHash.title': {
+        en: 'Optional integrity check (SHA256) on Windows',
+        es: 'Verificación opcional de integridad (SHA256) en Windows',
+    },
+    'download.verifyHash.command': {
+        en: 'Run in PowerShell:',
+        es: 'Ejecuta en PowerShell:',
+    },
+    'download.verifyHash.example': {
+        en: 'Expected output (Hash field):',
+        es: 'Salida esperada (campo Hash):',
+    },
+    'download.side.heading': {
+        en: 'Everything runs on your workstation',
+        es: 'Todo corre en tu estación de trabajo',
+    },
+    'download.side.intro': {
+        en: 'GitGov Desktop is a lightweight native app that captures Git events locally and syncs them to your Control Plane — no cloud dependency required.',
+        es: 'GitGov Desktop es una app nativa ligera que captura eventos Git localmente y los sincroniza con tu Control Plane — sin dependencia de la nube.',
+    },
+    'download.side.h1title': { en: 'Git Event Capture', es: 'Captura de Eventos Git' },
+    'download.side.h1desc': {
+        en: 'Commits, pushes, stages, and merges captured automatically at the workstation level.',
+        es: 'Commits, pushes, stages y merges capturados automáticamente a nivel de estación de trabajo.',
+    },
+    'download.side.h2title': { en: 'Offline Resilience', es: 'Resiliencia Offline' },
+    'download.side.h2desc': {
+        en: 'Local outbox queues events when the server is unreachable. Syncs automatically on reconnection.',
+        es: 'La bandeja de salida local encola eventos cuando el servidor no está disponible. Sincroniza automáticamente al reconectarse.',
+    },
+    'download.side.h3title': { en: 'Control Plane Ready', es: 'Control Plane Listo' },
+    'download.side.h3desc': {
+        en: 'Connect to your self-hosted server and access the full governance dashboard instantly.',
+        es: 'Conéctate a tu servidor self-hosted y accede al dashboard de gobernanza completo de inmediato.',
+    },
+    'download.side.h4title': { en: 'Policy Enforcement', es: 'Aplicación de Políticas' },
+    'download.side.h4desc': {
+        en: 'Configure gitgov.toml in your repo to enforce commit message formats and branch policies.',
+        es: 'Configura gitgov.toml en tu repo para aplicar formatos de mensaje y políticas de rama.',
+    },
+    'download.side.sysreq': {
+        en: 'Windows 10 / 11 · x64 · ~15 MB · no runtime dependencies',
+        es: 'Windows 10 / 11 · x64 · ~15 MB · sin dependencias de runtime',
+    },
 
     // ═══ Contact Page ═══
     'contact.badge': { en: 'Contact', es: 'Contacto' },
@@ -309,6 +360,23 @@ export const translations = {
     'contact.errors.email': { en: 'Email is required', es: 'El correo es requerido' },
     'contact.errors.emailInvalid': { en: 'Invalid email address', es: 'Correo electrónico inválido' },
     'contact.errors.message': { en: 'Message is required', es: 'El mensaje es requerido' },
+    'contact.side.heading': { en: "Let's talk about your team", es: 'Hablemos de tu equipo' },
+    'contact.side.intro': {
+        en: "We help engineering teams enforce governance policies without slowing down development. Tell us about your stack and we'll get back to you shortly.",
+        es: 'Ayudamos a los equipos de ingeniería a aplicar políticas de gobernanza sin frenar el desarrollo. Cuéntanos sobre tu stack y te responderemos pronto.',
+    },
+    'contact.side.responseTime': {
+        en: 'We typically respond within 1 business day.',
+        es: 'Solemos responder en menos de 1 día hábil.',
+    },
+    'contact.side.h1title': { en: 'Enterprise-grade security', es: 'Seguridad empresarial' },
+    'contact.side.h1desc': { en: 'Append-only audit logs and SHA256-hashed API keys out of the box.', es: 'Logs de auditoría inmutables y API keys hasheadas con SHA256 desde el primer día.' },
+    'contact.side.h2title': { en: 'Fast deployment', es: 'Despliegue rápido' },
+    'contact.side.h2desc': { en: 'Up and running in minutes with your existing Git workflow.', es: 'Funcionando en minutos con tu flujo de trabajo Git existente.' },
+    'contact.side.h3title': { en: 'Dedicated support', es: 'Soporte dedicado' },
+    'contact.side.h3desc': { en: 'Priority support and custom onboarding for enterprise plans.', es: 'Soporte prioritario y onboarding personalizado para planes Enterprise.' },
+    'contact.side.h4title': { en: 'GitHub, Jenkins & Jira', es: 'GitHub, Jenkins y Jira' },
+    'contact.side.h4desc': { en: 'Native integrations with the tools your team already uses.', es: 'Integraciones nativas con las herramientas que tu equipo ya usa.' },
 
     // ═══ Pricing Page ═══
     'pricing.badge': { en: 'Pricing', es: 'Precios' },
@@ -329,6 +397,51 @@ export const translations = {
         en: ['Unlimited Git operation capture', 'Control Plane access', 'Jenkins CI correlation', 'Jira ticket coverage', 'Append-only audit logs', 'Policy advisory checks', 'Team management', 'Priority support'],
         es: ['Captura ilimitada de operaciones Git', 'Acceso al Control Plane', 'Correlación Jenkins CI', 'Cobertura de tickets Jira', 'Logs de auditoría inmutables', 'Verificaciones de políticas consultivas', 'Gestión de equipos', 'Soporte prioritario'],
     },
+    'pricing.descriptionNew': {
+        en: 'Simple, transparent pricing for teams of every size. All plans include core governance features.',
+        es: 'Precios simples y transparentes para equipos de cualquier tamaño. Todos los planes incluyen las funciones de gobernanza principales.',
+    },
+    'pricing.bottomNote': {
+        en: 'All plans are currently in development. Contact us to discuss your team\'s needs.',
+        es: 'Todos los planes están actualmente en desarrollo. Contáctanos para discutir las necesidades de tu equipo.',
+    },
+    // Free plan
+    'pricing.plans.free.name': { en: 'Starter', es: 'Starter' },
+    'pricing.plans.free.price': { en: 'Free', es: 'Gratis' },
+    'pricing.plans.free.priceNote': { en: 'For small teams & evaluation', es: 'Para equipos pequeños y evaluación' },
+    'pricing.plans.free.description': { en: 'Get started with Git governance for your team.', es: 'Comienza con la gobernanza Git para tu equipo.' },
+    'pricing.plans.free.cta': { en: 'Get Started', es: 'Empezar' },
+    'pricing.plans.free.f1': { en: 'Git operation capture', es: 'Captura de operaciones Git' },
+    'pricing.plans.free.f2': { en: 'Basic audit logs', es: 'Logs de auditoría básicos' },
+    'pricing.plans.free.f3': { en: 'Up to 5 users', es: 'Hasta 5 usuarios' },
+    'pricing.plans.free.f4': { en: 'Jenkins CI correlation', es: 'Correlación Jenkins CI' },
+    'pricing.plans.free.f5': { en: 'Jira ticket coverage', es: 'Cobertura de tickets Jira' },
+    'pricing.plans.free.f6': { en: 'Compliance reports', es: 'Informes de cumplimiento' },
+    // Team plan
+    'pricing.plans.team.name': { en: 'Team', es: 'Team' },
+    'pricing.plans.team.badge': { en: 'Most Popular', es: 'Más Popular' },
+    'pricing.plans.team.price': { en: 'Contact us', es: 'Contáctanos' },
+    'pricing.plans.team.priceNote': { en: 'Per team · custom pricing', es: 'Por equipo · precio personalizado' },
+    'pricing.plans.team.description': { en: 'Full governance for growing engineering teams.', es: 'Gobernanza completa para equipos de ingeniería en crecimiento.' },
+    'pricing.plans.team.cta': { en: 'Contact for Pricing', es: 'Contactar por Precios' },
+    'pricing.plans.team.f1': { en: 'Everything in Starter', es: 'Todo en Starter' },
+    'pricing.plans.team.f2': { en: 'Append-only audit logs', es: 'Logs de auditoría inmutables' },
+    'pricing.plans.team.f3': { en: 'Jenkins CI correlation', es: 'Correlación Jenkins CI' },
+    'pricing.plans.team.f4': { en: 'Jira ticket coverage', es: 'Cobertura de tickets Jira' },
+    'pricing.plans.team.f5': { en: 'Policy advisory checks', es: 'Verificaciones de políticas' },
+    'pricing.plans.team.f6': { en: 'Compliance reports', es: 'Informes de cumplimiento' },
+    // Enterprise plan
+    'pricing.plans.enterprise.name': { en: 'Enterprise', es: 'Enterprise' },
+    'pricing.plans.enterprise.price': { en: 'Custom', es: 'Personalizado' },
+    'pricing.plans.enterprise.priceNote': { en: 'Tailored to your organization', es: 'Adaptado a tu organización' },
+    'pricing.plans.enterprise.description': { en: 'Full control, compliance & dedicated support at scale.', es: 'Control total, cumplimiento y soporte dedicado a escala.' },
+    'pricing.plans.enterprise.cta': { en: 'Talk to Sales', es: 'Hablar con Ventas' },
+    'pricing.plans.enterprise.f1': { en: 'Everything in Team', es: 'Todo en Team' },
+    'pricing.plans.enterprise.f2': { en: 'Unlimited users', es: 'Usuarios ilimitados' },
+    'pricing.plans.enterprise.f3': { en: 'Compliance reports (SSO roadmap)', es: 'Informes de cumplimiento (SSO en roadmap)' },
+    'pricing.plans.enterprise.f4': { en: 'Custom integrations', es: 'Integraciones personalizadas' },
+    'pricing.plans.enterprise.f5': { en: 'SLA & priority support', es: 'SLA y soporte prioritario' },
+    'pricing.plans.enterprise.f6': { en: 'Dedicated onboarding', es: 'Onboarding dedicado' },
 
     // ═══ 404 ═══
     '404.title': { en: 'Page Not Found', es: 'Página No Encontrada' },
@@ -338,6 +451,9 @@ export const translations = {
     },
     '404.home': { en: 'Back to Home', es: 'Volver al Inicio' },
     '404.docs': { en: 'Browse Docs', es: 'Explorar Docs' },
+
+    // ═══ Navigation extra ═══
+    'nav.privacy': { en: 'Privacy Policy', es: 'Política de Privacidad' },
 
     // ═══ Footer ═══
     'footer.product': { en: 'Product', es: 'Producto' },

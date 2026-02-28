@@ -2,10 +2,12 @@
 
 ## Prerequisites
 
-- Windows 10/11 x64 (required)
-- .NET Framework 4.7.2+ (included in Windows 10 1803+)
 - Network access to GitGov Control Plane server (HTTP/HTTPS on configured port, default 3000)
 - API key issued by your GitGov admin
+- Platform-specific runtime requirements:
+  - Windows 10/11 x64 (+ .NET Framework 4.7.2+)
+  - macOS 12+ (Apple Silicon / Intel)
+  - Linux x64 (glibc-based distro for AppImage/DEB)
 
 ---
 
@@ -127,6 +129,25 @@ Get-FileHash .\GitGov_x.x.x_x64-setup.exe -Algorithm SHA256
 
 Compare with the `.sha256` file published alongside each release in GitHub Releases.
 
+### Generating a .sha256 file (release managers)
+
+After every build, generate the hash file using the included script:
+
+```powershell
+# From the repo root
+.\scripts\generate_sha256.ps1 -InstallerPath ".\gitgov\src-tauri\target\release\bundle\nsis\GitGov_x.x.x_x64-setup.exe"
+```
+
+This writes `GitGov_x.x.x_x64-setup.exe.sha256` next to the installer and prints the hash.
+Upload both the `.exe` and the `.sha256` file as GitHub Release assets.
+
+Then set the hash as an environment variable in Vercel before redeploying the web app:
+```
+NEXT_PUBLIC_DESKTOP_DOWNLOAD_CHECKSUM=sha256:<hex>
+```
+
+The download page at https://git-gov.vercel.app/download will display the checksum automatically.
+
 ---
 
 ## 8. Code Signing
@@ -155,6 +176,20 @@ Required GitHub Actions secrets:
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for updater signing private key |
 
 If any of these are missing or invalid, release jobs on `v*` tags fail by design.
+
+### CI for all three platforms (Windows + macOS + Linux)
+
+The `build-signed.yml` workflow builds all desktop targets on git tag pushes (`v*`):
+
+- Windows: NSIS (`.exe`) + MSI (`.msi`) + `.sha256`
+- macOS: DMG (`.dmg`) + `.sha256`
+- Linux: AppImage (`.AppImage`) + DEB (`.deb`) + `.sha256`
+
+Notes:
+
+- Windows Authenticode signing requires `WINDOWS_CERTIFICATE*` secrets.
+- Tauri updater signing (`TAURI_SIGNING_PRIVATE_KEY*`) should be set for all platforms.
+- macOS notarization is not yet wired in this repository; for production distribution via Gatekeeper, add Apple Developer signing/notarization secrets and notarization steps.
 
 ### Local signed build (Windows)
 

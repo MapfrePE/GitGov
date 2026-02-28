@@ -1,67 +1,95 @@
 ---
 title: Conectar al Control Plane
-description: Configure la capa de sincronización entre su agente de captura local y el servidor de gobernanza central.
+description: Configura la capa de sincronización entre tu agente de captura local y el servidor de gobernanza central.
 order: 3
 ---
 
-El Control Plane es el corazón del ecosistema GitGov. Actúa como un punto de ingesta centralizado y seguro para los eventos capturados por todos los agentes Desktop en su organización. Una vez conectado, permite el monitoreo en tiempo real, el registro de auditoría y la aplicación de políticas globales.
+El Control Plane es el corazón del ecosistema GitGov. Actúa como punto de ingestión centralizado y seguro para los eventos capturados por todos los agentes Desktop de tu organización. Una vez conectado, habilita monitorización en tiempo real, auditoría y aplicación global de políticas.
 
 ---
 
-## Fundamentos de la Conexión
+## Autenticación
 
-GitGov Desktop se comunica con el Control Plane a través de una API REST de alto rendimiento. Para entornos de producción, esta conexión suele estar protegida mediante TLS (HTTPS) y un token de API rotativo.
+GitGov Desktop se comunica con el Control Plane mediante una REST API autenticada con un **token Bearer**. El token proviene de una API key que tu administrador genera a través del endpoint `/api-keys` del Control Plane.
 
-### Endpoint Estándar
-Por defecto, durante el desarrollo o la evaluación local, el Control Plane escucha en:
-`http://127.0.0.1:3000`
+```
+Authorization: Bearer <api-key>
+```
+
+> [!IMPORTANT]
+> Usa siempre el formato de cabecera `Authorization: Bearer`. La cabecera `X-API-Key` **no está soportada** y resultará en una respuesta `401 Unauthorized`.
+
+---
+
+## Fundamentos de Conexión
+
+GitGov Desktop se comunica mediante una REST API de alto rendimiento. En entornos de producción, esta conexión debe protegerse con TLS (HTTPS).
+
+La aplicación Desktop se conecta automáticamente al arrancar usando la URL del servidor configurada por tu administrador. Tu equipo de DevOps te proporcionará la dirección correcta del servidor para tu organización.
 
 ---
 
 ## Flujo de Configuración
 
-Siga estos pasos para establecer un enlace seguro:
+### 1. Verificar Estado del Servidor
+Asegúrate de que el servicio del Control Plane está activo y accesible. Tu administrador puede confirmar mediante el endpoint de salud:
 
-### 1. Verificación del Estado del Servidor
-Asegúrese de que el servicio del Control Plane esté activo. Si está ejecutando el servidor manualmente:
-1. Abra una terminal en el directorio `gitgov-server`.
-2. Verifique que Rust esté inicializado.
-3. Inicie el servicio: `cargo run`.
+```bash
+curl http://tu-control-plane/health
+# Esperado: {"status":"ok", ...}
+```
 
 ### 2. Autenticación en Desktop
-1. Inicie **GitGov Desktop**.
-2. Navegue a **Settings > Sync & Control Plane**.
-3. Ingrese la **URL del Servidor** proporcionada por su equipo de DevOps.
-4. Ingrese su **Security Token** (si su organización lo requiere).
+1. Inicia **GitGov Desktop**.
+2. Ve a **Configuración > Sync y Control Plane**.
+3. Ingresa la **URL del Servidor** proporcionada por tu equipo de DevOps.
+4. Ingresa tu **Token API**. La aplicación verificará la conexión de inmediato.
 
-### 3. Prueba de Conexión
-Haga clic en el botón **"Test Connection"**. GitGov realizará una verificación de salud ligera para validar la latencia y la compatibilidad de protocolos.
+### 3. Handshake de Conexión
+GitGov realiza un health check ligero para verificar latencia y compatibilidad de protocolo. Un indicador verde confirma una conexión exitosa.
 
 ---
 
-## Ajustes Avanzados de Sincronización
+## Comportamiento de Sincronización
 
-Puede ajustar cómo se envían los datos al servidor para equilibrar la visibilidad en tiempo real y la carga de red.
+| Comportamiento | Detalles |
+|----------------|---------|
+| **Despacho de Eventos** | Los eventos se despachan al Control Plane a medida que ocurren, en lotes mediante el endpoint `/events`. |
+| **Actualización del Dashboard** | El dashboard del Control Plane se actualiza automáticamente cada **30 segundos**. |
+| **Buffer Offline** | Cuando el servidor no está disponible, la bandeja de salida local encola los eventos en un archivo JSONL en disco. |
+| **Reintentos** | Los despachos fallidos usan backoff exponencial, con un máximo de **32×** el intervalo base. Los eventos nunca se pierden. |
+| **Límite de Tasa** | Por defecto: **240 eventos/minuto** por API key. Configurable mediante `GITGOV_RATE_LIMIT_EVENTS_PER_MIN`. |
 
-| Ajuste | Recomendación | Descripción |
-|---------|----------------|-------------|
-| **Intervalo de Sinc** | 5s - 15s | Frecuencia de envío. Menor para entornos de alta seguridad. |
-| **Tamaño de Lote** | 100 eventos | Evita que envíos grandes saturen el ancho de banda local. |
-| **Buffer Offline** | Activado | Almacena eventos localmente si el servidor no está disponible. |
-| **Lógica de Reintento** | Exponencial | Reintenta envíos fallidos automáticamente con retrasos crecientes. |
+---
 
-> [!IMPORTANT]
-> **Privacidad de Datos**: GitGov solo sincroniza metadatos (hashes, marcas de tiempo, nombres de ramas y resúmenes de diff). Su código fuente real (el contenido de los archivos) **nunca** sale de su estación de trabajo a menos que se configure específicamente para auditorías de seguridad profundas.
+## Control de Acceso Basado en Roles
+
+El Control Plane aplica control de acceso basado en roles en todos los endpoints autenticados:
+
+| Rol | Acceso |
+|-----|--------|
+| **Admin** | Acceso completo — estadísticas, dashboard, integraciones, gestión de políticas, todos los eventos |
+| **Developer** | Acceso limitado — solo ve sus propios eventos en `/logs` |
+| **Architect** | Reservado para futuras restricciones de rol |
+| **PM** | Reservado para futuras restricciones de rol |
+
+Las API keys llevan asignado un rol. Asegúrate de que los desarrolladores tengan keys con rol `Developer` y que el equipo de DevOps/seguridad tenga rol `Admin`.
+
+---
+
+## Privacidad de Datos
+
+GitGov solo sincroniza metadatos: tipo de evento, commit SHA, nombre de rama, login del autor, timestamp y conteo de archivos. **El contenido del código fuente nunca abandona la estación de trabajo del desarrollador.** Los contenidos de diffs y archivos no se transmiten.
 
 ---
 
 ## Requisitos de Red
 
-Para asegurar una sincronización estable, su entorno de red debe permitir:
 - **Protocolo**: HTTP/1.1 o HTTP/2.
-- **Puerto**: Predeterminado 3000 (Personalizable mediante la variable de entorno `GITGOV_SERVER_ADDR`).
-- **Lista Blanca de Dominios**: Asegúrese de que su firewall local permita tráfico saliente al dominio del Control Plane.
+- **Puerto**: Por defecto `3000` (configurable mediante `GITGOV_SERVER_ADDR` en el lado del servidor).
+- **Firewall**: Permite el tráfico saliente desde las estaciones de trabajo al host del Control Plane en el puerto configurado.
+- **Producción**: Se recomienda encarecidamente TLS (HTTPS). HTTP solo se admite para evaluación local.
 
 ## Siguiente Fase
 
-- [**Configurar Políticas de Gobernanza**](/docs/governance) — Aprenda a establecer las reglas del camino.
+- [**Configurar Políticas de Gobernanza**](/docs/governance) — Define las reglas del camino.

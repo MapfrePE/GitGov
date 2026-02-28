@@ -81,7 +81,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri build
+        run: npx tauri build
 
       - name: Verify Authenticode signatures (required)
         shell: pwsh
@@ -155,11 +155,101 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri build -- --target universal-apple-darwin
+        run: npx tauri build --target universal-apple-darwin
+
+      - name: Compute SHA256 hashes (DMG)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for dmg in src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg; do
+            shasum -a 256 "$dmg" | awk '{print $1}' > "$dmg.sha256"
+          done
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: gitgov-macos-dmg-${{ github.ref_name }}
-          path: gitgov/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          path: |
+            gitgov/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            gitgov/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.sha256
+          retention-days: 90
+
+  build-linux:
+    name: Build Linux (AppImage + DEB)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gitgov
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gitgov/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gitgov/package-lock.json
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri app (Linux bundles)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --bundles appimage,deb
+
+      - name: Compute SHA256 hashes (Linux)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for appimage in src-tauri/target/release/bundle/appimage/*.AppImage; do
+            sha256sum "$appimage" | awk '{print $1}' > "$appimage.sha256"
+          done
+          for deb in src-tauri/target/release/bundle/deb/*.deb; do
+            sha256sum "$deb" | awk '{print $1}' > "$deb.sha256"
+          done
+
+      - name: Upload Linux AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitgov-linux-appimage-${{ github.ref_name }}
+          path: |
+            gitgov/src-tauri/target/release/bundle/appimage/*.AppImage
+            gitgov/src-tauri/target/release/bundle/appimage/*.sha256
+          retention-days: 90
+
+      - name: Upload Linux DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitgov-linux-deb-${{ github.ref_name }}
+          path: |
+            gitgov/src-tauri/target/release/bundle/deb/*.deb
+            gitgov/src-tauri/target/release/bundle/deb/*.sha256
           retention-days: 90

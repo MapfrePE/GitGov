@@ -1,0 +1,65 @@
+#!/bin/sh
+# GitGov pre-commit hook — valida identidad git antes de cada commit CLI
+# -----------------------------------------------------------------------
+# Activado automaticamente por: git config --local core.hooksPath .githooks
+# Para setup inicial ejecuta:   scripts/setup-dev.ps1
+#
+# Valida que user.name y user.email esten definidos y tengan formato valido.
+# Si falla, aborta el commit con mensaje accionable y comandos exactos de fix.
+
+ERRORS=0
+
+# Leer SOLO config local del repo (sin fallback global)
+GIT_NAME=$(git config --local user.name 2>/dev/null)
+
+GIT_EMAIL=$(git config --local user.email 2>/dev/null)
+
+# --- Validar user.name ---
+if [ -z "$GIT_NAME" ]; then
+    echo ""
+    echo "[GitGov] ERROR: git user.name no esta configurado."
+    echo "  Ejecuta: git config --local user.name \"Tu Nombre Completo\""
+    ERRORS=1
+fi
+
+# --- Validar user.email presente ---
+if [ -z "$GIT_EMAIL" ]; then
+    echo ""
+    echo "[GitGov] ERROR: git user.email no esta configurado."
+    echo "  Ejecuta: git config --local user.email \"tu@email.com\""
+    ERRORS=1
+fi
+
+# --- Validar formato basico del email (requiere @ y dominio) ---
+if [ -n "$GIT_EMAIL" ]; then
+    # Formato minimo: algo@algo.algo
+    case "$GIT_EMAIL" in
+        *@*.*) ;;  # formato OK
+        *)
+            echo ""
+            echo "[GitGov] ERROR: git user.email tiene formato invalido: '$GIT_EMAIL'"
+            echo "  Ejecuta: git config --local user.email \"tu@email.com\""
+            ERRORS=1
+            ;;
+    esac
+fi
+
+# --- Resultado ---
+if [ "$ERRORS" -ne 0 ]; then
+    echo ""
+    echo "[GitGov] Commit abortado: identidad git incompleta o invalida."
+    echo ""
+    echo "  Configura tu identidad local (solo afecta este repo):"
+    echo "    git config --local user.name  \"Tu Nombre Completo\""
+    echo "    git config --local user.email \"tu@dominio.com\""
+    echo ""
+    echo "  O ejecuta el script de onboarding:"
+    echo "    .\\scripts\\setup-dev.ps1"
+    echo ""
+    exit 1
+fi
+
+# Hook pasado OK — mostrar identidad actual para trazabilidad
+echo "[GitGov] Identidad verificada: $GIT_NAME <$GIT_EMAIL>"
+
+exit 0

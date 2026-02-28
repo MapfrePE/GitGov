@@ -171,6 +171,7 @@ pub fn run() {
             commands::cmd_unstage_all,
             commands::cmd_unstage_files,
             commands::cmd_commit,
+            commands::cmd_get_git_identity,
             commands::cmd_push,
             commands::cmd_list_branches,
             commands::cmd_get_current_branch,

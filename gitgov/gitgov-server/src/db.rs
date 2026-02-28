@@ -3578,6 +3578,252 @@ impl Database {
             })
             .collect())
     }
+
+    // ========================================================================
+    // ORG USERS — V1.4-A
+    // ========================================================================
+
+    fn row_to_org_user(row: &sqlx::postgres::PgRow) -> OrgUser {
+        OrgUser {
+            id: row.get("id"),
+            org_id: row.get("org_id"),
+            login: row.get("login"),
+            display_name: row.get("display_name"),
+            email: row.get("email"),
+            role: row.get("role"),
+            status: row.get("status"),
+            created_by: row.get("created_by"),
+            updated_by: row.get("updated_by"),
+            created_at: row.get("created_at_ms"),
+            updated_at: row.get("updated_at_ms"),
+        }
+    }
+
+    pub async fn upsert_org_user(
+        &self,
+        org_id: &str,
+        login: &str,
+        display_name: Option<&str>,
+        email: Option<&str>,
+        role: &str,
+        status: &str,
+        actor: &str,
+    ) -> Result<(OrgUser, bool), DbError> {
+        let existing_id = sqlx::query(
+            r#"
+            SELECT id::text AS id
+            FROM org_users
+            WHERE org_id = $1::uuid
+              AND login = $2
+            "#,
+        )
+        .bind(org_id)
+        .bind(login)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?
+        .map(|r| r.get::<String, _>("id"));
+
+        let created = existing_id.is_none();
+        let row = if let Some(id) = existing_id {
+            sqlx::query(
+                r#"
+                UPDATE org_users
+                SET
+                    display_name = COALESCE($2, display_name),
+                    email        = COALESCE($3, email),
+                    role         = $4,
+                    status       = $5,
+                    updated_by   = $6,
+                    updated_at   = NOW()
+                WHERE id = $1::uuid
+                RETURNING
+                    id::text,
+                    org_id::text,
+                    login,
+                    display_name,
+                    email,
+                    role,
+                    status,
+                    created_by,
+                    updated_by,
+                    EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                    EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+                "#,
+            )
+            .bind(&id)
+            .bind(display_name)
+            .bind(email)
+            .bind(role)
+            .bind(status)
+            .bind(actor)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO org_users (
+                    org_id, login, display_name, email, role, status, created_by, updated_by
+                )
+                VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $7)
+                RETURNING
+                    id::text,
+                    org_id::text,
+                    login,
+                    display_name,
+                    email,
+                    role,
+                    status,
+                    created_by,
+                    updated_by,
+                    EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                    EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+                "#,
+            )
+            .bind(org_id)
+            .bind(login)
+            .bind(display_name)
+            .bind(email)
+            .bind(role)
+            .bind(status)
+            .bind(actor)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?
+        };
+
+        Ok((Self::row_to_org_user(&row), created))
+    }
+
+    pub async fn list_org_users(
+        &self,
+        org_id: &str,
+        status: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<OrgUser>, i64), DbError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id::text,
+                org_id::text,
+                login,
+                display_name,
+                email,
+                role,
+                status,
+                created_by,
+                updated_by,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+            FROM org_users
+            WHERE org_id = $1::uuid
+              AND ($2::text IS NULL OR status = $2)
+            ORDER BY created_at DESC
+            LIMIT $3 OFFSET $4
+            "#,
+        )
+        .bind(org_id)
+        .bind(status)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let count_row = sqlx::query(
+            r#"
+            SELECT COUNT(*) AS total
+            FROM org_users
+            WHERE org_id = $1::uuid
+              AND ($2::text IS NULL OR status = $2)
+            "#,
+        )
+        .bind(org_id)
+        .bind(status)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let total: i64 = count_row.get("total");
+        let entries = rows.iter().map(Self::row_to_org_user).collect();
+        Ok((entries, total))
+    }
+
+    pub async fn get_org_user_by_id(
+        &self,
+        org_user_id: &str,
+        scope_org_id: Option<&str>,
+    ) -> Result<Option<OrgUser>, DbError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id::text,
+                org_id::text,
+                login,
+                display_name,
+                email,
+                role,
+                status,
+                created_by,
+                updated_by,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+            FROM org_users
+            WHERE id = $1::uuid
+              AND ($2::uuid IS NULL OR org_id = $2::uuid)
+            "#,
+        )
+        .bind(org_user_id)
+        .bind(scope_org_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|r| Self::row_to_org_user(&r)))
+    }
+
+    pub async fn update_org_user_status(
+        &self,
+        org_user_id: &str,
+        scope_org_id: Option<&str>,
+        status: &str,
+        actor: &str,
+    ) -> Result<Option<OrgUser>, DbError> {
+        let row = sqlx::query(
+            r#"
+            UPDATE org_users
+            SET
+                status     = $3,
+                updated_by = $4,
+                updated_at = NOW()
+            WHERE id = $1::uuid
+              AND ($2::uuid IS NULL OR org_id = $2::uuid)
+            RETURNING
+                id::text,
+                org_id::text,
+                login,
+                display_name,
+                email,
+                role,
+                status,
+                created_by,
+                updated_by,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+            "#,
+        )
+        .bind(org_user_id)
+        .bind(scope_org_id)
+        .bind(status)
+        .bind(actor)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|r| Self::row_to_org_user(&r)))
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

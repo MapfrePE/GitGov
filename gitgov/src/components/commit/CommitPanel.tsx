@@ -1,12 +1,17 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useRepoStore } from '@/store/useRepoStore'
 import { useAuthStore } from '@/store/useAuthStore'
 import { Button } from '@/components/shared/Button'
 import { COMMIT_TYPES } from '@/lib/constants'
 import { AlertTriangle, ArrowDown, ArrowUp, GitCommit, Upload, RotateCcw } from 'lucide-react'
 import { toast } from '@/components/shared/Toast'
-import { parseCommandError } from '@/lib/tauri'
+import { tauriInvoke, parseCommandError } from '@/lib/tauri'
 import clsx from 'clsx'
+
+interface GitIdentity {
+  name: string | null
+  email: string | null
+}
 
 function formatPushErrorForUser(rawError: unknown): string {
   const parsed = parseCommandError(String(rawError))
@@ -25,6 +30,7 @@ function formatPushErrorForUser(rawError: unknown): string {
 
 export function CommitPanel() {
   const {
+    repoPath,
     stagedFiles,
     fileChanges,
     currentBranch,
@@ -41,6 +47,33 @@ export function CommitPanel() {
   const [isCommitting, setIsCommitting] = useState(false)
   const [isPushing, setIsPushing] = useState(false)
   const [lastCommitHash, setLastCommitHash] = useState<string | null>(null)
+  const [gitIdentity, setGitIdentity] = useState<GitIdentity | null>(null)
+
+  useEffect(() => {
+    if (!repoPath) { setGitIdentity(null); return }
+    tauriInvoke<GitIdentity>('cmd_get_git_identity', { repoPath })
+      .then(setGitIdentity)
+      .catch(() => setGitIdentity(null))
+  }, [repoPath])
+
+  // Mismatch: la identidad local del repo difiere de la cuenta GitHub autenticada.
+  // La Desktop App siempre usa el usuario autenticado para commits, pero si el dev
+  // tambien usa git CLI en este repo, sus commits tendran el autor del git config local.
+  const identityMismatch = (() => {
+    if (!gitIdentity || !user) return null
+    const localEmail = gitIdentity.email ?? ''
+    const localName  = gitIdentity.name  ?? ''
+    const emailOk  = localEmail.toLowerCase().includes(user.login.toLowerCase())
+    const nameOk   = localName.toLowerCase().includes(user.login.toLowerCase()) ||
+                     (user.name && localName.toLowerCase().includes(user.name.toLowerCase()))
+    if (!localName || !localEmail) {
+      return { localName, localEmail, reason: 'incomplete' as const }
+    }
+    if (!emailOk && !nameOk) {
+      return { localName, localEmail, reason: 'mismatch' as const }
+    }
+    return null
+  })()
 
   const fullMessage = useMemo(() => {
     if (!message.trim()) return ''
@@ -61,9 +94,14 @@ export function CommitPanel() {
   const hasStagedFiles = stagedFiles.size > 0
   const hasUncommittedChanges = fileChanges.some((f) => f.staged) || stagedFiles.size > 0
   const canPush = Boolean(currentBranch) && (hasLocalCommits || lastCommitHash !== null || hasUncommittedChanges)
+  const isIdentityBlocked = Boolean(identityMismatch)
 
   const handleCommit = async () => {
     if (!user || !isValidMessage) return
+    if (isIdentityBlocked) {
+      toast('error', 'Commit bloqueado: la identidad git local no coincide con tu cuenta GitGov. Corrige user.name y user.email del repo para continuar.')
+      return
+    }
     setIsCommitting(true)
     try {
       const hash = await commit(
@@ -92,6 +130,10 @@ export function CommitPanel() {
 
   const handlePush = async () => {
     if (!user || !currentBranch) return
+    if (isIdentityBlocked) {
+      toast('error', 'Push bloqueado: la identidad git local no coincide con tu cuenta GitGov. Corrige user.name y user.email del repo para continuar.')
+      return
+    }
     setIsPushing(true)
     try {
       await push(currentBranch, user.login)
@@ -129,6 +171,38 @@ export function CommitPanel() {
 
   return (
     <div className="border-t border-surface-700/30 bg-surface-900/50 px-5 py-4">
+      {identityMismatch && (
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-warning-500/30 bg-warning-500/10 px-3 py-2">
+          <AlertTriangle size={13} strokeWidth={1.75} className="mt-0.5 shrink-0 text-warning-400" />
+          <div className="min-w-0">
+            <p className="text-[11px] font-medium text-warning-300">
+              {identityMismatch.reason === 'incomplete'
+                ? 'Identidad git incompleta en este repo'
+                : 'Identidad git difiere de tu cuenta GitGov'}
+            </p>
+            <p className="mt-0.5 text-[10px] text-surface-400">
+              {identityMismatch.reason === 'incomplete'
+                ? 'Commits por CLI no tendrán autor válido. '
+                : `CLI usará "${identityMismatch.localName} <${identityMismatch.localEmail}>" en vez de @${user?.login}. `}
+              Ejecuta{' '}
+              <code className="rounded bg-surface-800 px-1 text-warning-300">
+                git config --local user.name "Tu Nombre"
+              </code>{' '}
+              y{' '}
+              <code className="rounded bg-surface-800 px-1 text-warning-300">
+                git config --local user.email "tu@email.com"
+              </code>
+              {' '}o{' '}
+              <code className="rounded bg-surface-800 px-1 text-surface-300">
+                .\scripts\setup-dev.ps1
+              </code>
+            </p>
+            <p className="mt-1 text-[10px] text-warning-200">
+              Regla de bloqueo: GitGov Desktop no permite Commit ni Push hasta que la identidad local del repo esté completa y alineada con tu cuenta autenticada.
+            </p>
+          </div>
+        </div>
+      )}
       <div className="flex gap-4">
         <div className="flex-1 space-y-2">
           <div className="flex gap-2">
@@ -148,7 +222,7 @@ export function CommitPanel() {
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && hasStagedFiles && isValidMessage) {
+                if (e.key === 'Enter' && hasStagedFiles && isValidMessage && !isIdentityBlocked) {
                   handleCommit()
                 }
               }}
@@ -211,7 +285,7 @@ export function CommitPanel() {
               size="sm"
               onClick={handleCommit}
               loading={isCommitting}
-              disabled={!hasStagedFiles || !isValidMessage}
+              disabled={!hasStagedFiles || !isValidMessage || isIdentityBlocked}
             >
               <GitCommit size={13} strokeWidth={1.5} />
               Commit ({stagedFiles.size})
@@ -223,7 +297,7 @@ export function CommitPanel() {
             variant="outline"
             onClick={handlePush}
             loading={isPushing}
-            disabled={!canPush}
+            disabled={!canPush || isIdentityBlocked}
           >
             <Upload size={13} strokeWidth={1.5} />
             Push

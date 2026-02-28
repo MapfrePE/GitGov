@@ -41,6 +41,7 @@ pub struct AppState {
     pub worker_id: String,
     pub http_client: reqwest::Client,
     pub alert_webhook_url: Option<String>,
+    pub strict_actor_match: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1708,8 +1709,32 @@ pub async fn ingest_client_events(
     Json(batch): Json<ClientEventBatch>,
 ) -> impl IntoResponse {
     let mut events = Vec::new();
+    let strict_actor_match = state.strict_actor_match;
 
     for input in batch.events {
+        if strict_actor_match
+            && auth_user.role != UserRole::Admin
+            && input.user_login != auth_user.client_id
+        {
+            tracing::warn!(
+                auth_user = %auth_user.client_id,
+                requested_user_login = %input.user_login,
+                event_uuid = %input.event_uuid,
+                "Rejecting client event due to strict actor match enforcement"
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ClientEventResponse {
+                    accepted: vec![],
+                    duplicates: vec![],
+                    errors: vec![EventError {
+                        event_uuid: input.event_uuid,
+                        error: "user_login must match authenticated client_id (STRICT_ACTOR_MATCH)".to_string(),
+                    }],
+                }),
+            );
+        }
+
         let effective_user_login = if auth_user.role == UserRole::Admin {
             input.user_login.clone()
         } else {
@@ -2440,6 +2465,390 @@ pub async fn create_org(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": "Internal database error" })),
             ).into_response()
+        }
+    }
+}
+
+fn parse_user_role_strict(raw: Option<&str>) -> Result<UserRole, &'static str> {
+    match raw.unwrap_or("Developer").trim() {
+        "Admin" => Ok(UserRole::Admin),
+        "Architect" => Ok(UserRole::Architect),
+        "Developer" => Ok(UserRole::Developer),
+        "PM" => Ok(UserRole::PM),
+        _ => Err("role must be one of: Admin, Architect, Developer, PM"),
+    }
+}
+
+fn normalize_org_user_status(raw: Option<&str>) -> Result<String, &'static str> {
+    let normalized = raw.unwrap_or("active").trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "active" | "disabled" => Ok(normalized),
+        _ => Err("status must be 'active' or 'disabled'"),
+    }
+}
+
+// ============================================================================
+// ORG USERS (admin provisioning)
+// ============================================================================
+
+pub async fn create_org_user(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateOrgUserRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let login = payload.login.trim().to_string();
+    if login.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "login cannot be empty" })),
+        )
+            .into_response();
+    }
+
+    let role = match parse_user_role_strict(payload.role.as_deref()) {
+        Ok(r) => r,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response();
+        }
+    };
+
+    let status = match normalize_org_user_status(payload.status.as_deref()) {
+        Ok(s) => s,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response();
+        }
+    };
+
+    let org_id = match resolve_and_check_org_scope(
+        &state,
+        auth_user.org_id.as_deref(),
+        payload.org_name.as_deref(),
+        true,
+    )
+    .await
+    {
+        Ok(Some(org_id)) => org_id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "org_name is required for global admin keys" })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            let error = match err {
+                OrgScopeError::BadRequest => "org_name is required for global admin keys",
+                OrgScopeError::NotFound => "Organization not found",
+                OrgScopeError::Forbidden => "Requested org is outside API key scope",
+                OrgScopeError::Internal => "Internal database error",
+            };
+            return (org_scope_status(err), Json(serde_json::json!({ "error": error }))).into_response();
+        }
+    };
+
+    match state
+        .db
+        .upsert_org_user(
+            &org_id,
+            &login,
+            payload.display_name.as_deref(),
+            payload.email.as_deref(),
+            role.as_str(),
+            &status,
+            &auth_user.client_id,
+        )
+        .await
+    {
+        Ok((user, created)) => {
+            let audit = AdminAuditLogEntry {
+                id: Uuid::new_v4().to_string(),
+                actor_client_id: auth_user.client_id.clone(),
+                action: if created { "create_org_user" } else { "update_org_user" }.to_string(),
+                target_type: Some("org_user".to_string()),
+                target_id: Some(user.id.clone()),
+                metadata: serde_json::json!({
+                    "org_id": user.org_id,
+                    "login": user.login,
+                    "role": user.role,
+                    "status": user.status,
+                    "created": created
+                }),
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = state.db.insert_admin_audit_log(&audit).await {
+                tracing::warn!(error = %e, "Failed to write admin audit log (org_user upsert)");
+            }
+
+            (
+                if created { StatusCode::CREATED } else { StatusCode::OK },
+                Json(CreateOrgUserResponse { user, created }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, login = %login, org_id = %org_id, "Failed to upsert org user");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn list_org_users(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<OrgUsersQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let status = if let Some(raw) = query.status.as_deref() {
+        match normalize_org_user_status(Some(raw)) {
+            Ok(s) => Some(s),
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": msg })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
+    let org_id = match resolve_and_check_org_scope(
+        &state,
+        auth_user.org_id.as_deref(),
+        query.org_name.as_deref(),
+        true,
+    )
+    .await
+    {
+        Ok(Some(org_id)) => org_id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "org_name is required for global admin keys" })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            let error = match err {
+                OrgScopeError::BadRequest => "org_name is required for global admin keys",
+                OrgScopeError::NotFound => "Organization not found",
+                OrgScopeError::Forbidden => "Requested org is outside API key scope",
+                OrgScopeError::Internal => "Internal database error",
+            };
+            return (org_scope_status(err), Json(serde_json::json!({ "error": error }))).into_response();
+        }
+    };
+
+    let limit = if query.limit == 0 { 50 } else { query.limit.min(500) } as i64;
+    let offset = query.offset as i64;
+
+    match state
+        .db
+        .list_org_users(&org_id, status.as_deref(), limit, offset)
+        .await
+    {
+        Ok((entries, total)) => (StatusCode::OK, Json(OrgUsersResponse { entries, total })).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, org_id = %org_id, "Failed to list org users");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn update_org_user_status(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Path(org_user_id): Path<String>,
+    Json(payload): Json<UpdateOrgUserStatusRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let status = match normalize_org_user_status(Some(payload.status.as_str())) {
+        Ok(s) => s,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response();
+        }
+    };
+
+    match state
+        .db
+        .update_org_user_status(
+            &org_user_id,
+            auth_user.org_id.as_deref(),
+            &status,
+            &auth_user.client_id,
+        )
+        .await
+    {
+        Ok(Some(user)) => {
+            let audit = AdminAuditLogEntry {
+                id: Uuid::new_v4().to_string(),
+                actor_client_id: auth_user.client_id.clone(),
+                action: "update_org_user_status".to_string(),
+                target_type: Some("org_user".to_string()),
+                target_id: Some(user.id.clone()),
+                metadata: serde_json::json!({
+                    "login": user.login,
+                    "status": user.status
+                }),
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = state.db.insert_admin_audit_log(&audit).await {
+                tracing::warn!(error = %e, "Failed to write admin audit log (org_user status)");
+            }
+            (StatusCode::OK, Json(user)).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "org_user not found" })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, org_user_id = %org_user_id, "Failed to update org user status");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn create_api_key_for_org_user(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Path(org_user_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let org_user = match state
+        .db
+        .get_org_user_by_id(&org_user_id, auth_user.org_id.as_deref())
+        .await
+    {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiKeyResponse {
+                    api_key: None,
+                    client_id: "".to_string(),
+                    error: Some("org_user not found".to_string()),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, org_user_id = %org_user_id, "Failed to load org user for API key creation");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiKeyResponse {
+                    api_key: None,
+                    client_id: "".to_string(),
+                    error: Some("Internal database error".to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if org_user.status != "active" {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiKeyResponse {
+                api_key: None,
+                client_id: org_user.login,
+                error: Some("org_user must be active to issue API key".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
+    let api_key = Uuid::new_v4().to_string();
+    let key_hash = format!("{:x}", Sha256::digest(api_key.as_bytes()));
+    let role = UserRole::from_str(&org_user.role);
+
+    match state
+        .db
+        .create_api_key(
+            &key_hash,
+            &org_user.login,
+            Some(org_user.org_id.as_str()),
+            &role,
+        )
+        .await
+    {
+        Ok(()) => {
+            let audit = AdminAuditLogEntry {
+                id: Uuid::new_v4().to_string(),
+                actor_client_id: auth_user.client_id.clone(),
+                action: "create_api_key_for_org_user".to_string(),
+                target_type: Some("org_user".to_string()),
+                target_id: Some(org_user_id),
+                metadata: serde_json::json!({
+                    "client_id": org_user.login,
+                    "role": org_user.role,
+                    "org_id": org_user.org_id
+                }),
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = state.db.insert_admin_audit_log(&audit).await {
+                tracing::warn!(error = %e, "Failed to write admin audit log (create_api_key_for_org_user)");
+            }
+
+            (
+                StatusCode::CREATED,
+                Json(ApiKeyResponse {
+                    api_key: Some(api_key),
+                    client_id: org_user.login,
+                    error: None,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, org_user_id = %org_user_id, "Failed to create API key for org user");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiKeyResponse {
+                    api_key: None,
+                    client_id: org_user.login,
+                    error: Some("Internal database error".to_string()),
+                }),
+            )
+                .into_response()
         }
     }
 }

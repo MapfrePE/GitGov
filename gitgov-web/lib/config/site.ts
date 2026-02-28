@@ -1,5 +1,7 @@
 const defaultDownloadPath = '/downloads/GitGov_0.1.0_x64-setup.exe';
 const configuredDownloadPath = process.env.NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL?.trim();
+const configuredChecksum = process.env.NEXT_PUBLIC_DESKTOP_DOWNLOAD_CHECKSUM?.trim();
+const configuredMsiUrl = process.env.NEXT_PUBLIC_DESKTOP_DOWNLOAD_MSI_URL?.trim();
 
 export const siteConfig = {
     name: 'GitGov',
@@ -13,7 +15,12 @@ export const siteConfig = {
     downloadPath: configuredDownloadPath && configuredDownloadPath.length > 0
         ? configuredDownloadPath
         : defaultDownloadPath,
-    downloadChecksum: 'sha256:pending-build',  // placeholder
+    downloadChecksum: configuredChecksum && configuredChecksum.length > 0
+        ? configuredChecksum
+        : 'sha256:pending-build',
+    downloadMsiUrl: (configuredMsiUrl && configuredMsiUrl.length > 0
+        ? configuredMsiUrl
+        : null) as string | null,
 
     links: {
         docs: '/docs',
@@ -44,6 +51,7 @@ export const siteConfig = {
         ],
         company: [
             { label: 'Contact', href: '/contact' },
+            { label: 'Privacy', href: '/privacy' },
         ],
     },
 

@@ -1,5 +1,189 @@
 # GitGov - Registro de Progreso
 
+---
+
+## Actualización Reciente (2026-02-28) — Guardrails de identidad git (3 capas)
+
+### Qué se implementó
+Prevención de mismatch de identidad git en tres capas para evitar errores de autor que rompen CI/Vercel:
+
+**Capa 1 — Onboarding (`scripts/setup-dev.ps1`):**
+- Script PowerShell idempotente para configurar `user.name`, `user.email` y `core.hooksPath` en modo `--local` (solo este repo, no global).
+- Muestra valores actuales, acepta valores por parámetro o interactivo, valida formato de email.
+- Advierte si el valor difiere del git config global (comportamiento intencional y esperado).
+
+**Capa 2 — Terminal (`.githooks/pre-commit`):**
+- Hook sh activado por `core.hooksPath = .githooks`.
+- Valida que `user.name` y `user.email` estén definidos y con formato válido antes de cada commit CLI.
+- Si falla: aborta el commit y muestra comandos exactos de remediación y referencia al script de setup.
+
+**Capa 3 — Desktop App (`CommitPanel.tsx`):**
+- Nuevo comando Tauri `cmd_get_git_identity` (Rust, `git_commands.rs`) que lee `user.name/email` del repo via git2.
+- Registrado en `lib.rs` `invoke_handler`.
+- `CommitPanel` llama el comando al cambiar `repoPath` y detecta mismatch: identidad incompleta o email que no contiene el login del usuario autenticado.
+- Banner de warning no bloqueante visible con instrucciones de remediación (`git config --local` + referencia al script).
+
+### Archivos modificados/creados
+- `scripts/setup-dev.ps1` — nuevo, script de onboarding
+- `.githooks/pre-commit` — nuevo, hook de validación
+- `gitgov/src-tauri/src/commands/git_commands.rs` — añadido `cmd_get_git_identity` (antes de `cmd_push`)
+- `gitgov/src-tauri/src/lib.rs` — registrado `cmd_get_git_identity` en invoke_handler
+- `gitgov/src/components/commit/CommitPanel.tsx` — añadido `GitIdentity` interface, `useEffect` de detección, banner warning
+- `docs/QUICKSTART.md` — nueva sección "Setup de identidad git por repo" (paso 1)
+- `docs/PROGRESS.md` — esta entrada
+
+### Impacto en Golden Path
+- NO modifica auth headers, `/events`, contratos `ServerStats`/`CombinedEvent` ni lógica de push.
+- `cmd_get_git_identity` es read-only sobre el git config. No afecta commits ni push.
+- El warning en Desktop es no bloqueante: commit/push siguen funcionando igual.
+- Golden Path intacto: `stage_files → commit → attempt_push → successful_push → dashboard` sin cambios.
+
+### Validación ejecutada
+- Ver sección de validaciones al final de esta entrada.
+
+---
+
+## Actualización Reciente (2026-02-28) — Provisioning de usuarios por organización (admin)
+
+### Qué se implementó
+- Se agregó migración `gitgov/gitgov-server/supabase_schema_v9.sql` para tabla `org_users`:
+  - Campos de negocio: `org_id`, `login`, `display_name`, `email`, `role`, `status`.
+  - Restricciones: `role` en (`Admin|Architect|Developer|PM`), `status` en (`active|disabled`), `UNIQUE (org_id, login)`.
+  - Auditoría de cambios por timestamps (`created_at`, `updated_at`) y trigger de actualización.
+- Se añadieron modelos backend en `src/models.rs`:
+  - `OrgUser`, `CreateOrgUserRequest/Response`, `OrgUsersQuery/Response`, `UpdateOrgUserStatusRequest`.
+- Se añadieron funciones de acceso a datos en `src/db.rs`:
+  - `upsert_org_user`, `list_org_users`, `get_org_user_by_id`, `update_org_user_status`.
+- Se añadieron handlers y validaciones en `src/handlers.rs`:
+  - `create_org_user`, `list_org_users`, `update_org_user_status`, `create_api_key_for_org_user`.
+  - Validación estricta de `role` y `status`.
+  - Scope por organización reutilizando helper de autorización.
+  - Registro de acciones en `admin_audit_log`.
+- Se registraron nuevas rutas en `src/main.rs`:
+  - `GET/POST /org-users`
+  - `PATCH /org-users/{id}/status`
+  - `POST /org-users/{id}/api-key`
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` → `52 passed; 0 failed`.
+- `cd gitgov/gitgov-server && cargo clippy` → sin errores de compilación; warnings preexistentes.
+- `cd gitgov && npx tsc -b` → sin errores.
+
+### Nota operativa
+- Esta entrega deja el backend listo para que un admin gestione usuarios de su org y emita API keys por usuario.
+- No cambia contrato del Golden Path de ingest (`/events`) ni el flujo Desktop commit/push.
+- Validación live local (server nuevo): `POST/GET /org-users`, `PATCH /org-users/{id}/status`, `POST /org-users/{id}/api-key` ejecutadas con éxito (incluyendo `409` esperado cuando el usuario está `disabled`).
+- Estado producción (`http://3.143.150.199`): `/health` y `/stats` responden `200`, pero `/org-users` aún responde `404` hasta desplegar este backend en EC2.
+
+---
+
+## Actualización Reciente (2026-02-28) — Auditoría de preguntas + alineación de claims SSO
+
+### Qué se implementó
+- Se creó `questions.md` en raíz con auditoría técnica de 18 preguntas de negocio/integraciones, cada una con evidencia `archivo:línea`.
+- Se ajustó copy de pricing en `gitgov-web/lib/i18n/translations.ts` para evitar sobrepromesa de SSO:
+  - Starter/Team: `Compliance reports`
+  - Enterprise: `Compliance reports (SSO roadmap)`
+- Login UX/seguridad (MVP):
+  - Nueva pantalla de desbloqueo por PIN local opcional (`PinUnlockScreen`).
+  - Configuración de PIN local (activar/actualizar/desactivar/bloquear ahora) en Settings.
+  - Acción explícita de "Cambiar usuario" en Settings y Sidebar.
+  - Control server opcional `GITGOV_STRICT_ACTOR_MATCH` para rechazar eventos cuyo `user_login` no coincida con `client_id` autenticado.
+
+### Impacto
+- Comercial: reduce riesgo de vender capacidades no implementadas.
+- Técnico: Golden Path intacto; cambios aditivos en UX de sesión y enforcement opcional por env.
+
+---
+
+## Actualización Reciente (2026-02-28) — CI preparado para 3 plataformas
+
+### Qué se implementó
+- Workflow `.github/workflows/build-signed.yml` actualizado para builds de **Windows + macOS + Linux**:
+  - Windows: corrige comando de build a `npx tauri build` (antes usaba `npm run tauri build`).
+  - macOS: corrige comando a `npx tauri build --target universal-apple-darwin` y agrega `.sha256` para DMG.
+  - Linux: nuevo job `build-linux` en `ubuntu-latest` con bundles `AppImage` + `deb` y generación de `.sha256`.
+- Script local `scripts/build_signed_windows.ps1` corregido para usar `npx tauri build`.
+- `docs/ENTERPRISE_DEPLOY.md` actualizado con panorama multiplataforma (artefactos por OS y prerequisitos).
+
+### Estado
+- **Listo en código** para pipeline de 3 plataformas.
+- Pendiente comercial: certificado Authenticode (Windows) y notarización Apple (macOS) para distribución enterprise sin warnings.
+
+---
+
+## Actualización Reciente (2026-02-28) — Copy comercial neutral en página de descarga
+
+### Qué se ajustó
+- Se reemplazó copy alarmista por copy neutral en `gitgov-web`:
+  - Banner de descarga: de “sin firma temporal / ejecutar de todas formas” a mensaje oficial y neutral.
+  - Paso de instalación en Windows: ahora instrucción genérica de verificación en pantalla (sin CTA agresiva).
+  - Etiqueta `Checksum` renombrada a `Integridad (SHA256)`.
+  - Bloque de hash marcado como verificación opcional.
+
+---
+
+## Riesgos Abiertos (Feb 2026)
+
+| # | Riesgo | Estado | Plan de cierre | Owner |
+|---|--------|--------|----------------|-------|
+| R-1 | **SmartScreen (Windows Defender)** — El instalador sin firma Authenticode activa advertencia SmartScreen en Windows. Usuarios necesitan clicar "Más información" → "Ejecutar de todas formas". | **Abierto** | Adquirir certificado OV/EV Authenticode. Configurar CI con secrets `WINDOWS_CERTIFICATE*`. Trigger: primer cliente pago. | Equipo producto |
+| R-2 | **Falta firma Authenticode** — Los instaladores `.exe` y `.msi` actuales no están firmados digitalmente. EDR enterprise puede bloquearlos. | **Abierto** | Ver R-1. El proceso de firma con `scripts/build_signed_windows.ps1` está documentado y listo para activarse. | Equipo infra |
+| R-3 | **JWT_SECRET hardcodeado en producción** — Si `GITGOV_JWT_SECRET` no se sobreescribe con un secreto fuerte, cualquiera puede forjar tokens. | **Mitigado localmente** — pendiente verificar en EC2 | Confirmar que la instancia EC2 tiene `GITGOV_JWT_SECRET` configurado con `openssl rand -hex 32`. | DevOps |
+| R-4 | **Checksum `pending-build` en web** — Si `NEXT_PUBLIC_DESKTOP_DOWNLOAD_CHECKSUM` no se actualiza en Vercel en cada release, la página muestra `sha256:pending-build`. | **Proceso documentado** | Seguir `docs/RELEASE_CHECKLIST.md` paso 4 en cada release. Automatizar en CI futuro. | Release manager |
+| R-5 | **HTTPS en Control Plane (EC2)** — El server en EC2 sirve en HTTP. Credenciales en tránsito sin cifrar. | **Abierto** | Configurar dominio + Let's Encrypt + reverse proxy (nginx/caddy). | DevOps |
+
+---
+
+## Actualización Reciente (2026-02-28) — Download page: checksum, SHA256 copy, hash verify, MSI, API
+
+### Qué se implementó
+
+**gitgov-web — página /download y configuración de release:**
+
+- `lib/config/site.ts`: dos nuevas variables de entorno:
+  - `NEXT_PUBLIC_DESKTOP_DOWNLOAD_CHECKSUM` — checksum real del instalador; fallback a `sha256:pending-build`
+  - `NEXT_PUBLIC_DESKTOP_DOWNLOAD_MSI_URL` — URL opcional para segundo botón `.msi`
+- `lib/release.ts` (nuevo): función `getReleaseMetadata()` unificada; usada por la página y la API
+- `app/api/release-metadata/route.ts` (nuevo): endpoint GET read-only que devuelve `{ version, downloadUrl, checksum, msiUrl, available }`
+- `app/(marketing)/download/page.tsx`: refactorizado para llamar `getReleaseMetadata()` y pasar `release` a `DownloadClient`
+- `components/download/DownloadCard.tsx`:
+  - Botón "Copiar SHA256" (icono clipboard) junto al checksum con feedback "Copiado" durante 2 s
+  - Nuevo componente `HashVerifyBlock`: muestra comando `Get-FileHash` con el nombre real del archivo y el hash esperado
+  - Prop `msiUrl?: string | null`: renderiza botón secundario `.msi` si está definida
+- `components/download/DownloadClient.tsx`:
+  - Banner neutral "Instalador sin firma Authenticode (temporal)" sobre las tarjetas
+  - Incluye `HashVerifyBlock` debajo de `ReleaseInfo`
+  - Prop cambiada a `release: ReleaseMetadata`
+- `components/download/index.ts`: exporta `HashVerifyBlock`
+- `lib/i18n/translations.ts`: 9 nuevas claves EN/ES (`copyChecksum`, `copiedChecksum`, `buttonMsi`, `unsignedBanner`, `verifyHash.*`)
+
+**Scripts y docs:**
+
+- `scripts/generate_sha256.ps1` (nuevo): recibe `-InstallerPath`, escribe `.sha256` al lado, imprime hash y acción siguiente (actualizar Vercel)
+- `docs/ENTERPRISE_DEPLOY.md`: nueva subsección "Generating a .sha256 file" en §7 con documentación del script
+- `docs/RELEASE_CHECKLIST.md` (nuevo): checklist completo (build → hash → upload → Vercel env → smoke)
+- `gitgov-web/tests/e2e/download-url.mjs` (nuevo): smoke test Node.js sin dependencias externas; verifica shape de `/api/release-metadata` y URL externa cuando `NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL` está definida
+
+### Validación ejecutada
+
+- `npm run typecheck` → sin errores
+- `npm run lint` → `✔ No ESLint warnings or errors`
+
+---
+
+## Actualización Reciente (2026-02-28) — Updater Desktop apuntando a GitHub Releases
+
+### Qué se implementó
+- El endpoint OTA del plugin updater en Tauri se cambió a GitHub Releases:
+  - `https://github.com/MapfrePE/GitGov/releases/latest/download/latest.json`
+- El fallback manual del updater ahora usa `https://github.com/MapfrePE/GitGov/releases/latest`.
+- `getDesktopUpdateFallbackUrl()` se endureció para no concatenar `/stable` cuando la URL base ya es un destino directo (`/releases/latest`, `.exe` o `.json`).
+- Se recompiló Desktop local (`npx tauri build`) y se regeneró firma updater + `latest.json` (timestamp actualizado).
+- Pendiente operativo manual: subir al release `v0.1.0` los archivos actualizados:
+  - `gitgov/src-tauri/target/release/bundle/nsis/GitGov_0.1.0_x64-setup.exe.sig`
+  - `release/desktop/stable/latest.json`
+
 ## Actualización Reciente (2026-02-28) — Fix de descarga en Web Deploy (URL externa)
 
 ### Qué se implementó
@@ -9,6 +193,11 @@
 - `app/(marketing)/download/page.tsx` ya no bloquea el botón cuando el instalador se hospeda fuera de `public/`:
   - En modo URL externa (`http/https`), marca `available: true` sin hacer `fs.stat` local.
   - Mantiene el comportamiento anterior para artefactos locales en `public/downloads`.
+
+### Pendiente explícito (comercial)
+- **Code signing Authenticode OV/EV**: diferido hasta primer cliente pago por restricción de presupuesto.
+- Estado actual: descarga funcional vía GitHub Releases, con posible advertencia de SmartScreen en Windows.
+- Acción futura: adquirir certificado de code signing, configurar secretos CI (`WINDOWS_CERTIFICATE*`) y publicar instaladores firmados.
 
 ## Actualización Reciente (2026-02-28) — Build firmado local de Desktop (Windows)
 

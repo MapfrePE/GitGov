@@ -8,7 +8,7 @@ import { Modal } from '@/components/shared/Modal'
 import { User, FolderOpen, FileCode, LogOut, Shield, Users, Download, RefreshCw, Sparkles, ExternalLink } from 'lucide-react'
 
 export function SettingsPage() {
-  const { user, logout } = useAuthStore()
+  const { user, logout, isPinEnabled, setLocalPin, clearLocalPin, lockSession, pinError } = useAuthStore()
   const { repoPath, config } = useRepoStore()
   const {
     status: updaterStatus,
@@ -31,6 +31,7 @@ export function SettingsPage() {
     setChangelogExpanded,
   } = useUpdateStore()
   const [showRepoSelector, setShowRepoSelector] = useState(false)
+  const [pinInput, setPinInput] = useState('')
 
   return (
     <div className="h-full flex flex-col bg-surface-950">
@@ -109,7 +110,7 @@ export function SettingsPage() {
                   </p>
                 )}
                 {updaterError && (
-                  <p className="text-[10px] text-danger-400 mt-1 break-words">{updaterError}</p>
+                  <p className="text-[10px] text-danger-400 mt-1 wrap-break-word">{updaterError}</p>
                 )}
                 {!isUpdaterConfigured && isUpdaterSupported && (
                   <p className="text-[10px] text-warning-300 mt-1">
@@ -250,6 +251,47 @@ export function SettingsPage() {
                   <LogOut size={13} strokeWidth={1.5} />
                   Cerrar sesión
                 </Button>
+                <Button variant="secondary" size="sm" onClick={logout}>
+                  Cambiar usuario
+                </Button>
+
+                <div className="mt-3 pt-3 border-t border-surface-700/30 space-y-2">
+                  <p className="text-[10px] text-surface-500 uppercase tracking-widest font-medium">PIN local (opcional)</p>
+                  <p className="text-[11px] text-surface-500">
+                    Protege el acceso local a la app en esta máquina. No reemplaza autenticación de servidor.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      value={pinInput}
+                      onChange={(e) => setPinInput(e.target.value)}
+                      placeholder={isPinEnabled ? 'Nuevo PIN (4-6 dígitos)' : 'PIN (4-6 dígitos)'}
+                      className="bg-surface-900/60 rounded-lg border border-surface-700/30 px-3 py-1.5 text-xs text-white outline-none focus:border-brand-500/60"
+                    />
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        setLocalPin(pinInput)
+                        setPinInput('')
+                      }}
+                    >
+                      {isPinEnabled ? 'Actualizar PIN' : 'Activar PIN'}
+                    </Button>
+                    {isPinEnabled && (
+                      <Button variant="outline" size="sm" onClick={clearLocalPin}>
+                        Desactivar PIN
+                      </Button>
+                    )}
+                    {isPinEnabled && (
+                      <Button variant="secondary" size="sm" onClick={lockSession}>
+                        Bloquear ahora
+                      </Button>
+                    )}
+                  </div>
+                  {pinError && <p className="text-[11px] text-danger-400">{pinError}</p>}
+                </div>
               </div>
             )}
           </section>

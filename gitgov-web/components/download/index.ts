@@ -1,1 +1,1 @@
-export { DownloadCard, ReleaseInfo } from './DownloadCard';
+export { DownloadCard, ReleaseInfo, HashVerifyBlock } from './DownloadCard';

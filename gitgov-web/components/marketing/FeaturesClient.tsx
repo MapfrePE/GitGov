@@ -104,14 +104,14 @@ export function FeaturesClient() {
                         <SectionReveal delay={0.1}>
                             <div className="flex flex-wrap justify-center gap-3 mb-20">
                                 {[
-                                    { label: 'Core', href: '#core', cls: 'text-brand-400 border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20' },
-                                    { label: 'Infrastructure', href: '#infra', cls: 'text-accent-400 border-accent-400/30 bg-accent-400/10 hover:bg-accent-400/20' },
-                                    { label: 'Integrations', href: '#integrations', cls: 'text-purple-400 border-purple-400/30 bg-purple-400/10 hover:bg-purple-400/20' },
+                                    { label: 'Core', href: '#core' },
+                                    { label: 'Infrastructure', href: '#infra' },
+                                    { label: 'Integrations', href: '#integrations' },
                                 ].map((p) => (
                                     <a
                                         key={p.label}
                                         href={p.href}
-                                        className={`flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold border transition-all duration-200 ${p.cls}`}
+                                        className="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold border transition-all duration-200 text-brand-400 border-brand-500/30 bg-brand-500/10 hover:bg-brand-500/20"
                                     >
                                         {p.label}
                                         <HiOutlineArrowRight size={13} />
@@ -129,7 +129,7 @@ export function FeaturesClient() {
                                 className="absolute top-[44px] left-[calc(16.67%+28px)] right-[calc(16.67%+28px)] h-px pointer-events-none hidden sm:block"
                                 style={{
                                     background:
-                                        'linear-gradient(90deg, rgba(0,229,218,0.5) 0%, rgba(255,187,26,0.5) 50%, rgba(168,85,247,0.5) 100%)',
+                                        'linear-gradient(90deg, rgba(0,229,218,0.5) 0%, rgba(0,229,218,0.3) 50%, rgba(0,229,218,0.5) 100%)',
                                 }}
                             />
                             <div className="grid grid-cols-3 gap-4 relative z-10">
@@ -138,45 +138,33 @@ export function FeaturesClient() {
                                         icon: <HiOutlineDesktopComputer size={22} />,
                                         label: 'Desktop',
                                         sub: 'Tauri · Rust · React',
-                                        borderCls: 'border-brand-500/40',
-                                        bgCls: 'bg-brand-500/10',
-                                        textCls: 'text-brand-400',
-                                        dotCls: 'bg-brand-400',
                                     },
                                     {
                                         icon: <HiOutlineShieldCheck size={22} />,
                                         label: 'Control Plane',
                                         sub: 'Axum · PostgreSQL',
-                                        borderCls: 'border-accent-400/40',
-                                        bgCls: 'bg-accent-400/10',
-                                        textCls: 'text-accent-400',
-                                        dotCls: 'bg-accent-400',
                                     },
                                     {
                                         icon: <HiOutlinePuzzle size={22} />,
                                         label: 'Integrations',
                                         sub: 'Jenkins · Jira · GitHub',
-                                        borderCls: 'border-purple-400/40',
-                                        bgCls: 'bg-purple-400/10',
-                                        textCls: 'text-purple-400',
-                                        dotCls: 'bg-purple-400',
                                     },
                                 ].map((node, i) => (
                                     <div
                                         key={i}
-                                        className={`glass-card rounded-2xl p-5 border ${node.borderCls} text-center relative overflow-hidden group cursor-default`}
+                                        className="glass-card rounded-2xl p-5 border border-brand-500/30 text-center relative overflow-hidden group cursor-default"
                                     >
                                         <div
-                                            className={`absolute inset-0 ${node.bgCls} opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none`}
+                                            className="absolute inset-0 bg-brand-500/10 opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none"
                                         />
                                         <div
-                                            className={`w-11 h-11 rounded-xl ${node.bgCls} border ${node.borderCls} flex items-center justify-center ${node.textCls} mx-auto mb-3 relative z-10`}
+                                            className="w-11 h-11 rounded-xl bg-brand-500/10 border border-brand-500/30 flex items-center justify-center text-brand-400 mx-auto mb-3 relative z-10"
                                         >
                                             {node.icon}
                                         </div>
                                         <div className="text-white text-sm font-bold mb-0.5 relative z-10">{node.label}</div>
                                         <div className="text-gray-600 text-[10px] font-mono relative z-10">{node.sub}</div>
-                                        <div className={`w-1.5 h-1.5 rounded-full ${node.dotCls} mx-auto mt-3 relative z-10 animate-pulse`} />
+                                        <div className="w-1.5 h-1.5 rounded-full bg-brand-400 mx-auto mt-3 relative z-10 animate-pulse" />
                                     </div>
                                 ))}
                             </div>
@@ -205,8 +193,8 @@ export function FeaturesClient() {
                                 {[
                                     { value: '100%', label: 'Event Capture', sub: 'commit · push · merge · rebase', valueCls: 'text-brand-400' },
                                     { value: '0', label: 'Data Overwrites', sub: 'append-only guarantee', valueCls: 'text-green-400' },
-                                    { value: '30s', label: 'Auto-Refresh', sub: 'dashboard live updates', valueCls: 'text-accent-400' },
-                                    { value: '4+', label: 'Integrations', sub: 'Jenkins · Jira · GitHub · API', valueCls: 'text-purple-400' },
+                                    { value: '30s', label: 'Auto-Refresh', sub: 'dashboard live updates', valueCls: 'text-brand-400' },
+                                    { value: '4+', label: 'Integrations', sub: 'Jenkins · Jira · GitHub · API', valueCls: 'text-brand-400' },
                                 ].map((m, i) => (
                                     <div key={i} className="text-center py-8 px-4">
                                         <div className={`text-4xl md:text-5xl font-black tracking-tight mb-1.5 ${m.valueCls}`}>
@@ -271,7 +259,7 @@ export function FeaturesClient() {
                                         <div className="flex items-center gap-1.5 px-4 py-3 bg-white/[0.04] border-b border-white/[0.06]">
                                             <div className="flex gap-1.5">
                                                 <div className="w-2.5 h-2.5 rounded-full bg-red-500/70" />
-                                                <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/70" />
+                                                <div className="w-2.5 h-2.5 rounded-full bg-white/20" />
                                                 <div className="w-2.5 h-2.5 rounded-full bg-green-500/70" />
                                             </div>
                                             <span className="text-gray-600 ml-2.5 text-[10px] tracking-wide flex-1">
@@ -288,12 +276,12 @@ export function FeaturesClient() {
                                                 { type: 'commit', sha: 'a3f8c2e', msg: 'feat: add Jenkins correlation widget', ago: '2ms', typeCls: 'text-brand-400', dotCls: 'bg-brand-400' },
                                                 { type: 'push  ', sha: 'a3f8c2e', msg: '→ origin/main · 3 files changed', ago: '3ms', typeCls: 'text-green-400', dotCls: 'bg-green-400' },
                                                 { type: 'commit', sha: 'b91d04f', msg: 'fix: offset default in pagination', ago: '12s', typeCls: 'text-brand-400', dotCls: 'bg-brand-400' },
-                                                { type: 'stage ', sha: 'c44e71a', msg: 'src/handlers.rs · src/models.rs', ago: '28s', typeCls: 'text-accent-400', dotCls: 'bg-accent-400' },
+                                                { type: 'stage ', sha: 'c44e71a', msg: 'src/handlers.rs · src/models.rs', ago: '28s', typeCls: 'text-gray-400', dotCls: 'bg-gray-500' },
                                             ].map((row, i) => (
                                                 <div key={i} className="flex items-center gap-3 text-[11px] leading-none">
                                                     <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${row.dotCls}`} />
                                                     <span className={`${row.typeCls} font-bold w-[46px] shrink-0`}>{row.type}</span>
-                                                    <span className="text-yellow-500/60 shrink-0">{row.sha}</span>
+                                                    <span className="text-gray-500/80 shrink-0">{row.sha}</span>
                                                     <span className="text-gray-300 truncate flex-1">{row.msg}</span>
                                                     <span className="text-gray-600 shrink-0">{row.ago}</span>
                                                 </div>
@@ -304,7 +292,7 @@ export function FeaturesClient() {
                                             {[
                                                 { key: 'events/min', val: '247', valCls: 'text-brand-400' },
                                                 { key: 'queue', val: '0', valCls: 'text-green-400' },
-                                                { key: 'uptime', val: '99.9%', valCls: 'text-accent-400' },
+                                                { key: 'uptime', val: '99.9%', valCls: 'text-brand-400' },
                                             ].map((stat, i) => (
                                                 <React.Fragment key={stat.key}>
                                                     {i > 0 && <div className="w-px h-3 bg-white/10" />}
@@ -359,19 +347,19 @@ export function FeaturesClient() {
                     </div>
 
                     {/* Bento grid — Row 2 */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch">
 
                         {/* [C] Policy card with toml snippet */}
-                        <SectionReveal delay={0.15}>
-                            <div className="glass-card rounded-2xl p-6 hover:-translate-y-1 transition-transform duration-300 group">
-                                <div className="flex items-start gap-4">
-                                    <div className="w-10 h-10 rounded-xl bg-orange-400/10 border border-orange-400/20 flex items-center justify-center shrink-0 text-orange-400">
+                        <SectionReveal delay={0.15} className="flex">
+                            <div className="glass-card rounded-2xl p-6 hover:-translate-y-1 transition-transform duration-300 group w-full flex flex-col">
+                                <div className="flex items-start gap-4 flex-1">
+                                    <div className="w-10 h-10 rounded-xl bg-brand-500/15 border border-brand-500/30 flex items-center justify-center shrink-0 text-brand-400">
                                         <HiOutlineClipboardCheck size={20} />
                                     </div>
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2 mb-2">
                                             <h3 className="text-sm font-black text-white">{t('features.policy.title') as string}</h3>
-                                            <span className="px-1.5 py-0.5 text-[9px] font-black tracking-widest uppercase rounded bg-orange-400/10 text-orange-400 border border-orange-400/20">
+                                            <span className="px-1.5 py-0.5 text-[9px] font-black tracking-widest uppercase rounded bg-brand-500/10 text-brand-400 border border-brand-500/20">
                                                 {t('advisory') as string}
                                             </span>
                                         </div>
@@ -381,7 +369,7 @@ export function FeaturesClient() {
                                         {/* gitgov.toml snippet */}
                                         <div className="bg-black/50 rounded-lg border border-white/[0.06] overflow-hidden">
                                             <div className="px-3 py-1.5 bg-white/[0.03] border-b border-white/[0.04] flex items-center gap-2">
-                                                <div className="w-1.5 h-1.5 rounded-full bg-orange-400/50" />
+                                                <div className="w-1.5 h-1.5 rounded-full bg-brand-400/50" />
                                                 <span className="text-[9px] font-mono text-gray-600">gitgov.toml</span>
                                             </div>
                                             <div className="px-3 py-2.5 text-[10px] font-mono space-y-1">
@@ -409,10 +397,10 @@ export function FeaturesClient() {
                         </SectionReveal>
 
                         {/* [D] Offline resilience with retry bars */}
-                        <SectionReveal delay={0.2}>
-                            <div className="glass-card rounded-2xl p-6 hover:-translate-y-1 transition-transform duration-300 group">
-                                <div className="flex items-start gap-4">
-                                    <div className="w-10 h-10 rounded-xl bg-purple-400/10 border border-purple-400/20 flex items-center justify-center shrink-0 text-purple-400">
+                        <SectionReveal delay={0.2} className="flex">
+                            <div className="glass-card rounded-2xl p-6 hover:-translate-y-1 transition-transform duration-300 group w-full flex flex-col">
+                                <div className="flex items-start gap-4 flex-1">
+                                    <div className="w-10 h-10 rounded-xl bg-brand-500/15 border border-brand-500/30 flex items-center justify-center shrink-0 text-brand-400">
                                         <HiOutlineWifi size={20} />
                                     </div>
                                     <div className="flex-1">
@@ -429,8 +417,8 @@ export function FeaturesClient() {
                                                 {[
                                                     { delay: '1s', h: 18, cls: 'bg-red-400/50' },
                                                     { delay: '2s', h: 28, cls: 'bg-red-400/50' },
-                                                    { delay: '5s', h: 38, cls: 'bg-yellow-400/50' },
-                                                    { delay: '10s', h: 52, cls: 'bg-yellow-400/50' },
+                                                    { delay: '5s', h: 38, cls: 'bg-white/20' },
+                                                    { delay: '10s', h: 52, cls: 'bg-white/20' },
                                                     { delay: '20s', h: 68, cls: 'bg-green-400/60' },
                                                     { delay: '40s', h: 82, cls: 'bg-green-400/70' },
                                                 ].map((bar, i) => (
@@ -464,70 +452,107 @@ export function FeaturesClient() {
                     className="absolute inset-0 pointer-events-none"
                     style={{
                         opacity: 0.025,
-                        backgroundImage: `radial-gradient(circle at 1px 1px, rgba(255,187,26,0.9) 1px, transparent 0)`,
+                        backgroundImage: `radial-gradient(circle at 1px 1px, rgba(0,229,218,0.9) 1px, transparent 0)`,
                         backgroundSize: '44px 44px',
                     }}
                 />
                 {/* Section spotlight */}
                 <div
                     className="absolute top-1/2 right-[-200px] -translate-y-1/2 w-[600px] h-[600px] rounded-full pointer-events-none"
-                    style={{ background: 'radial-gradient(ellipse, rgba(255,187,26,0.07) 0%, transparent 65%)' }}
+                    style={{ background: 'radial-gradient(ellipse, rgba(0,229,218,0.07) 0%, transparent 65%)' }}
                 />
 
                 <Container>
                     <SectionLabel
-                        icon={<HiOutlineDocumentSearch size={16} className="text-accent-400" />}
+                        icon={<HiOutlineDocumentSearch size={16} className="text-brand-400" />}
                         label="Infrastructure"
-                        iconCls="text-accent-400 bg-accent-400/10 border-accent-400/25"
-                        textCls="text-accent-400"
-                        lineCls="from-accent-400/30"
+                        iconCls="text-brand-400 bg-brand-500/10 border-brand-500/25"
+                        textCls="text-brand-400"
+                        lineCls="from-brand-500/30"
                     />
 
-                    <div className="grid lg:grid-cols-5 gap-12 items-start">
-                        {/* Left — sticky */}
-                        <SectionReveal className="lg:col-span-2" direction="left">
-                            <div className="lg:sticky lg:top-28">
-                                <h2 className="text-3xl md:text-4xl lg:text-5xl font-black text-white mb-4 leading-[0.95]">
-                                    {t('features.infra.title') as string}{' '}
-                                    <span className="gradient-text">{t('features.infra.titleAccent') as string}</span>
-                                </h2>
-                                <p className="text-gray-400 leading-relaxed mb-10 text-sm max-w-xs">
-                                    {t('features.infra.description') as string}
-                                </p>
+                    <div className="grid lg:grid-cols-2 gap-8 items-stretch">
+                        {/* Left — full-height card */}
+                        <SectionReveal direction="left" className="flex">
+                            <div
+                                className="glass-card rounded-2xl p-7 flex flex-col justify-between w-full"
+                                style={{ background: 'linear-gradient(145deg, rgba(0,229,218,0.05), rgba(0,229,218,0.01)), #0d1117' }}
+                            >
+                                <div>
+                                    <h2 className="text-3xl md:text-4xl font-black text-white mb-3 leading-[0.95]">
+                                        {t('features.infra.title') as string}{' '}
+                                        <span className="gradient-text">{t('features.infra.titleAccent') as string}</span>
+                                    </h2>
+                                    <p className="text-gray-400 leading-relaxed mb-7 text-sm">
+                                        {t('features.infra.description') as string}
+                                    </p>
 
-                                {/* Spec table */}
-                                <div className="border-t border-white/[0.07] pt-6 space-y-3.5">
-                                    {[
-                                        { label: 'Event ingestion', val: 'Batch · deduplicated' },
-                                        { label: 'Auto-refresh', val: '30 s interval' },
-                                        { label: 'Access roles', val: 'Admin · Dev · PM · Architect' },
-                                        { label: 'Backend', val: 'Rust · Axum · PostgreSQL' },
-                                        { label: 'Event scoping', val: 'Admin sees all · Dev sees own' },
-                                    ].map((row) => (
-                                        <div key={row.label} className="flex items-center gap-3">
-                                            <HiOutlineCheckCircle size={13} className="text-accent-400 shrink-0" />
-                                            <span className="text-gray-500 text-xs">{row.label}</span>
-                                            <span className="text-gray-300 font-semibold ml-auto text-right text-xs font-mono">
-                                                {row.val}
-                                            </span>
-                                        </div>
-                                    ))}
+                                    {/* Spec table */}
+                                    <div className="border-t border-white/[0.07] pt-5 space-y-3 mb-7">
+                                        {[
+                                            { label: 'Event ingestion', val: 'Batch · deduplicated' },
+                                            { label: 'Auto-refresh', val: '30 s interval' },
+                                            { label: 'Access roles', val: 'Admin · Dev · PM · Architect' },
+                                            { label: 'Backend', val: 'Rust · Axum · PostgreSQL' },
+                                            { label: 'Event scoping', val: 'Admin sees all · Dev sees own' },
+                                            { label: 'Auth', val: 'Bearer token · SHA256 hashed' },
+                                            { label: 'Rate limiting', val: '240 events/min default' },
+                                            { label: 'Deduplication', val: 'UUID per event · idempotent' },
+                                        ].map((row) => (
+                                            <div key={row.label} className="flex items-center gap-3">
+                                                <HiOutlineCheckCircle size={13} className="text-brand-400 shrink-0" />
+                                                <span className="text-gray-500 text-xs">{row.label}</span>
+                                                <span className="text-gray-300 font-semibold ml-auto text-right text-xs font-mono">
+                                                    {row.val}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Bottom — API endpoints */}
+                                <div className="bg-black/40 rounded-xl border border-white/[0.06] overflow-hidden">
+                                    <div className="px-4 py-2.5 bg-white/[0.03] border-b border-white/[0.05] flex items-center gap-2">
+                                        <div className="w-1.5 h-1.5 rounded-full bg-brand-400 animate-pulse" />
+                                        <span className="text-[9px] font-mono text-gray-600 uppercase tracking-widest">
+                                            Key API endpoints
+                                        </span>
+                                    </div>
+                                    <div className="divide-y divide-white/[0.04]">
+                                        {[
+                                            { method: 'POST', path: '/events',     note: 'batch ingest' },
+                                            { method: 'GET',  path: '/logs',       note: 'scoped by role' },
+                                            { method: 'GET',  path: '/stats',      note: 'admin only' },
+                                            { method: 'GET',  path: '/dashboard',  note: 'admin only' },
+                                            { method: 'POST', path: '/integrations/jenkins', note: 'CI events' },
+                                            { method: 'POST', path: '/integrations/jira',    note: 'ticket coverage' },
+                                            { method: 'GET',  path: '/health',     note: 'public' },
+                                        ].map((ep, i) => (
+                                            <div key={i} className="flex items-center gap-3 px-4 py-2">
+                                                <span className={`text-[9px] font-mono font-black w-8 shrink-0 ${ep.method === 'POST' ? 'text-brand-400' : 'text-gray-400'}`}>
+                                                    {ep.method}
+                                                </span>
+                                                <span className="text-[10px] font-mono text-gray-300 flex-1">{ep.path}</span>
+                                                <span className="text-[9px] font-mono text-gray-600 shrink-0">{ep.note}</span>
+                                            </div>
+                                        ))}
+                                    </div>
                                 </div>
                             </div>
                         </SectionReveal>
 
                         {/* Right — feature cards */}
-                        <div className="lg:col-span-3 space-y-4">
+                        <div className="space-y-4">
 
                             {/* Centralized store with event table */}
                             <SectionReveal delay={0} direction="right">
                                 <div className="glass-card rounded-2xl p-6 hover:-translate-y-1 transition-transform duration-300 group">
                                     <div className="flex items-start gap-4">
-                                        <div className="w-11 h-11 rounded-xl border border-accent-400/20 bg-accent-400/10 flex items-center justify-center shrink-0 text-accent-400">
+                                        <div className="w-11 h-11 rounded-xl border border-brand-500/25 bg-brand-500/10 flex items-center justify-center shrink-0 text-brand-400">
                                             <HiOutlineDocumentSearch size={22} />
                                         </div>
                                         <div className="flex-1 min-w-0">
-                                            <h3 className="text-base font-black text-white mb-1.5 group-hover:text-accent-300 transition-colors">
+                                            <h3 className="text-base font-black text-white mb-1.5 group-hover:text-brand-300 transition-colors">
                                                 {t('features.centralized.title') as string}
                                             </h3>
                                             <p className="text-sm text-gray-400 leading-relaxed mb-4">
@@ -562,7 +587,7 @@ export function FeaturesClient() {
                                                 ))}
                                             </div>
                                             <div className="flex items-center gap-1.5 mt-2.5">
-                                                <div className="w-1 h-1 rounded-full bg-accent-400" />
+                                                <div className="w-1 h-1 rounded-full bg-brand-400" />
                                                 <span className="text-[10px] font-mono text-gray-600">
                                                     PostgreSQL · Supabase · append-only · UUID dedup
                                                 </span>
@@ -589,14 +614,14 @@ export function FeaturesClient() {
                                             {/* Active filter pills */}
                                             <div className="flex flex-wrap gap-1.5">
                                                 {[
-                                                    { label: 'author: carlos', cls: 'text-brand-400 border-brand-500/25 bg-brand-500/10' },
-                                                    { label: 'branch: main', cls: 'text-accent-400 border-accent-400/25 bg-accent-400/10' },
-                                                    { label: 'type: commit', cls: 'text-green-400 border-green-400/25 bg-green-400/10' },
-                                                    { label: 'last 7d', cls: 'text-purple-400 border-purple-400/25 bg-purple-400/10' },
+                                                    { label: 'author: carlos' },
+                                                    { label: 'branch: main' },
+                                                    { label: 'type: commit' },
+                                                    { label: 'last 7d' },
                                                 ].map((f, i) => (
                                                     <span
                                                         key={i}
-                                                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-mono font-semibold border ${f.cls}`}
+                                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-mono font-semibold border text-brand-400 border-brand-500/25 bg-brand-500/10"
                                                     >
                                                         <span className="opacity-60">×</span> {f.label}
                                                     </span>
@@ -611,11 +636,11 @@ export function FeaturesClient() {
                             <SectionReveal delay={0.2} direction="right">
                                 <div className="glass-card rounded-2xl p-6 hover:-translate-y-1 transition-transform duration-300 group">
                                     <div className="flex items-start gap-4">
-                                        <div className="w-11 h-11 rounded-xl border border-purple-400/20 bg-purple-400/10 flex items-center justify-center shrink-0 text-purple-400">
+                                        <div className="w-11 h-11 rounded-xl border border-brand-500/20 bg-brand-500/10 flex items-center justify-center shrink-0 text-brand-400">
                                             <HiOutlineDesktopComputer size={22} />
                                         </div>
                                         <div className="flex-1">
-                                            <h3 className="text-base font-black text-white mb-1.5 group-hover:text-purple-300 transition-colors">
+                                            <h3 className="text-base font-black text-white mb-1.5 group-hover:text-brand-300 transition-colors">
                                                 {t('features.dashboard.title') as string}
                                             </h3>
                                             <p className="text-sm text-gray-400 leading-relaxed mb-4">
@@ -627,7 +652,7 @@ export function FeaturesClient() {
                                                     <span className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">
                                                         pipeline health · 7 days
                                                     </span>
-                                                    <span className="text-[9px] font-mono text-purple-400 font-bold">
+                                                    <span className="text-[9px] font-mono text-brand-400 font-bold">
                                                         30s auto-refresh
                                                     </span>
                                                 </div>
@@ -636,7 +661,7 @@ export function FeaturesClient() {
                                                         <div
                                                             key={i}
                                                             className="flex-1 rounded-sm overflow-hidden flex flex-col justify-end"
-                                                            style={{ background: 'rgba(168,85,247,0.12)' }}
+                                                            style={{ background: 'rgba(0,229,218,0.08)' }}
                                                         >
                                                             <div
                                                                 className="rounded-sm"
@@ -646,7 +671,7 @@ export function FeaturesClient() {
                                                                         pct > 80
                                                                             ? 'rgba(52,211,153,0.6)'
                                                                             : pct > 65
-                                                                            ? 'rgba(168,85,247,0.55)'
+                                                                            ? 'rgba(0,229,218,0.45)'
                                                                             : 'rgba(248,113,113,0.55)',
                                                                 }}
                                                             />
@@ -677,16 +702,16 @@ export function FeaturesClient() {
                 {/* Section spotlight */}
                 <div
                     className="absolute top-1/3 left-1/2 -translate-x-1/2 w-[900px] h-[500px] rounded-full pointer-events-none"
-                    style={{ background: 'radial-gradient(ellipse, rgba(168,85,247,0.06) 0%, transparent 65%)' }}
+                    style={{ background: 'radial-gradient(ellipse, rgba(0,229,218,0.06) 0%, transparent 65%)' }}
                 />
 
                 <Container>
                     <SectionLabel
-                        icon={<HiOutlinePuzzle size={16} className="text-purple-400" />}
+                        icon={<HiOutlinePuzzle size={16} className="text-brand-400" />}
                         label="Integrations"
-                        iconCls="text-purple-400 bg-purple-400/10 border-purple-400/25"
-                        textCls="text-purple-400"
-                        lineCls="from-purple-400/30"
+                        iconCls="text-brand-400 bg-brand-500/10 border-brand-500/25"
+                        textCls="text-brand-400"
+                        lineCls="from-brand-500/30"
                     />
 
                     <SectionReveal>
@@ -706,17 +731,17 @@ export function FeaturesClient() {
                         {/* Jenkins */}
                         <SectionReveal delay={0}>
                             <div className="group glass-card rounded-2xl overflow-hidden hover:-translate-y-2 transition-transform duration-300 h-full flex flex-col">
-                                <div className="h-[3px] bg-gradient-to-r from-orange-600 via-amber-400 to-orange-500" />
+                                <div className="h-[3px] bg-brand-500/50" />
                                 <div className="p-6 flex flex-col flex-1">
                                     <div className="flex items-start justify-between mb-5">
-                                        <div className="w-12 h-12 rounded-xl bg-orange-500/10 border border-orange-500/20 flex items-center justify-center">
-                                            <HiOutlineLightningBolt size={24} className="text-orange-400" />
+                                        <div className="w-12 h-12 rounded-xl bg-brand-500/10 border border-brand-500/20 flex items-center justify-center">
+                                            <HiOutlineLightningBolt size={24} className="text-brand-400" />
                                         </div>
-                                        <span className="px-2.5 py-1 text-[9px] font-black tracking-widest uppercase rounded-full bg-orange-500/15 text-orange-400 border border-orange-500/25">
+                                        <span className="px-2.5 py-1 text-[9px] font-black tracking-widest uppercase rounded-full bg-brand-500/15 text-brand-400 border border-brand-500/25">
                                             Jenkins
                                         </span>
                                     </div>
-                                    <h3 className="text-lg font-black text-white mb-2 group-hover:text-orange-300 transition-colors">
+                                    <h3 className="text-lg font-black text-white mb-2 group-hover:text-brand-300 transition-colors">
                                         {t('features.jenkins.title') as string}
                                     </h3>
                                     <p className="text-sm text-gray-400 leading-relaxed mb-5 flex-1">
@@ -777,17 +802,17 @@ export function FeaturesClient() {
                         {/* Jira */}
                         <SectionReveal delay={0.1}>
                             <div className="group glass-card rounded-2xl overflow-hidden hover:-translate-y-2 transition-transform duration-300 h-full flex flex-col">
-                                <div className="h-[3px] bg-gradient-to-r from-blue-600 via-cyan-400 to-blue-500" />
+                                <div className="h-[3px] bg-brand-500/50" />
                                 <div className="p-6 flex flex-col flex-1">
                                     <div className="flex items-start justify-between mb-5">
-                                        <div className="w-12 h-12 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
-                                            <HiOutlinePuzzle size={24} className="text-blue-400" />
+                                        <div className="w-12 h-12 rounded-xl bg-brand-500/10 border border-brand-500/20 flex items-center justify-center">
+                                            <HiOutlinePuzzle size={24} className="text-brand-400" />
                                         </div>
-                                        <span className="px-2.5 py-1 text-[9px] font-black tracking-widest uppercase rounded-full bg-blue-500/15 text-blue-400 border border-blue-500/25">
+                                        <span className="px-2.5 py-1 text-[9px] font-black tracking-widest uppercase rounded-full bg-white/5 text-gray-400 border border-white/10">
                                             {t('preview') as string}
                                         </span>
                                     </div>
-                                    <h3 className="text-lg font-black text-white mb-2 group-hover:text-blue-300 transition-colors">
+                                    <h3 className="text-lg font-black text-white mb-2 group-hover:text-brand-300 transition-colors">
                                         {t('features.jira.title') as string}
                                     </h3>
                                     <p className="text-sm text-gray-400 leading-relaxed mb-5 flex-1">
@@ -808,7 +833,7 @@ export function FeaturesClient() {
                                                 <div key={i} className="flex items-center gap-2.5 text-[10px] font-mono">
                                                     <span
                                                         className={`shrink-0 w-16 ${
-                                                            item.linked ? 'text-blue-400' : 'text-gray-600'
+                                                            item.linked ? 'text-brand-400' : 'text-gray-600'
                                                         }`}
                                                     >
                                                         {item.id}
@@ -829,15 +854,15 @@ export function FeaturesClient() {
                                         <div className="mt-2.5 pt-2.5 border-t border-white/[0.05] flex items-center justify-between">
                                             <span className="text-[9px] font-mono text-gray-600">2 / 3 linked</span>
                                             <div className="flex-1 mx-3 h-1 rounded-full bg-white/[0.06] overflow-hidden">
-                                                <div className="h-full w-2/3 rounded-full bg-blue-400/50" />
+                                                <div className="h-full w-2/3 rounded-full bg-brand-400/50" />
                                             </div>
-                                            <span className="text-[9px] font-mono text-blue-400 font-bold">66%</span>
+                                            <span className="text-[9px] font-mono text-brand-400 font-bold">66%</span>
                                         </div>
                                     </div>
 
                                     <div className="pt-4 border-t border-white/[0.06] space-y-1.5">
                                         <div className="flex items-center gap-2">
-                                            <div className="w-2 h-2 rounded-full bg-blue-400" />
+                                            <div className="w-2 h-2 rounded-full bg-brand-400/60" />
                                             <span className="text-xs text-gray-400 font-bold">Preview · V1.2-B</span>
                                         </div>
                                         <p className="text-[11px] font-mono text-gray-600">
@@ -851,17 +876,17 @@ export function FeaturesClient() {
                         {/* GitHub */}
                         <SectionReveal delay={0.2}>
                             <div className="group glass-card rounded-2xl overflow-hidden hover:-translate-y-2 transition-transform duration-300 h-full flex flex-col">
-                                <div className="h-[3px] bg-gradient-to-r from-purple-600 via-violet-400 to-purple-500" />
+                                <div className="h-[3px] bg-brand-500/50" />
                                 <div className="p-6 flex flex-col flex-1">
                                     <div className="flex items-start justify-between mb-5">
-                                        <div className="w-12 h-12 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center">
-                                            <HiOutlineTrendingUp size={24} className="text-purple-400" />
+                                        <div className="w-12 h-12 rounded-xl bg-brand-500/10 border border-brand-500/20 flex items-center justify-center">
+                                            <HiOutlineTrendingUp size={24} className="text-brand-400" />
                                         </div>
-                                        <span className="px-2.5 py-1 text-[9px] font-black tracking-widest uppercase rounded-full bg-purple-500/15 text-purple-400 border border-purple-500/25">
+                                        <span className="px-2.5 py-1 text-[9px] font-black tracking-widest uppercase rounded-full bg-brand-500/15 text-brand-400 border border-brand-500/25">
                                             {t('available') as string}
                                         </span>
                                     </div>
-                                    <h3 className="text-lg font-black text-white mb-2 group-hover:text-purple-300 transition-colors">
+                                    <h3 className="text-lg font-black text-white mb-2 group-hover:text-brand-300 transition-colors">
                                         {t('features.github.title') as string}
                                     </h3>
                                     <p className="text-sm text-gray-400 leading-relaxed mb-5 flex-1">
@@ -877,7 +902,7 @@ export function FeaturesClient() {
                                             {['push', 'create', 'pull_request', 'status', 'review'].map((ev, i) => (
                                                 <span
                                                     key={i}
-                                                    className="px-2 py-1 rounded-md text-[9px] font-mono font-semibold bg-purple-400/10 text-purple-400 border border-purple-400/20"
+                                                    className="px-2 py-1 rounded-md text-[9px] font-mono font-semibold bg-brand-500/10 text-brand-400 border border-brand-500/20"
                                                 >
                                                     {ev}
                                                 </span>

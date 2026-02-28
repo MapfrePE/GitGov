@@ -81,7 +81,7 @@ try {
 
         Push-Location $appRoot
         try {
-            npm run tauri build
+            npx tauri build
         }
         finally {
             Pop-Location

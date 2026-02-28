@@ -11,7 +11,7 @@ use axum::{
     middleware,
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
     Router,
 };
 use clap::Parser;
@@ -134,6 +134,13 @@ fn parse_usize_env(key: &str, default: usize) -> usize {
     std::env::var(key)
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_bool_env(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(default)
 }
 
@@ -417,6 +424,7 @@ async fn main() {
     });
 
     let alert_webhook_url = std::env::var("GITGOV_ALERT_WEBHOOK_URL").ok();
+    let strict_actor_match = parse_bool_env("GITGOV_STRICT_ACTOR_MATCH", true);
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -433,6 +441,7 @@ async fn main() {
         worker_id: worker_id_clone.clone(),
         http_client,
         alert_webhook_url,
+        strict_actor_match,
     });
     
     let worker_id_for_log = worker_id_clone;
@@ -561,6 +570,9 @@ async fn main() {
         .route("/exports", get(handlers::list_exports))
         .route("/me", get(handlers::get_me))
         .route("/orgs", post(handlers::create_org))
+        .route("/org-users", get(handlers::list_org_users).post(handlers::create_org_user))
+        .route("/org-users/{id}/status", patch(handlers::update_org_user_status))
+        .route("/org-users/{id}/api-key", post(handlers::create_api_key_for_org_user))
         .route("/api-keys", get(handlers::list_api_keys).post(handlers::create_api_key))
         .route("/api-keys/{id}/revoke", post(handlers::revoke_api_key))
         .route(
@@ -645,6 +657,10 @@ async fn main() {
     tracing::info!("  GET  /policy/:repo/history      - History (auth)");
     tracing::info!("  POST /export                    - Export (auth)");
     tracing::info!("  POST /orgs                      - Create/upsert org (admin)");
+    tracing::info!("  POST /org-users                 - Create/update org user (admin)");
+    tracing::info!("  GET  /org-users                 - List org users (admin)");
+    tracing::info!("  PATCH /org-users/:id/status     - Activate/disable org user (admin)");
+    tracing::info!("  POST /org-users/:id/api-key     - Issue API key for org user (admin)");
     tracing::info!("  POST /api-keys                  - Create API key (admin)");
     tracing::info!("  POST /audit-stream/github       - GitHub audit log stream (admin)");
     tracing::info!("  (opt) JENKINS_WEBHOOK_SECRET    - Extra shared secret header x-gitgov-jenkins-secret");
