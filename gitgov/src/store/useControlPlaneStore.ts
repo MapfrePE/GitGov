@@ -141,6 +141,14 @@ interface JiraCoverageFilters {
   branch: string
 }
 
+interface ActiveDev7dEntry {
+  user_login: string
+  events: number
+  last_seen: number
+  suspicious_test_data: boolean
+  sample_repo_empty_count: number
+}
+
 export interface ApiKeyInfo {
   id: string
   client_id: string
@@ -189,6 +197,8 @@ interface ControlPlaneState {
   serverConfig: ServerConfig | null
   serverStats: ServerStats | null
   serverLogs: CombinedEvent[]
+  activeDevs7d: ActiveDev7dEntry[]
+  activeDevs7dUpdatedAt: number | null
   logsPage: number
   logsPageSize: number
   jenkinsCorrelations: CommitPipelineCorrelation[]
@@ -217,6 +227,7 @@ interface ControlPlaneActions {
   loadStats: () => Promise<void>
   loadDailyActivity: (days?: number) => Promise<void>
   loadLogs: (limit?: number, offset?: number) => Promise<void>
+  loadActiveDevs7d: () => Promise<void>
   setLogsPage: (page: number) => void
   loadJenkinsCorrelations: (limit?: number) => Promise<void>
   loadPrMergeEvidence: (limit?: number) => Promise<void>
@@ -240,6 +251,11 @@ const JIRA_TICKET_DETAIL_TTL_MS = 2 * 60 * 1000
 // Compatibility fallback: existing desktop setups relied on this default key.
 // Keep it as last-resort fallback so the dashboard/logs continue working.
 const LEGACY_DEFAULT_API_KEY = '57f1ed59-371d-46ef-9fdf-508f59bc4963'
+const DEV_ACTIVITY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+
+function isLikelySyntheticLogin(login: string): boolean {
+  return /^(alias_|erase_ok_|hb_user_|user_[0-9a-f]{6,}|test_?user|golden_?test|smoke|manual-check|victim_)/i.test(login)
+}
 
 function normalizeLoopbackUrl(url: string): string {
   const trimmed = url.trim()
@@ -349,6 +365,8 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   serverConfig: null,
   serverStats: null,
   serverLogs: [],
+  activeDevs7d: [],
+  activeDevs7dUpdatedAt: null,
   logsPage: 0,
   logsPageSize: 10,
   jenkinsCorrelations: [],
@@ -411,6 +429,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
         get().loadStats(),
         get().loadDailyActivity(14),
         get().loadLogs(params?.logLimit ?? 50),
+        get().loadActiveDevs7d(),
         get().loadJenkinsCorrelations(50),
         get().loadPrMergeEvidence(200),
         get().loadTicketCoverage({
@@ -463,6 +482,58 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       set({ serverLogs: logs })
     } catch (e) {
       set({ error: parseCommandError(String(e)).message })
+    }
+  },
+
+  loadActiveDevs7d: async () => {
+    const { serverConfig } = get()
+    if (!serverConfig) return
+
+    const now = Date.now()
+    const start = now - DEV_ACTIVITY_WINDOW_MS
+    try {
+      const logs = await tauriInvoke<CombinedEvent[]>('cmd_server_get_logs', {
+        config: serverConfig,
+        filter: {
+          limit: 500,
+          offset: 0,
+          start_date: start,
+          end_date: now,
+        },
+      })
+
+      const grouped = new Map<string, {
+        events: number
+        last_seen: number
+        sample_repo_empty_count: number
+      }>()
+
+      for (const log of logs) {
+        const login = (log.user_login ?? '').trim()
+        if (!login) continue
+        const prev = grouped.get(login) ?? { events: 0, last_seen: 0, sample_repo_empty_count: 0 }
+        prev.events += 1
+        if (log.created_at > prev.last_seen) prev.last_seen = log.created_at
+        if (!log.repo_name && !log.branch) prev.sample_repo_empty_count += 1
+        grouped.set(login, prev)
+      }
+
+      const activeDevs7d: ActiveDev7dEntry[] = Array.from(grouped.entries())
+        .map(([user_login, agg]) => {
+          const allEmptyRepoBranch = agg.sample_repo_empty_count === agg.events
+          return {
+            user_login,
+            events: agg.events,
+            last_seen: agg.last_seen,
+            suspicious_test_data: isLikelySyntheticLogin(user_login) || allEmptyRepoBranch,
+            sample_repo_empty_count: agg.sample_repo_empty_count,
+          }
+        })
+        .sort((a, b) => b.events - a.events || b.last_seen - a.last_seen)
+
+      set({ activeDevs7d, activeDevs7dUpdatedAt: now })
+    } catch {
+      // Non-fatal fallback: keep existing list if request fails.
     }
   },
 
@@ -699,6 +770,8 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       isConnected: false,
       serverStats: null,
       serverLogs: [],
+      activeDevs7d: [],
+      activeDevs7dUpdatedAt: null,
       logsPage: 0,
       jenkinsCorrelations: [],
       prMergeEvidence: [],

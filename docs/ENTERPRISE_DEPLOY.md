@@ -156,6 +156,28 @@ Required GitHub Actions secrets:
 
 If any of these are missing or invalid, release jobs on `v*` tags fail by design.
 
+### Local signed build (Windows)
+
+For local/rehearsal signed builds outside CI, use:
+
+```powershell
+.\scripts\build_signed_windows.ps1 -RepoRoot . -PfxPath "C:\secrets\gitgov-codesign.pfx" -PfxPassword "<password>"
+```
+
+Options:
+
+- `-Thumbprint "<thumbprint>"`: use an already-installed cert from `Cert:\CurrentUser\My` without importing PFX.
+- `-PfxBase64 "<base64>"`: import a base64-encoded PFX blob (same format as CI secret).
+
+The script:
+
+1. Imports/selects the code-signing cert
+2. Injects `certificateThumbprint` into `src-tauri/tauri.conf.json` temporarily
+3. Runs `npm run tauri build`
+4. Verifies Authenticode status (`Valid`) for MSI/NSIS
+5. Emits `.sha256` files next to installers
+6. Restores `tauri.conf.json`
+
 ---
 
 ## 9. Firewall / Proxy Requirements

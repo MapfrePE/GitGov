@@ -1,5 +1,49 @@
 # GitGov - Registro de Progreso
 
+## Actualización Reciente (2026-02-28) — Fix de descarga en Web Deploy (URL externa)
+
+### Qué se implementó
+- `gitgov-web` ahora soporta descarga del Desktop por URL externa configurable:
+  - Nueva configuración: `NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL`.
+  - Si está definida, `siteConfig.downloadPath` usa esa URL en lugar de `/downloads/...`.
+- `app/(marketing)/download/page.tsx` ya no bloquea el botón cuando el instalador se hospeda fuera de `public/`:
+  - En modo URL externa (`http/https`), marca `available: true` sin hacer `fs.stat` local.
+  - Mantiene el comportamiento anterior para artefactos locales en `public/downloads`.
+
+## Actualización Reciente (2026-02-28) — Build firmado local de Desktop (Windows)
+
+### Qué se implementó
+- Nuevo script operativo: `scripts/build_signed_windows.ps1`
+  - Soporta certificado por `-PfxPath`/`-PfxBase64` o `-Thumbprint`.
+  - Inyecta temporalmente `certificateThumbprint` en `src-tauri/tauri.conf.json`, ejecuta `npm run tauri build`, valida firma Authenticode de MSI/NSIS y genera `.sha256`.
+  - Restaura `tauri.conf.json` al finalizar (incluso si falla el build).
+- Documentación de uso local añadida en `docs/ENTERPRISE_DEPLOY.md` (sección "Local signed build (Windows)").
+
+## Actualización Reciente (2026-02-28) — Auditoría de Devs Activos + Marcado Synthetic/Test
+
+### Qué se implementó
+- **Detalle auditable para `Devs Activos 7d` en Dashboard**:
+  - El card ahora abre un modal con lista de usuarios activos en 7 días, número de eventos y último timestamp.
+  - Se añadió acción `loadActiveDevs7d()` en store para construir la lista desde `/logs` (ventana 7d, `limit=500`) sin romper compatibilidad con servidores que no tengan endpoints nuevos.
+- **Señal de datos sospechosos en el detalle de devs**:
+  - Cada usuario se marca como `suspicious/test` si coincide con patrones sintéticos (`alias_*`, `erase_ok_*`, `hb_user_*`, etc.) o si todos sus eventos de la muestra llegan sin `repo` ni `branch`.
+- **Marcado visual en Commits Recientes**:
+  - Se agregó badge `synthetic/test` por fila cuando el evento luce sintético (patrón de login o shape de evento sin repo/branch).
+
+### Archivos modificados
+- `gitgov/src/store/useControlPlaneStore.ts`
+- `gitgov/src/components/control_plane/ServerDashboard.tsx`
+- `gitgov/src/components/control_plane/MetricsGrid.tsx`
+- `gitgov/src/components/control_plane/RecentCommitsTable.tsx`
+
+### Validación ejecutada
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ServerDashboard.tsx src/components/control_plane/MetricsGrid.tsx src/components/control_plane/RecentCommitsTable.tsx` → sin errores
+- Validación contractual no destructiva contra server activo:
+  - `GET /health` → 200
+  - `GET /stats` (Bearer) → 200
+  - `GET /logs?limit=5&offset=0` (Bearer) → 200
+
 ## Actualización Reciente (2026-02-28) — Scope Helpers Unificados (logs/signals/aliases)
 
 ### Correcciones aplicadas

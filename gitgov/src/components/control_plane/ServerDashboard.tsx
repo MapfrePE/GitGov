@@ -10,16 +10,20 @@ import { EventBreakdownGrid } from './EventBreakdownGrid'
 import { RecentCommitsTable } from './RecentCommitsTable'
 import { ApiKeyManagerWidget } from './ApiKeyManagerWidget'
 import { ExportPanel } from './ExportPanel'
+import { Modal } from '@/components/shared/Modal'
+import { Badge } from '@/components/shared/Badge'
 
 export function ServerDashboard() {
   const {
     serverStats, dailyActivity, ticketCoverage, userRole,
     isConnected, isRefreshingDashboard, refreshDashboardData,
+    activeDevs7d, activeDevs7dUpdatedAt, loadActiveDevs7d,
   } = useControlPlaneStore()
 
   const isAdmin = userRole === 'Admin'
 
   const [autoRefresh, setAutoRefresh] = useState(true)
+  const [showActiveDevsModal, setShowActiveDevsModal] = useState(false)
 
   useEffect(() => {
     if (!isConnected) return
@@ -53,6 +57,8 @@ export function ServerDashboard() {
   const pipelineTotal = pipeline?.total_7d ?? 0
   const pipelineSuccessRate = pipelineTotal > 0 ? (((pipeline?.success_7d ?? 0) / pipelineTotal) * 100).toFixed(1) : '0.0'
   const commitsWithoutTicket = (ticketCoverage?.commits_without_ticket ?? []).slice(0, 5)
+  const likelyTestActiveDevs = activeDevs7d.filter((d) => d.suspicious_test_data).length
+  const activeDevCoverage = serverStats ? `${activeDevs7d.length}/${serverStats.active_devs_week}` : `${activeDevs7d.length}/-`
 
   return (
     <div className="space-y-3 animate-fade-in">
@@ -77,6 +83,7 @@ export function ServerDashboard() {
             totalTrackedPushesToday={totalTrackedPushesToday}
             blockedToday={serverStats.client_events.blocked_today}
             activeDevsWeek={serverStats.active_devs_week}
+            onOpenActiveDevs={() => setShowActiveDevsModal(true)}
           />
 
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
@@ -104,6 +111,70 @@ export function ServerDashboard() {
 
           {isAdmin && <ApiKeyManagerWidget />}
           {isAdmin && <ExportPanel />}
+
+          <Modal
+            isOpen={showActiveDevsModal}
+            onClose={() => setShowActiveDevsModal(false)}
+            title="Detalle: Devs Activos 7d"
+            size="xl"
+          >
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="text-[11px] text-surface-400">
+                  Visibles en muestra: <span className="mono-data text-surface-200">{activeDevCoverage}</span>
+                  <span className="ml-2 text-surface-600">(ventana de logs, no forense completa)</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void loadActiveDevs7d()}
+                  className="text-[10px] text-brand-400 hover:text-brand-300 transition-colors"
+                >
+                  Actualizar lista
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 text-[10px]">
+                <Badge variant="neutral">
+                  al parecer de test: {likelyTestActiveDevs}
+                </Badge>
+                {activeDevs7dUpdatedAt && (
+                  <span className="text-surface-600">actualizado: {new Date(activeDevs7dUpdatedAt).toLocaleString()}</span>
+                )}
+              </div>
+
+              <div className="max-h-[420px] overflow-auto border border-white/6 rounded-lg">
+                <table className="w-full">
+                  <thead className="sticky top-0 bg-surface-800">
+                    <tr className="text-left text-[9px] text-surface-600 uppercase tracking-widest">
+                      <th className="py-2 px-3 font-medium">Usuario</th>
+                      <th className="py-2 px-3 font-medium">Eventos 7d</th>
+                      <th className="py-2 px-3 font-medium">Último evento</th>
+                      <th className="py-2 px-3 font-medium">Señal</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/3">
+                    {activeDevs7d.map((dev) => (
+                      <tr key={dev.user_login} className="hover:bg-white/2">
+                        <td className="py-2 px-3 text-[11px] text-surface-200 font-medium">{dev.user_login}</td>
+                        <td className="py-2 px-3 text-[11px] text-surface-300 mono-data">{dev.events}</td>
+                        <td className="py-2 px-3 text-[10px] text-surface-500">{new Date(dev.last_seen).toLocaleString()}</td>
+                        <td className="py-2 px-3">
+                          {dev.suspicious_test_data
+                            ? <Badge variant="neutral">aparente test</Badge>
+                            : <Badge variant="success">ok</Badge>}
+                        </td>
+                      </tr>
+                    ))}
+                    {activeDevs7d.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="py-8 text-center text-[11px] text-surface-600">Sin datos en la ventana actual.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </Modal>
         </>
       )}
     </div>

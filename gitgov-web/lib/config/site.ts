@@ -1,3 +1,6 @@
+const defaultDownloadPath = '/downloads/GitGov_0.1.0_x64-setup.exe';
+const configuredDownloadPath = process.env.NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL?.trim();
+
 export const siteConfig = {
     name: 'GitGov',
     description: 'Distributed Git Governance — Full traceability from commit to compliance.',
@@ -7,7 +10,9 @@ export const siteConfig = {
 
     version: '0.1.0',
     downloadFileName: 'GitGov_0.1.0_x64-setup.exe',
-    downloadPath: '/downloads/GitGov_0.1.0_x64-setup.exe',
+    downloadPath: configuredDownloadPath && configuredDownloadPath.length > 0
+        ? configuredDownloadPath
+        : defaultDownloadPath,
     downloadChecksum: 'sha256:pending-build',  // placeholder
 
     links: {

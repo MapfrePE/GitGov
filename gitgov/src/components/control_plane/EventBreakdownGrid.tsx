@@ -22,11 +22,11 @@ export function EventBreakdownGrid({
         <div className="divide-y divide-white/[0.04]">
           {Object.entries(githubByType).sort(([, a], [, b]) => b - a).slice(0, 5).map(([eventType, count]) => (
             <div key={eventType} className="flex items-center justify-between py-2 first:pt-0 last:pb-0">
-              <span className="text-[10px] text-surface-400">{eventType}</span>
-              <span className="text-[10px] text-surface-300 mono-data font-medium">{count}</span>
+              <span className="text-xs text-surface-300">{eventType}</span>
+              <span className="text-xs text-surface-200 mono-data font-medium">{count}</span>
             </div>
           ))}
-          {Object.keys(githubByType).length === 0 && <p className="text-[10px] text-surface-600 text-center py-3">Sin datos</p>}
+          {Object.keys(githubByType).length === 0 && <p className="text-xs text-surface-400 text-center py-3">Sin datos</p>}
         </div>
       </div>
 
@@ -36,11 +36,11 @@ export function EventBreakdownGrid({
         <div className="divide-y divide-white/[0.04]">
           {Object.entries(clientByStatus).sort(([, a], [, b]) => b - a).map(([status, count]) => (
             <div key={status} className="flex items-center justify-between py-2 first:pt-0 last:pb-0">
-              <span className="text-[10px] text-surface-400 uppercase tracking-wide">{status}</span>
+              <span className="text-xs text-surface-300 uppercase tracking-wide">{status}</span>
               <Badge variant={status === 'blocked' ? 'danger' : 'success'}>{count}</Badge>
             </div>
           ))}
-          {Object.keys(clientByStatus).length === 0 && <p className="text-[10px] text-surface-600 text-center py-3">Sin datos</p>}
+          {Object.keys(clientByStatus).length === 0 && <p className="text-xs text-surface-400 text-center py-3">Sin datos</p>}
         </div>
       </div>
 
@@ -58,15 +58,15 @@ export function EventBreakdownGrid({
               return (
                 <div key={`${sha}-${idx}`} className="py-2 first:pt-0">
                   <div className="flex items-center gap-1.5">
-                    <code className="text-[9px] text-surface-400 mono-data">{sha}</code>
-                    <span className="text-[9px] text-surface-600 mono-data truncate">{branch}</span>
+                    <code className="text-xs text-surface-300 mono-data">{sha}</code>
+                    <span className="text-xs text-surface-400 mono-data truncate">{branch}</span>
                   </div>
                 </div>
               )
             })}
           </div>
         ) : (
-          <p className="text-[10px] text-surface-600 text-center py-3">Sin commits faltantes</p>
+          <p className="text-xs text-surface-400 text-center py-3">Sin commits faltantes</p>
         )}
       </div>
 
@@ -90,7 +90,7 @@ export function EventBreakdownGrid({
             })}
           </div>
         ) : (
-          <p className="text-[10px] text-surface-600 text-center py-3">Sin tickets huérfanos</p>
+          <p className="text-xs text-surface-400 text-center py-3">Sin tickets huérfanos</p>
         )}
       </div>
     </div>

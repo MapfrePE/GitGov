@@ -13,6 +13,15 @@ export const metadata = generatePageMetadata({
 });
 
 async function getWindowsReleaseInfo() {
+    // External URL mode: do not block the CTA by checking local filesystem.
+    // Useful for Vercel/Next deployments where installers are hosted on CDN/S3.
+    if (/^https?:\/\//i.test(siteConfig.downloadPath)) {
+        return {
+            available: true,
+            checksum: siteConfig.downloadChecksum,
+        };
+    }
+
     const relativePath = siteConfig.downloadPath.replace(/^\//, '');
     const absolutePath = path.join(process.cwd(), 'public', relativePath);
 
