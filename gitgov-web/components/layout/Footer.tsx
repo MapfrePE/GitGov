@@ -20,17 +20,11 @@ export function Footer() {
                         {/* Brand */}
                         <div className="col-span-2 md:col-span-1">
                             <Link href="/" className="inline-flex items-center gap-2 mb-4">
-                                <div className="relative w-7 h-7">
-                                    <div className="absolute inset-0 bg-brand-500 rounded-md rotate-45" />
-                                    <div className="absolute inset-[2px] bg-surface-300 rounded-[4px] rotate-45" />
-                                    <div className="absolute inset-0 flex items-center justify-center">
-                                        <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-                                            <circle cx="8" cy="3" r="2" fill="#00e5da" />
-                                            <circle cx="8" cy="13" r="2" fill="#00e5da" />
-                                            <line x1="8" y1="5" x2="8" y2="11" stroke="#00e5da" strokeWidth="1.5" />
-                                        </svg>
-                                    </div>
-                                </div>
+                                <img
+                                    src="/logo.png"
+                                    alt="GitGov"
+                                    className="w-10 h-10 object-contain"
+                                />
                                 <span className="text-lg font-bold">
                                     <span className="text-white">Git</span>
                                     <span className="text-brand-400">Gov</span>

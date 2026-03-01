@@ -2,6 +2,82 @@
 
 ---
 
+## Actualización Reciente (2026-02-28) — Tema Desktop a neutro oscuro + logo sidebar más grande
+
+### Qué se hizo
+- Se eliminó la dominante azul del theme base de Desktop y se movió a paleta:
+  - superficies: gris/negro
+  - acento (`brand`): naranja, alineado al logo
+- Se actualizaron fondos y estados focus para inputs/cards/glass a valores neutros oscuros.
+- Se agrandó el logo del sidebar y se amplió el ancho de la barra para mejorar presencia visual:
+  - sidebar `w-14` → `w-16`
+  - logo `w-8 h-8` → `w-10 h-10`
+  - iconos de navegación y logout también escalados.
+
+### Archivos
+- `gitgov/src/styles/globals.css`
+- `gitgov/src/components/layout/Sidebar.tsx`
+- `gitgov/src/components/layout/MainLayout.tsx`
+
+### Validación
+- `cd gitgov && npm run typecheck` → OK
+- `cd gitgov && eslint src/components/layout/Sidebar.tsx src/components/layout/MainLayout.tsx src/styles/globals.css`
+  - `globals.css` reportado como ignorado por config ESLint (sin errores de TS/React)
+
+---
+
+## Actualización Reciente (2026-02-28) — Desktop icon actualizado a logo.png
+
+### Qué se hizo
+- Se regeneraron los íconos de Tauri usando `gitgov/public/logo.png` como fuente.
+- Comando ejecutado:
+  - `cd gitgov && npx tauri icon public/logo.png`
+- Se forzó además el icono de ventana en runtime para `tauri dev`:
+  - `gitgov/src-tauri/src/lib.rs` ahora asigna `window.set_icon(...)` con `icon.png` embebido.
+  - Se añadió `image` crate (`png`) para decodificar el icono embebido a RGBA.
+
+### Archivos impactados
+- `gitgov/src-tauri/icons/*` (png/ico/icns/appx/android/ios)
+- Incluye los íconos usados por Windows bundle:
+  - `gitgov/src-tauri/icons/32x32.png`
+  - `gitgov/src-tauri/icons/128x128.png`
+  - `gitgov/src-tauri/icons/128x128@2x.png`
+  - `gitgov/src-tauri/icons/icon.ico`
+
+### Validación
+- `cd gitgov/src-tauri && cargo build` → OK
+
+### Nota
+- En Windows, la barra puede mostrar el ícono anterior por caché hasta reiniciar la app o desanclar/anclar de nuevo.
+
+---
+
+## Actualización Reciente (2026-02-28) — Fix preloader first-paint (web)
+
+### Problema
+- En el primer paint se veía el fondo del hero antes del intro de zorro, rompiendo la narrativa visual del preloader.
+
+### Causa raíz
+- `Preloader` cargaba `FoxIntro` con `dynamic(..., { ssr: false })`, por lo que el intro no se renderizaba en SSR y aparecía tarde tras hidratación.
+
+### Cambios aplicados
+- `gitgov-web/components/layout/Preloader.tsx`
+  - Se eliminó `dynamic(..., { ssr: false })`.
+  - `FoxIntro` ahora se importa de forma directa para que exista desde el primer render.
+- `gitgov-web/components/marketing/FoxIntro.tsx`
+  - Imágenes del intro con `loading="eager"`, `fetchPriority="high"` y `decoding="sync"`.
+- `gitgov-web/app/layout.tsx`
+  - Preload explícito en `<head>` para `/fox.png` y `/fox1.png`.
+
+### Validación ejecutada
+- `cd gitgov-web && pnpm run lint` → OK (warnings preexistentes por `<img>` en Header/Footer/FoxIntro)
+- `cd gitgov-web && pnpm run build` → OK
+
+### Resultado esperado
+- El preloader se pinta desde el inicio y evita mostrar primero el fondo del hero.
+
+---
+
 ## Actualización Reciente (2026-02-28) — Hotfix CI estricto (dead_code + unused variables)
 
 ### Qué se corrigió

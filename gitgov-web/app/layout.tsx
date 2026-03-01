@@ -7,12 +7,13 @@ export const metadata: Metadata = {
     ...generatePageMetadata(),
     manifest: '/manifest.json',
     icons: {
-        icon: '/favicon.ico',
+        icon: '/logo.png',
+        apple: '/logo.png',
     },
 };
 
 export const viewport: Viewport = {
-    themeColor: '#0a0e1a',
+    themeColor: '#090909',
     width: 'device-width',
     initialScale: 1,
 };
@@ -24,6 +25,9 @@ export default function RootLayout({
 }) {
     return (
         <html lang="en" className="dark" suppressHydrationWarning>
+            <head>
+                <link rel="preload" as="image" href="/fox.png" fetchPriority="high" />
+            </head>
             <body className="min-h-[100dvh] bg-surface-300 text-white antialiased">
                 <ClientLayout>{children}</ClientLayout>
             </body>

@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import { useAuthStore } from '@/store/useAuthStore'
-import { GitBranch, Settings, LogOut, FolderGit2, Shield, Server } from 'lucide-react'
+import { GitBranch, Settings, LogOut, Shield, Server } from 'lucide-react'
 import clsx from 'clsx'
 
 export function Sidebar() {
@@ -14,10 +14,10 @@ export function Sidebar() {
   ]
 
   return (
-    <div className="w-14 bg-surface-950 border-r border-white/4 flex flex-col items-center py-3">
+    <div className="w-18 bg-surface-950 border-r border-white/4 flex flex-col items-center py-4">
       {/* Logo */}
-      <div className="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center mb-6">
-        <FolderGit2 size={15} className="text-white" />
+      <div className="mb-7">
+        <img src="/logo.png" alt="GitGov" className="w-12 h-12 object-contain" />
       </div>
 
       {/* Navigation */}
@@ -30,7 +30,7 @@ export function Sidebar() {
             aria-label={item.label}
             className={({ isActive }) =>
               clsx(
-                'w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-200',
+                'w-10 h-10 flex items-center justify-center rounded-lg transition-all duration-200',
                 isActive
                   ? 'bg-white/[0.08] text-white'
                   : 'text-surface-500 hover:text-surface-300 hover:bg-white/4'
@@ -49,13 +49,13 @@ export function Sidebar() {
             src={user.avatar_url}
             alt={user.login}
             title={user.login}
-            className="w-7 h-7 rounded-full opacity-70 hover:opacity-100 transition-opacity"
+            className="w-8 h-8 rounded-full opacity-70 hover:opacity-100 transition-opacity"
           />
           <button
             onClick={logout}
             title="Cambiar usuario (cerrar sesión)"
             aria-label="Cambiar usuario (cerrar sesión)"
-            className="w-9 h-9 flex items-center justify-center rounded-lg text-surface-600 hover:text-surface-400 hover:bg-white/4 transition-all duration-200"
+            className="w-10 h-10 flex items-center justify-center rounded-lg text-surface-600 hover:text-surface-400 hover:bg-white/4 transition-all duration-200"
           >
             <LogOut size={16} strokeWidth={1.5} aria-hidden="true" />
           </button>

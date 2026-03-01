@@ -52,19 +52,11 @@ export function Header() {
                     <nav className="flex items-center justify-between h-16 md:h-20" aria-label="Main navigation">
                         {/* Logo */}
                         <Link href="/" className="flex items-center gap-2.5 group" aria-label="GitGov Home">
-                            <div className="relative w-8 h-8 md:w-9 md:h-9">
-                                <div className="absolute inset-0 bg-brand-500 rounded-lg rotate-45 group-hover:rotate-[135deg] transition-transform duration-500" />
-                                <div className="absolute inset-[3px] bg-surface-300 rounded-[5px] rotate-45 group-hover:rotate-[135deg] transition-transform duration-500" />
-                                <div className="absolute inset-0 flex items-center justify-center">
-                                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="relative z-10">
-                                        <circle cx="8" cy="3" r="2" fill="#00e5da" />
-                                        <circle cx="8" cy="13" r="2" fill="#00e5da" />
-                                        <circle cx="13" cy="8" r="2" fill="#ffbb1a" />
-                                        <line x1="8" y1="5" x2="8" y2="11" stroke="#00e5da" strokeWidth="1.5" />
-                                        <line x1="9.5" y1="6" x2="11.5" y2="7.5" stroke="#ffbb1a" strokeWidth="1.5" />
-                                    </svg>
-                                </div>
-                            </div>
+                            <img
+                                src="/logo.png"
+                                alt="GitGov"
+                                className="w-11 h-11 md:w-13 md:h-13 object-contain group-hover:scale-110 transition-transform duration-300"
+                            />
                             <span className="text-lg md:text-xl font-bold tracking-tight">
                                 <span className="text-white">Git</span>
                                 <span className="text-brand-400">Gov</span>

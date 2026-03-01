@@ -18,12 +18,12 @@ export function MainLayout({ children }: MainLayoutProps) {
   if (isLoading) {
     return (
       <div className="flex h-screen bg-surface-900">
-        <div className="w-14 bg-surface-950 border-r border-white/4 flex flex-col items-center py-3">
-          <Skeleton className="w-8 h-8 rounded-lg mb-6" />
+        <div className="w-18 bg-surface-950 border-r border-white/4 flex flex-col items-center py-4">
+          <Skeleton className="w-12 h-12 rounded-lg mb-7" />
           <div className="flex-1 flex flex-col items-center gap-2">
-            <Skeleton className="w-9 h-9 rounded-lg" />
-            <Skeleton className="w-9 h-9 rounded-lg" />
-            <Skeleton className="w-9 h-9 rounded-lg" />
+            <Skeleton className="w-10 h-10 rounded-lg" />
+            <Skeleton className="w-10 h-10 rounded-lg" />
+            <Skeleton className="w-10 h-10 rounded-lg" />
           </div>
         </div>
         <div className="flex-1 flex flex-col">

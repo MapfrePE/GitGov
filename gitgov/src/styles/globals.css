@@ -2,29 +2,29 @@
 @import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap');
 
 @theme {
-  --color-brand-50: #eff6ff;
-  --color-brand-100: #dbeafe;
-  --color-brand-200: #bfdbfe;
-  --color-brand-300: #93c5fd;
-  --color-brand-400: #60a5fa;
-  --color-brand-500: #3b82f6;
-  --color-brand-600: #2563eb;
-  --color-brand-700: #1d4ed8;
-  --color-brand-800: #1e40af;
-  --color-brand-900: #1e3a8a;
-  --color-brand-950: #172554;
+  --color-brand-50: #fff7ed;
+  --color-brand-100: #ffedd5;
+  --color-brand-200: #fed7aa;
+  --color-brand-300: #fdba74;
+  --color-brand-400: #fb923c;
+  --color-brand-500: #f97316;
+  --color-brand-600: #ea580c;
+  --color-brand-700: #c2410c;
+  --color-brand-800: #9a3412;
+  --color-brand-900: #7c2d12;
+  --color-brand-950: #431407;
 
-  --color-surface-50: #f8fafc;
-  --color-surface-100: #f1f5f9;
-  --color-surface-200: #e2e8f0;
-  --color-surface-300: #cbd5e1;
-  --color-surface-400: #94a3b8;
-  --color-surface-500: #64748b;
-  --color-surface-600: #475569;
-  --color-surface-700: #334155;
-  --color-surface-800: #1e293b;
-  --color-surface-900: #0f172a;
-  --color-surface-950: #020617;
+  --color-surface-50: #f7f7f8;
+  --color-surface-100: #efeff1;
+  --color-surface-200: #dedfe3;
+  --color-surface-300: #c5c7ce;
+  --color-surface-400: #9ea1ab;
+  --color-surface-500: #747a87;
+  --color-surface-600: #555b68;
+  --color-surface-700: #343943;
+  --color-surface-800: #20242c;
+  --color-surface-900: #121419;
+  --color-surface-950: #0a0b0e;
 
   --color-success-50: #f0fdf4;
   --color-success-100: #dcfce7;
@@ -140,7 +140,7 @@
   .input {
     width: 100%;
     padding: 0.5rem 0.75rem;
-    background-color: rgba(15, 23, 42, 0.6);
+    background-color: rgba(18, 20, 25, 0.72);
     border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 0.5rem;
     color: white;
@@ -154,8 +154,8 @@
 
   .input:focus {
     outline: none;
-    border-color: rgba(59, 130, 246, 0.4);
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.08);
+    border-color: rgba(249, 115, 22, 0.45);
+    box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
   }
 
   .card {
@@ -183,7 +183,7 @@
 
   /* Header bar — integrated glass strip */
   .glass {
-    background: rgba(15, 23, 42, 0.6);
+    background: rgba(12, 13, 16, 0.7);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
@@ -192,7 +192,7 @@
 
   /* Login/Auth glass card */
   .glass-card {
-    background: rgba(30, 41, 59, 0.5);
+    background: rgba(24, 26, 31, 0.55);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
     border: 1px solid rgba(255, 255, 255, 0.06);
@@ -204,7 +204,7 @@
 
   /* Dashboard glass panels — the core visual */
   .glass-panel {
-    background: rgba(15, 23, 42, 0.35);
+    background: rgba(14, 16, 20, 0.42);
     backdrop-filter: blur(24px);
     -webkit-backdrop-filter: blur(24px);
     border: 1px solid rgba(255, 255, 255, 0.06);

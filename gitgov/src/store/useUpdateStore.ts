@@ -6,6 +6,7 @@ import {
   downloadAndInstallDesktopUpdate,
   getDesktopUpdateFallbackUrl,
   isUpdaterNotConfiguredError,
+  normalizeUpdaterErrorMessage,
   type DesktopUpdateChannel,
   type DesktopUpdateInfo,
   type DesktopUpdateProgress,
@@ -271,7 +272,7 @@ export const useUpdateStore = create<UpdateStoreState & UpdateStoreActions>((set
       }), set)
       toast('info', `Nueva versión disponible: ${info.version}`)
     } catch (error) {
-      const message = String(error)
+      const message = normalizeUpdaterErrorMessage(error)
       const notConfigured = isUpdaterNotConfiguredError(error)
       set({
         isChecking: false,
@@ -331,7 +332,7 @@ export const useUpdateStore = create<UpdateStoreState & UpdateStoreActions>((set
       }), set)
       toast('success', `Actualización ${updateInfo.version} instalada. Reinicia GitGov para aplicar cambios.`)
     } catch (error) {
-      const message = String(error)
+      const message = normalizeUpdaterErrorMessage(error)
       set({
         isDownloading: false,
         status: 'error',

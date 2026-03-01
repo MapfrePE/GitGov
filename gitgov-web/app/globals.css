@@ -10,28 +10,28 @@
 
 :root {
   /* Core palette */
-  --color-bg: #0a0e1a;
-  --color-bg-elevated: #111627;
-  --color-bg-card: #141829;
-  --color-surface: #1a1f2e;
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-border-hover: rgba(255, 255, 255, 0.15);
+  --color-bg: #090909;
+  --color-bg-elevated: #111111;
+  --color-bg-card: #141414;
+  --color-surface: #1a1a1a;
+  --color-border: rgba(255, 255, 255, 0.07);
+  --color-border-hover: rgba(255, 255, 255, 0.14);
 
   /* Text */
-  --color-text-primary: #f0f2f5;
-  --color-text-secondary: #8b95a5;
-  --color-text-muted: #5a6478;
+  --color-text-primary: #f4f0eb;
+  --color-text-secondary: #9a8f82;
+  --color-text-muted: #5c5349;
 
-  /* Brand – Cyan/Teal */
-  --color-brand: #00e5da;
-  --color-brand-light: #33ece3;
-  --color-brand-dark: #00b8ae;
-  --color-brand-glow: rgba(0, 229, 218, 0.15);
+  /* Brand – Fox Orange */
+  --color-brand: #F97316;
+  --color-brand-light: #FB923C;
+  --color-brand-dark: #EA580C;
+  --color-brand-glow: rgba(249, 115, 22, 0.22);
 
-  /* Accent – Warm amber */
-  --color-accent: #ffbb1a;
-  --color-accent-light: #ffd166;
-  --color-accent-glow: rgba(255, 187, 26, 0.15);
+  /* Accent – Warm Gold */
+  --color-accent: #FBBF24;
+  --color-accent-light: #FCD34D;
+  --color-accent-glow: rgba(251, 191, 36, 0.18);
 
   /* Status */
   --color-success: #34d399;
@@ -216,6 +216,6 @@ body {
    ═══════════════════════════════════════════ */
 
 ::selection {
-  background: rgba(0, 229, 218, 0.25);
+  background: rgba(249, 115, 22, 0.28);
   color: var(--color-text-primary);
 }

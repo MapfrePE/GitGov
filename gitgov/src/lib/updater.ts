@@ -50,6 +50,25 @@ export function isUpdaterNotConfiguredError(error: unknown): boolean {
   )
 }
 
+export function normalizeUpdaterErrorMessage(error: unknown): string {
+  const raw = String(error ?? '')
+  const message = raw.toLowerCase()
+
+  if (message.includes('error decoding response body')) {
+    return 'No se pudo leer la respuesta del servidor de actualizaciones (latest.json inválido o ausente). Usa "Descarga manual" mientras se corrige el release metadata.'
+  }
+
+  if (message.includes('404') && message.includes('latest.json')) {
+    return 'No se encontró latest.json para el updater. Publica ese archivo en la release o usa "Descarga manual".'
+  }
+
+  if (message.includes('tls') || message.includes('certificate')) {
+    return 'No se pudo conectar de forma segura al servidor de actualizaciones (TLS/certificado). Revisa red/certificados o usa "Descarga manual".'
+  }
+
+  return raw
+}
+
 function buildChannelHeaders(channel: DesktopUpdateChannel) {
   return {
     [UPDATE_CHANNEL_HEADER]: normalizeChannel(channel),

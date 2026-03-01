@@ -9,7 +9,15 @@ pub mod outbox;
 
 use outbox::Outbox;
 use std::sync::Arc;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+
+fn embedded_window_icon() -> Option<tauri::image::Image<'static>> {
+    let png_bytes = include_bytes!("../icons/icon.png");
+    let decoded = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png).ok()?;
+    let rgba = decoded.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    Some(tauri::image::Image::new_owned(rgba.into_raw(), width, height))
+}
 
 fn normalize_loopback_url(url: &str) -> String {
     let trimmed = url.trim();
@@ -141,6 +149,12 @@ pub fn run() {
         .manage(audit_db)
         .manage(outbox)
         .setup(move |app| {
+            if let Some(window) = app.get_webview_window("main") {
+                if let Some(icon) = embedded_window_icon() {
+                    let _ = window.set_icon(icon);
+                }
+            }
+
             if !server_configured {
                 let _ = app.emit("gitgov:server-not-configured", serde_json::json!({
                     "message": "GitGov Server no configurado. Los eventos de auditoría se guardarán localmente hasta que configures el servidor en Settings.",
