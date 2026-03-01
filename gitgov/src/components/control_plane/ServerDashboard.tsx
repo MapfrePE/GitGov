@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Server } from 'lucide-react'
+import { formatTs } from '@/lib/timezone'
 import { DashboardHeader } from './DashboardHeader'
 import { MetricsGrid } from './MetricsGrid'
 import { PipelineHealthWidget } from './PipelineHealthWidget'
@@ -10,14 +11,20 @@ import { EventBreakdownGrid } from './EventBreakdownGrid'
 import { RecentCommitsTable } from './RecentCommitsTable'
 import { ApiKeyManagerWidget } from './ApiKeyManagerWidget'
 import { ExportPanel } from './ExportPanel'
+import { AdminOnboardingPanel } from './AdminOnboardingPanel'
+import { DeveloperAccessPanel } from './DeveloperAccessPanel'
+import { TeamManagementPanel } from './TeamManagementPanel'
+import { ConversationalChatPanel } from './ConversationalChatPanel'
 import { Modal } from '@/components/shared/Modal'
 import { Badge } from '@/components/shared/Badge'
 
 export function ServerDashboard() {
   const {
     serverStats, dailyActivity, ticketCoverage, userRole,
-    isConnected, isRefreshingDashboard, refreshDashboardData,
+    isConnected, isRefreshingDashboard, refreshDashboardData, refreshForCurrentRole,
+    loadLogs,
     activeDevs7d, activeDevs7dUpdatedAt, loadActiveDevs7d,
+    displayTimezone,
   } = useControlPlaneStore()
 
   const isAdmin = userRole === 'Admin'
@@ -27,11 +34,21 @@ export function ServerDashboard() {
 
   useEffect(() => {
     if (!isConnected) return
-    void refreshDashboardData({ logLimit: 50 })
+    if (userRole === 'Admin') {
+      void refreshForCurrentRole()
+    } else {
+      void loadLogs(50, 0)
+    }
     if (!autoRefresh) return
-    const interval = setInterval(() => { void refreshDashboardData({ logLimit: 50 }) }, 30000)
+    const interval = setInterval(() => {
+      if (userRole === 'Admin') {
+        void refreshForCurrentRole()
+      } else {
+        void loadLogs(50, 0)
+      }
+    }, 30000)
     return () => clearInterval(interval)
-  }, [isConnected, autoRefresh, refreshDashboardData])
+  }, [isConnected, autoRefresh, refreshDashboardData, refreshForCurrentRole, loadLogs, userRole])
 
   /* ── not connected ── */
   if (!isConnected) {
@@ -65,14 +82,20 @@ export function ServerDashboard() {
       <DashboardHeader
         autoRefresh={autoRefresh}
         onAutoRefreshChange={setAutoRefresh}
-        onRefresh={() => void refreshDashboardData({ logLimit: 50 })}
+        onRefresh={() => {
+          if (userRole === 'Admin') {
+            void refreshForCurrentRole()
+          } else {
+            void loadLogs(50, 0)
+          }
+        }}
         isRefreshing={isRefreshingDashboard}
       />
       <div className="flex justify-end">
-        <span className="text-[9px] text-surface-500 uppercase tracking-widest bg-white/4 px-2 py-0.5 rounded font-medium">Timezone: UTC</span>
+        <span className="text-[9px] text-surface-500 uppercase tracking-widest bg-white/4 px-2 py-0.5 rounded font-medium">TZ: {displayTimezone}</span>
       </div>
 
-      {serverStats && (
+      {isAdmin && serverStats && (
         <>
           <MetricsGrid
             totalGithubEvents={serverStats.github_events.total}
@@ -109,6 +132,10 @@ export function ServerDashboard() {
 
           <RecentCommitsTable />
 
+          <ConversationalChatPanel />
+
+          <AdminOnboardingPanel />
+          <TeamManagementPanel />
           {isAdmin && <ApiKeyManagerWidget />}
           {isAdmin && <ExportPanel />}
 
@@ -138,7 +165,7 @@ export function ServerDashboard() {
                   al parecer de test: {likelyTestActiveDevs}
                 </Badge>
                 {activeDevs7dUpdatedAt && (
-                  <span className="text-surface-600">actualizado: {new Date(activeDevs7dUpdatedAt).toLocaleString()}</span>
+                  <span className="text-surface-600">actualizado: {formatTs(activeDevs7dUpdatedAt, displayTimezone)}</span>
                 )}
               </div>
 
@@ -157,7 +184,7 @@ export function ServerDashboard() {
                       <tr key={dev.user_login} className="hover:bg-white/2">
                         <td className="py-2 px-3 text-[11px] text-surface-200 font-medium">{dev.user_login}</td>
                         <td className="py-2 px-3 text-[11px] text-surface-300 mono-data">{dev.events}</td>
-                        <td className="py-2 px-3 text-[10px] text-surface-500">{new Date(dev.last_seen).toLocaleString()}</td>
+                        <td className="py-2 px-3 text-[10px] text-surface-500">{formatTs(dev.last_seen, displayTimezone)}</td>
                         <td className="py-2 px-3">
                           {dev.suspicious_test_data
                             ? <Badge variant="neutral">aparente test</Badge>
@@ -175,6 +202,13 @@ export function ServerDashboard() {
               </div>
             </div>
           </Modal>
+        </>
+      )}
+
+      {!isAdmin && (
+        <>
+          <DeveloperAccessPanel />
+          <RecentCommitsTable />
         </>
       )}
     </div>

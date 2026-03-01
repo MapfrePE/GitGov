@@ -8,6 +8,7 @@ import {
   extractTicketIdsFromCommitLog, buildDashboardRows,
   type DashboardRow,
 } from './dashboard-helpers'
+import { formatTs } from '@/lib/timezone'
 import type { CombinedEvent } from '@/lib/types'
 
 interface CommitPipelineRun {
@@ -37,6 +38,7 @@ export function RecentCommitsTable() {
     jiraTicketDetails, jiraTicketDetailLoading,
     loadJiraTicketDetail,
     logsPage, logsPageSize, setLogsPage,
+    displayTimezone,
   } = useControlPlaneStore()
 
   const [expandedCommitRows, setExpandedCommitRows] = useState<Record<string, boolean>>({})
@@ -149,7 +151,7 @@ export function RecentCommitsTable() {
               return (
                 <Fragment key={log.id}>
                   <tr className="hover:bg-white/1.5 transition-colors">
-                    <td className="py-2.5 pr-4 text-xs text-surface-300 whitespace-nowrap mono-data">{new Date(log.created_at).toLocaleString()}</td>
+                    <td className="py-2.5 pr-4 text-xs text-surface-300 whitespace-nowrap mono-data">{formatTs(log.created_at, displayTimezone)}</td>
                     <td className="py-2.5 pr-4 text-sm text-surface-100 font-medium">{log.user_login || '-'}</td>
                     <td className="py-2.5 pr-4">
                       <div className="space-y-1">

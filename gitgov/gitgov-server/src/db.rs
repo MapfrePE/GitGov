@@ -42,6 +42,23 @@ pub struct UpsertOrgUserInput<'a> {
     pub actor: &'a str,
 }
 
+pub struct CreateOrgInvitationInput<'a> {
+    pub org_id: &'a str,
+    pub invite_email: Option<&'a str>,
+    pub invite_login: Option<&'a str>,
+    pub role: &'a str,
+    pub token_hash: &'a str,
+    pub invited_by: &'a str,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcceptedOrgInvitation {
+    pub invitation: OrgInvitation,
+    pub org_user: OrgUser,
+    pub api_key: String,
+}
+
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self, DbError> {
         let pool = PgPoolOptions::new()
@@ -157,6 +174,36 @@ impl Database {
         )
         .bind(org_id)
         .bind(github_id)
+        .bind(full_name)
+        .bind(name)
+        .bind(private)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(result.get("id"))
+    }
+
+    pub async fn upsert_repo_by_full_name(
+        &self,
+        org_id: Option<&str>,
+        full_name: &str,
+        name: &str,
+        private: bool,
+    ) -> Result<String, DbError> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO repos (org_id, github_id, full_name, name, private)
+            VALUES ($1::uuid, NULL, $2, $3, $4)
+            ON CONFLICT (full_name) DO UPDATE SET
+                org_id = COALESCE(repos.org_id, $1::uuid),
+                name = $3,
+                private = $4,
+                updated_at = NOW()
+            RETURNING id::text
+            "#,
+        )
+        .bind(org_id)
         .bind(full_name)
         .bind(name)
         .bind(private)
@@ -3831,6 +3878,883 @@ impl Database {
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
         Ok(row.map(|r| Self::row_to_org_user(&r)))
+    }
+
+    pub async fn get_team_overview(
+        &self,
+        org_id: &str,
+        status: Option<&str>,
+        days: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<TeamDeveloperOverview>, i64), DbError> {
+        let rows = sqlx::query(
+            r#"
+            WITH filtered_users AS (
+                SELECT
+                    ou.id,
+                    ou.login,
+                    ou.display_name,
+                    ou.email,
+                    ou.role,
+                    ou.status,
+                    ou.created_at
+                FROM org_users ou
+                WHERE ou.org_id = $1::uuid
+                  AND ($2::text IS NULL OR ou.status = $2)
+                ORDER BY ou.created_at DESC
+                LIMIT $3 OFFSET $4
+            ),
+            window_events AS (
+                SELECT
+                    COALESCE(ica.canonical_login, c.user_login) AS user_login,
+                    COALESCE(r.full_name, c.metadata->>'repo_name') AS repo_name,
+                    c.event_type,
+                    c.status,
+                    c.created_at
+                FROM client_events c
+                LEFT JOIN repos r ON r.id = c.repo_id
+                LEFT JOIN identity_aliases ica
+                    ON ica.alias_login = c.user_login
+                   AND ica.org_id = $1::uuid
+                WHERE c.org_id = $1::uuid
+                  AND c.created_at >= NOW() - (($5::int || ' days')::interval)
+            ),
+            user_metrics AS (
+                SELECT
+                    we.user_login,
+                    MAX(we.created_at) AS last_seen,
+                    COUNT(*)::bigint AS total_events,
+                    COUNT(*) FILTER (WHERE we.event_type = 'commit')::bigint AS commits,
+                    COUNT(*) FILTER (WHERE we.event_type IN ('attempt_push', 'successful_push', 'push'))::bigint AS pushes,
+                    COUNT(*) FILTER (WHERE we.event_type = 'blocked_push' OR we.status = 'blocked')::bigint AS blocked_pushes
+                FROM window_events we
+                GROUP BY we.user_login
+            ),
+            user_repo_metrics AS (
+                SELECT
+                    we.user_login,
+                    we.repo_name,
+                    COUNT(*)::bigint AS events,
+                    COUNT(*) FILTER (WHERE we.event_type = 'commit')::bigint AS commits,
+                    COUNT(*) FILTER (WHERE we.event_type IN ('attempt_push', 'successful_push', 'push'))::bigint AS pushes,
+                    COUNT(*) FILTER (WHERE we.event_type = 'blocked_push' OR we.status = 'blocked')::bigint AS blocked_pushes,
+                    EXTRACT(EPOCH FROM MAX(we.created_at))::bigint * 1000 AS last_seen_ms
+                FROM window_events we
+                WHERE we.repo_name IS NOT NULL AND we.repo_name <> ''
+                GROUP BY we.user_login, we.repo_name
+            )
+            SELECT
+                fu.login,
+                fu.display_name,
+                fu.email,
+                fu.role,
+                fu.status,
+                EXTRACT(EPOCH FROM um.last_seen)::bigint * 1000 AS last_seen_ms,
+                COALESCE(um.total_events, 0)::bigint AS total_events,
+                COALESCE(um.commits, 0)::bigint AS commits,
+                COALESCE(um.pushes, 0)::bigint AS pushes,
+                COALESCE(um.blocked_pushes, 0)::bigint AS blocked_pushes,
+                COALESCE((
+                    SELECT COUNT(*)::bigint
+                    FROM user_repo_metrics urm_cnt
+                    WHERE urm_cnt.user_login = fu.login
+                ), 0)::bigint AS repos_active_count,
+                COALESCE((
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'repo_name', urm.repo_name,
+                            'events', urm.events,
+                            'commits', urm.commits,
+                            'pushes', urm.pushes,
+                            'blocked_pushes', urm.blocked_pushes,
+                            'last_seen', urm.last_seen_ms
+                        )
+                        ORDER BY urm.events DESC, urm.repo_name ASC
+                    )
+                    FROM user_repo_metrics urm
+                    WHERE urm.user_login = fu.login
+                ), '[]'::jsonb) AS repos
+            FROM filtered_users fu
+            LEFT JOIN user_metrics um ON um.user_login = fu.login
+            ORDER BY fu.created_at DESC
+            "#,
+        )
+        .bind(org_id)
+        .bind(status)
+        .bind(limit)
+        .bind(offset)
+        .bind(days)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let count_row = sqlx::query(
+            r#"
+            SELECT COUNT(*) AS total
+            FROM org_users
+            WHERE org_id = $1::uuid
+              AND ($2::text IS NULL OR status = $2)
+            "#,
+        )
+        .bind(org_id)
+        .bind(status)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let total: i64 = count_row.get("total");
+        let entries = rows
+            .iter()
+            .map(|row| {
+                let repos_json: serde_json::Value = row.get("repos");
+                let repos: Vec<TeamRepoSummary> = serde_json::from_value(repos_json).unwrap_or_default();
+                TeamDeveloperOverview {
+                    login: row.get("login"),
+                    display_name: row.get("display_name"),
+                    email: row.get("email"),
+                    role: row.get("role"),
+                    status: row.get("status"),
+                    last_seen: row.get("last_seen_ms"),
+                    total_events: row.get("total_events"),
+                    commits: row.get("commits"),
+                    pushes: row.get("pushes"),
+                    blocked_pushes: row.get("blocked_pushes"),
+                    repos_active_count: row.get("repos_active_count"),
+                    repos,
+                }
+            })
+            .collect();
+
+        Ok((entries, total))
+    }
+
+    pub async fn get_team_repos(
+        &self,
+        org_id: &str,
+        days: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<TeamRepoOverview>, i64), DbError> {
+        let rows = sqlx::query(
+            r#"
+            WITH window_events AS (
+                SELECT
+                    COALESCE(ica.canonical_login, c.user_login) AS user_login,
+                    COALESCE(r.full_name, c.metadata->>'repo_name') AS repo_name,
+                    c.event_type,
+                    c.status,
+                    c.created_at
+                FROM client_events c
+                LEFT JOIN repos r ON r.id = c.repo_id
+                LEFT JOIN identity_aliases ica
+                    ON ica.alias_login = c.user_login
+                   AND ica.org_id = $1::uuid
+                WHERE c.org_id = $1::uuid
+                  AND c.created_at >= NOW() - (($2::int || ' days')::interval)
+            )
+            SELECT
+                we.repo_name,
+                COUNT(DISTINCT we.user_login)::bigint AS developers_active,
+                COUNT(*)::bigint AS total_events,
+                COUNT(*) FILTER (WHERE we.event_type = 'commit')::bigint AS commits,
+                COUNT(*) FILTER (WHERE we.event_type IN ('attempt_push', 'successful_push', 'push'))::bigint AS pushes,
+                COUNT(*) FILTER (WHERE we.event_type = 'blocked_push' OR we.status = 'blocked')::bigint AS blocked_pushes,
+                EXTRACT(EPOCH FROM MAX(we.created_at))::bigint * 1000 AS last_seen_ms
+            FROM window_events we
+            WHERE we.repo_name IS NOT NULL AND we.repo_name <> ''
+            GROUP BY we.repo_name
+            ORDER BY total_events DESC, we.repo_name ASC
+            LIMIT $3 OFFSET $4
+            "#,
+        )
+        .bind(org_id)
+        .bind(days)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let count_row = sqlx::query(
+            r#"
+            WITH window_events AS (
+                SELECT
+                    COALESCE(r.full_name, c.metadata->>'repo_name') AS repo_name
+                FROM client_events c
+                LEFT JOIN repos r ON r.id = c.repo_id
+                WHERE c.org_id = $1::uuid
+                  AND c.created_at >= NOW() - (($2::int || ' days')::interval)
+            )
+            SELECT COUNT(DISTINCT repo_name) AS total
+            FROM window_events
+            WHERE repo_name IS NOT NULL AND repo_name <> ''
+            "#,
+        )
+        .bind(org_id)
+        .bind(days)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let total: i64 = count_row.get("total");
+        let entries = rows
+            .iter()
+            .map(|row| TeamRepoOverview {
+                repo_name: row.get("repo_name"),
+                developers_active: row.get("developers_active"),
+                total_events: row.get("total_events"),
+                commits: row.get("commits"),
+                pushes: row.get("pushes"),
+                blocked_pushes: row.get("blocked_pushes"),
+                last_seen: row.get("last_seen_ms"),
+            })
+            .collect();
+
+        Ok((entries, total))
+    }
+
+    fn row_to_org_invitation(row: &sqlx::postgres::PgRow) -> OrgInvitation {
+        OrgInvitation {
+            id: row.get("id"),
+            org_id: row.get("org_id"),
+            invite_email: row.get("invite_email"),
+            invite_login: row.get("invite_login"),
+            role: row.get("role"),
+            status: row.get("status"),
+            invited_by: row.get("invited_by"),
+            accepted_by: row.get("accepted_by"),
+            accepted_at: row.get("accepted_at_ms"),
+            revoked_by: row.get("revoked_by"),
+            revoked_at: row.get("revoked_at_ms"),
+            expires_at: row.get("expires_at_ms"),
+            created_at: row.get("created_at_ms"),
+            updated_at: row.get("updated_at_ms"),
+        }
+    }
+
+    pub async fn create_org_invitation(
+        &self,
+        input: &CreateOrgInvitationInput<'_>,
+    ) -> Result<OrgInvitation, DbError> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO org_invitations (
+                org_id,
+                invite_email,
+                invite_login,
+                role,
+                token_hash,
+                invited_by,
+                expires_at
+            )
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
+            RETURNING
+                id::text,
+                org_id::text,
+                invite_email,
+                invite_login,
+                role,
+                status,
+                invited_by,
+                accepted_by,
+                EXTRACT(EPOCH FROM accepted_at)::bigint * 1000 AS accepted_at_ms,
+                revoked_by,
+                EXTRACT(EPOCH FROM revoked_at)::bigint * 1000 AS revoked_at_ms,
+                EXTRACT(EPOCH FROM expires_at)::bigint * 1000 AS expires_at_ms,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+            "#,
+        )
+        .bind(input.org_id)
+        .bind(input.invite_email)
+        .bind(input.invite_login)
+        .bind(input.role)
+        .bind(input.token_hash)
+        .bind(input.invited_by)
+        .bind(input.expires_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(Self::row_to_org_invitation(&row))
+    }
+
+    pub async fn list_org_invitations(
+        &self,
+        org_id: &str,
+        status: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<OrgInvitation>, i64), DbError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id::text,
+                org_id::text,
+                invite_email,
+                invite_login,
+                role,
+                CASE
+                    WHEN status = 'pending' AND expires_at < NOW() THEN 'expired'
+                    ELSE status
+                END AS status,
+                invited_by,
+                accepted_by,
+                EXTRACT(EPOCH FROM accepted_at)::bigint * 1000 AS accepted_at_ms,
+                revoked_by,
+                EXTRACT(EPOCH FROM revoked_at)::bigint * 1000 AS revoked_at_ms,
+                EXTRACT(EPOCH FROM expires_at)::bigint * 1000 AS expires_at_ms,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+            FROM org_invitations
+            WHERE org_id = $1::uuid
+              AND (
+                    $2::text IS NULL
+                    OR (
+                        CASE
+                            WHEN status = 'pending' AND expires_at < NOW() THEN 'expired'
+                            ELSE status
+                        END
+                    ) = $2
+              )
+            ORDER BY created_at DESC
+            LIMIT $3 OFFSET $4
+            "#,
+        )
+        .bind(org_id)
+        .bind(status)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let count_row = sqlx::query(
+            r#"
+            SELECT COUNT(*) AS total
+            FROM org_invitations
+            WHERE org_id = $1::uuid
+              AND (
+                    $2::text IS NULL
+                    OR (
+                        CASE
+                            WHEN status = 'pending' AND expires_at < NOW() THEN 'expired'
+                            ELSE status
+                        END
+                    ) = $2
+              )
+            "#,
+        )
+        .bind(org_id)
+        .bind(status)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let total: i64 = count_row.get("total");
+        let entries = rows.iter().map(Self::row_to_org_invitation).collect();
+        Ok((entries, total))
+    }
+
+    pub async fn resend_org_invitation(
+        &self,
+        invitation_id: &str,
+        scope_org_id: Option<&str>,
+        token_hash: &str,
+        actor: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<OrgInvitation>, DbError> {
+        let row = sqlx::query(
+            r#"
+            UPDATE org_invitations
+            SET
+                token_hash = $3,
+                status = 'pending',
+                invited_by = $4,
+                expires_at = $5,
+                accepted_by = NULL,
+                accepted_at = NULL,
+                revoked_by = NULL,
+                revoked_at = NULL,
+                updated_at = NOW()
+            WHERE id = $1::uuid
+              AND ($2::uuid IS NULL OR org_id = $2::uuid)
+              AND status <> 'accepted'
+            RETURNING
+                id::text,
+                org_id::text,
+                invite_email,
+                invite_login,
+                role,
+                status,
+                invited_by,
+                accepted_by,
+                EXTRACT(EPOCH FROM accepted_at)::bigint * 1000 AS accepted_at_ms,
+                revoked_by,
+                EXTRACT(EPOCH FROM revoked_at)::bigint * 1000 AS revoked_at_ms,
+                EXTRACT(EPOCH FROM expires_at)::bigint * 1000 AS expires_at_ms,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+            "#,
+        )
+        .bind(invitation_id)
+        .bind(scope_org_id)
+        .bind(token_hash)
+        .bind(actor)
+        .bind(expires_at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|r| Self::row_to_org_invitation(&r)))
+    }
+
+    pub async fn revoke_org_invitation(
+        &self,
+        invitation_id: &str,
+        scope_org_id: Option<&str>,
+        actor: &str,
+    ) -> Result<Option<OrgInvitation>, DbError> {
+        let row = sqlx::query(
+            r#"
+            UPDATE org_invitations
+            SET
+                status = 'revoked',
+                revoked_by = $3,
+                revoked_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1::uuid
+              AND ($2::uuid IS NULL OR org_id = $2::uuid)
+              AND status = 'pending'
+            RETURNING
+                id::text,
+                org_id::text,
+                invite_email,
+                invite_login,
+                role,
+                status,
+                invited_by,
+                accepted_by,
+                EXTRACT(EPOCH FROM accepted_at)::bigint * 1000 AS accepted_at_ms,
+                revoked_by,
+                EXTRACT(EPOCH FROM revoked_at)::bigint * 1000 AS revoked_at_ms,
+                EXTRACT(EPOCH FROM expires_at)::bigint * 1000 AS expires_at_ms,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+            "#,
+        )
+        .bind(invitation_id)
+        .bind(scope_org_id)
+        .bind(actor)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|r| Self::row_to_org_invitation(&r)))
+    }
+
+    pub async fn get_org_invitation_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<OrgInvitation>, DbError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id::text,
+                org_id::text,
+                invite_email,
+                invite_login,
+                role,
+                CASE
+                    WHEN status = 'pending' AND expires_at < NOW() THEN 'expired'
+                    ELSE status
+                END AS status,
+                invited_by,
+                accepted_by,
+                EXTRACT(EPOCH FROM accepted_at)::bigint * 1000 AS accepted_at_ms,
+                revoked_by,
+                EXTRACT(EPOCH FROM revoked_at)::bigint * 1000 AS revoked_at_ms,
+                EXTRACT(EPOCH FROM expires_at)::bigint * 1000 AS expires_at_ms,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+            FROM org_invitations
+            WHERE token_hash = $1
+            "#,
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|r| Self::row_to_org_invitation(&r)))
+    }
+
+    pub async fn accept_org_invitation(
+        &self,
+        token_hash: &str,
+        requested_login: Option<&str>,
+    ) -> Result<Option<AcceptedOrgInvitation>, DbError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let invite_row = sqlx::query(
+            r#"
+            SELECT
+                id::text,
+                org_id::text,
+                invite_email,
+                invite_login,
+                role,
+                status,
+                invited_by,
+                accepted_by,
+                EXTRACT(EPOCH FROM accepted_at)::bigint * 1000 AS accepted_at_ms,
+                revoked_by,
+                EXTRACT(EPOCH FROM revoked_at)::bigint * 1000 AS revoked_at_ms,
+                EXTRACT(EPOCH FROM expires_at)::bigint * 1000 AS expires_at_ms,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+            FROM org_invitations
+            WHERE token_hash = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(token_hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let Some(invite_row) = invite_row else {
+            tx.rollback()
+                .await
+                .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+            return Ok(None);
+        };
+
+        let invitation = Self::row_to_org_invitation(&invite_row);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let is_pending = invitation.status == "pending";
+        let is_not_expired = invitation.expires_at > now_ms;
+        if !is_pending || !is_not_expired {
+            tx.rollback()
+                .await
+                .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+            return Ok(None);
+        }
+
+        let resolved_login = requested_login
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| invitation.invite_login.clone().map(|s| s.trim().to_string()))
+            .or_else(|| {
+                invitation
+                    .invite_email
+                    .as_ref()
+                    .and_then(|email| email.split('@').next().map(str::trim))
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+            });
+
+        let Some(login) = resolved_login else {
+            tx.rollback()
+                .await
+                .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+            return Err(DbError::DatabaseError(
+                "Invitation does not have a resolvable login".to_string(),
+            ));
+        };
+
+        let existing_id = sqlx::query(
+            r#"
+            SELECT id::text AS id
+            FROM org_users
+            WHERE org_id = $1::uuid
+              AND login = $2
+            "#,
+        )
+        .bind(&invitation.org_id)
+        .bind(&login)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?
+        .map(|r| r.get::<String, _>("id"));
+
+        let org_user_row = if let Some(id) = existing_id {
+            sqlx::query(
+                r#"
+                UPDATE org_users
+                SET
+                    email = COALESCE($2, email),
+                    role = $3,
+                    status = 'active',
+                    updated_by = $4,
+                    updated_at = NOW()
+                WHERE id = $1::uuid
+                RETURNING
+                    id::text,
+                    org_id::text,
+                    login,
+                    display_name,
+                    email,
+                    role,
+                    status,
+                    created_by,
+                    updated_by,
+                    EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                    EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+                "#,
+            )
+            .bind(id)
+            .bind(invitation.invite_email.as_deref())
+            .bind(&invitation.role)
+            .bind(&login)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO org_users (
+                    org_id, login, display_name, email, role, status, created_by, updated_by
+                )
+                VALUES ($1::uuid, $2, NULL, $3, $4, 'active', $2, $2)
+                RETURNING
+                    id::text,
+                    org_id::text,
+                    login,
+                    display_name,
+                    email,
+                    role,
+                    status,
+                    created_by,
+                    updated_by,
+                    EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                    EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+                "#,
+            )
+            .bind(&invitation.org_id)
+            .bind(&login)
+            .bind(invitation.invite_email.as_deref())
+            .bind(&invitation.role)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?
+        };
+        let org_user = Self::row_to_org_user(&org_user_row);
+
+        let api_key = uuid::Uuid::new_v4().to_string();
+        let key_hash = format!("{:x}", sha2::Sha256::digest(api_key.as_bytes()));
+        sqlx::query(
+            r#"
+            INSERT INTO api_keys (key_hash, client_id, org_id, role)
+            VALUES ($1, $2, $3::uuid, $4)
+            "#,
+        )
+        .bind(&key_hash)
+        .bind(&org_user.login)
+        .bind(&invitation.org_id)
+        .bind(&invitation.role)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let accepted_row = sqlx::query(
+            r#"
+            UPDATE org_invitations
+            SET
+                status = 'accepted',
+                accepted_by = $2,
+                accepted_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1::uuid
+            RETURNING
+                id::text,
+                org_id::text,
+                invite_email,
+                invite_login,
+                role,
+                status,
+                invited_by,
+                accepted_by,
+                EXTRACT(EPOCH FROM accepted_at)::bigint * 1000 AS accepted_at_ms,
+                revoked_by,
+                EXTRACT(EPOCH FROM revoked_at)::bigint * 1000 AS revoked_at_ms,
+                EXTRACT(EPOCH FROM expires_at)::bigint * 1000 AS expires_at_ms,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM updated_at)::bigint * 1000 AS updated_at_ms
+            "#,
+        )
+        .bind(&invitation.id)
+        .bind(&org_user.login)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(Some(AcceptedOrgInvitation {
+            invitation: Self::row_to_org_invitation(&accepted_row),
+            org_user,
+            api_key,
+        }))
+    }
+
+    // ========================================================================
+    // CHAT QUERY ENGINE — Conversational MVP
+    // ========================================================================
+
+    /// Q1: Pushes to main this week with no Jira ticket correlation.
+    pub async fn chat_query_pushes_no_ticket(
+        &self,
+        org_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                ge.actor_login,
+                ge.ref_name   AS branch,
+                ge.commit_shas::text AS commit_shas,
+                EXTRACT(EPOCH FROM ge.created_at)::bigint * 1000 AS event_ts
+            FROM github_events ge
+            WHERE ge.event_type = 'push'
+              AND (ge.ref_name = 'refs/heads/main' OR ge.ref_name = 'main')
+              AND ge.created_at >= NOW() - INTERVAL '7 days'
+              AND ($1::uuid IS NULL OR ge.org_id = $1::uuid)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM commit_ticket_correlations ctc
+                  WHERE ctc.commit_sha = ANY(
+                      SELECT jsonb_array_elements_text(ge.commit_shas::jsonb)
+                  )
+              )
+            ORDER BY ge.created_at DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "actor": r.get::<Option<String>, _>("actor_login").unwrap_or_default(),
+                    "branch": r.get::<Option<String>, _>("branch").unwrap_or_default(),
+                    "timestamp": r.get::<i64, _>("event_ts"),
+                })
+            })
+            .collect())
+    }
+
+    /// Q2: Count blocked pushes this calendar month.
+    pub async fn chat_query_blocked_pushes_month(
+        &self,
+        org_id: Option<&str>,
+    ) -> Result<i64, DbError> {
+        let row = sqlx::query(
+            r#"
+            SELECT COUNT(*)::bigint AS cnt
+            FROM client_events
+            WHERE event_type IN ('blocked_push', 'push_failed', 'attempt_push')
+              AND status IN ('blocked', 'failed')
+              AND created_at >= date_trunc('month', NOW())
+              AND ($1::uuid IS NULL OR org_id = $1::uuid)
+            "#,
+        )
+        .bind(org_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(row.get("cnt"))
+    }
+
+    /// Q3: Commits by a specific user in a time range [start_ms, end_ms] (epoch millis).
+    pub async fn chat_query_user_commits_range(
+        &self,
+        user_login: &str,
+        start_ms: i64,
+        end_ms: i64,
+        org_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                user_login,
+                branch,
+                commit_sha,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS event_ts,
+                COALESCE(metadata::text, '{}') AS meta
+            FROM client_events
+            WHERE event_type = 'commit'
+              AND user_login ILIKE $1
+              AND created_at >= to_timestamp($2::bigint / 1000.0)
+              AND created_at <= to_timestamp($3::bigint / 1000.0)
+              AND ($4::uuid IS NULL OR org_id = $4::uuid)
+            ORDER BY created_at DESC
+            LIMIT 100
+            "#,
+        )
+        .bind(user_login)
+        .bind(start_ms)
+        .bind(end_ms)
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "user_login": r.get::<String, _>("user_login"),
+                    "branch": r.get::<Option<String>, _>("branch").unwrap_or_default(),
+                    "commit_sha": r.get::<Option<String>, _>("commit_sha").unwrap_or_default(),
+                    "timestamp": r.get::<i64, _>("event_ts"),
+                })
+            })
+            .collect())
+    }
+
+    /// Insert a feature request record. Returns the new UUID as String.
+    pub async fn create_feature_request(
+        &self,
+        input: &crate::models::FeatureRequestInput,
+        requested_by: &str,
+    ) -> Result<String, DbError> {
+        let metadata = input
+            .metadata
+            .as_ref()
+            .cloned()
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO feature_requests
+                (org_id, requested_by, question, missing_capability, metadata)
+            VALUES ($1::uuid, $2, $3, $4, $5)
+            RETURNING id::text
+            "#,
+        )
+        .bind(input.org_id.as_deref())
+        .bind(requested_by)
+        .bind(&input.question)
+        .bind(input.missing_capability.as_deref())
+        .bind(&metadata)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(row.get("id"))
     }
 }
 

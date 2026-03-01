@@ -10,6 +10,7 @@ import { FeatureCard } from './FeatureCard';
 import { CTASection } from './CTASection';
 import { RoleCards } from './RoleCards';
 import { FlowDiagram } from './FlowDiagram';
+import { FAQSection } from './FAQSection';
 
 export {
     FeaturesClient,
@@ -23,5 +24,6 @@ export {
     FeatureCard,
     CTASection,
     RoleCards,
-    FlowDiagram
+    FlowDiagram,
+    FAQSection,
 };

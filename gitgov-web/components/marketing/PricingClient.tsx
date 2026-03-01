@@ -39,8 +39,8 @@ export function PricingClient() {
             description: t('pricing.plans.free.description') as string,
             icon: <HiOutlineUser size={22} />,
             highlighted: false,
-            gradientFrom: 'rgba(0,229,218,0.08)',
-            gradientTo: 'rgba(0,229,218,0.02)',
+            gradientFrom: 'rgba(255,255,255,0.03)',
+            gradientTo: 'rgba(255,255,255,0.01)',
             cta: t('pricing.plans.free.cta') as string,
             ctaHref: '/contact',
             features: [
@@ -60,8 +60,8 @@ export function PricingClient() {
             description: t('pricing.plans.team.description') as string,
             icon: <HiOutlineLightningBolt size={22} />,
             highlighted: true,
-            gradientFrom: 'rgba(0,229,218,0.18)',
-            gradientTo: 'rgba(0,229,218,0.06)',
+            gradientFrom: 'rgba(249,115,22,0.1)',
+            gradientTo: 'rgba(249,115,22,0.02)',
             cta: t('pricing.plans.team.cta') as string,
             ctaHref: '/contact',
             features: [
@@ -80,8 +80,8 @@ export function PricingClient() {
             description: t('pricing.plans.enterprise.description') as string,
             icon: <HiOutlineOfficeBuilding size={22} />,
             highlighted: false,
-            gradientFrom: 'rgba(0,229,218,0.06)',
-            gradientTo: 'rgba(0,229,218,0.01)',
+            gradientFrom: 'rgba(255,255,255,0.03)',
+            gradientTo: 'rgba(255,255,255,0.01)',
             cta: t('pricing.plans.enterprise.cta') as string,
             ctaHref: '/contact',
             features: [
@@ -103,7 +103,7 @@ export function PricingClient() {
                     <div
                         className="absolute inset-0 opacity-[0.03]"
                         style={{
-                            backgroundImage: `linear-gradient(rgba(0,229,218,0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(0,229,218,0.2) 1px, transparent 1px)`,
+                            backgroundImage: `linear-gradient(rgba(249,115,22,0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(249,115,22,0.2) 1px, transparent 1px)`,
                             backgroundSize: '40px 40px',
                         }}
                     />
@@ -124,112 +124,122 @@ export function PricingClient() {
             <section className="pb-32">
                 <Container>
                     <SectionReveal>
-                        <div className="grid md:grid-cols-3 gap-6 max-w-5xl mx-auto">
+                        <div className="grid md:grid-cols-3 gap-8 max-w-6xl mx-auto">
                             {plans.map((plan, i) => (
                                 <div
                                     key={plan.name}
                                     onMouseEnter={() => setHoveredPlan(i)}
                                     onMouseLeave={() => setHoveredPlan(null)}
-                                    className={`relative rounded-2xl p-px transition-all duration-300 ${
-                                        plan.highlighted
-                                            ? 'shadow-[0_0_40px_rgba(0,229,218,0.15)]'
-                                            : hoveredPlan === i
-                                            ? 'shadow-[0_0_20px_rgba(0,229,218,0.08)]'
-                                            : ''
-                                    }`}
-                                    style={{
-                                        background: plan.highlighted
-                                            ? 'linear-gradient(135deg, rgba(0,229,218,0.5) 0%, rgba(0,229,218,0.1) 50%, rgba(0,229,218,0.05) 100%)'
-                                            : hoveredPlan === i
-                                            ? 'linear-gradient(135deg, rgba(0,229,218,0.2) 0%, rgba(0,229,218,0.05) 100%)'
-                                            : 'linear-gradient(135deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.02) 100%)',
-                                    }}
+                                    className={`relative rounded-[2rem] p-[1px] transition-all duration-500 group overflow-hidden ${plan.highlighted
+                                            ? 'shadow-[0_0_50px_rgba(249,115,22,0.1)] hover:shadow-[0_0_70px_rgba(249,115,22,0.15)] -mt-4 mb-4'
+                                            : 'hover:shadow-2xl'
+                                        }`}
                                 >
+                                    {/* Animated Border Gradient Layer */}
                                     <div
-                                        className="rounded-2xl h-full flex flex-col p-7"
+                                        className="absolute inset-0 opacity-100 z-0 transition-opacity duration-500"
                                         style={{
-                                            background: `linear-gradient(145deg, ${plan.gradientFrom}, ${plan.gradientTo}), #0d1117`,
+                                            background: plan.highlighted
+                                                ? 'linear-gradient(135deg, rgba(249,115,22,0.5) 0%, rgba(249,115,22,0.1) 50%, rgba(249,115,22,0.05) 100%)'
+                                                : hoveredPlan === i
+                                                    ? 'linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.05) 100%)'
+                                                    : 'linear-gradient(135deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%)',
+                                        }}
+                                    />
+
+                                    {/* Inner Card content */}
+                                    <div
+                                        className="relative h-full rounded-[31px] flex flex-col p-8 md:p-10 z-10"
+                                        style={{
+                                            background: `linear-gradient(145deg, ${plan.gradientFrom}, ${plan.gradientTo}), #090909`,
                                         }}
                                     >
-                                        {/* Card Header */}
-                                        <div className="mb-6">
-                                            <div className="flex items-start justify-between mb-4">
-                                                <div
-                                                    className={`w-10 h-10 rounded-xl flex items-center justify-center ${
-                                                        plan.highlighted
-                                                            ? 'bg-brand-500/20 text-brand-400'
-                                                            : 'bg-white/5 text-gray-400'
-                                                    }`}
-                                                >
-                                                    {plan.icon}
-                                                </div>
-                                                {plan.badge && (
-                                                    <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-brand-500/20 text-brand-400 border border-brand-500/30">
-                                                        {plan.badge}
-                                                    </span>
-                                                )}
-                                            </div>
+                                        {/* Radial Hover Glow (Subtle) */}
+                                        <div className={`absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none rounded-[31px] z-0 ${plan.highlighted ? 'bg-[radial-gradient(circle_at_50%_0%,rgba(249,115,22,0.05),transparent_70%)]' : 'bg-[radial-gradient(circle_at_50%_0%,rgba(255,255,255,0.02),transparent_70%)]'}`} />
 
-                                            <h3 className="text-lg font-bold text-white mb-1">{plan.name}</h3>
-                                            <p className="text-sm text-gray-500 leading-relaxed">{plan.description}</p>
-                                        </div>
-
-                                        {/* Price */}
-                                        <div className="mb-6 pb-6 border-b border-white/5">
-                                            <div className="flex items-baseline gap-1">
-                                                <span
-                                                    className={`text-3xl font-bold ${
-                                                        plan.highlighted ? 'text-brand-400' : 'text-white'
-                                                    }`}
-                                                >
-                                                    {plan.price}
-                                                </span>
-                                            </div>
-                                            <p className="text-xs text-gray-600 mt-1">{plan.priceNote}</p>
-                                        </div>
-
-                                        {/* Features */}
-                                        <ul className="space-y-3 flex-1 mb-8">
-                                            {plan.features.map((f, fi) => (
-                                                <li key={fi} className="flex items-start gap-2.5">
+                                        <div className="relative z-10 flex-col flex h-full">
+                                            {/* Card Header */}
+                                            <div className="mb-8">
+                                                <div className="flex items-start justify-between mb-6">
                                                     <div
-                                                        className={`mt-0.5 w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 ${
-                                                            f.included
-                                                                ? plan.highlighted
-                                                                    ? 'bg-brand-500/20 text-brand-400'
-                                                                    : 'bg-white/10 text-gray-400'
-                                                                : 'bg-white/5 text-gray-700'
-                                                        }`}
+                                                        className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-inner ${plan.highlighted
+                                                                ? 'bg-gradient-to-br from-brand-500/20 to-brand-500/5 border border-brand-500/20 text-brand-400'
+                                                                : 'bg-surface-300 border border-white/5 text-gray-300'
+                                                            }`}
                                                     >
-                                                        {f.included ? (
-                                                            <HiOutlineCheck size={10} />
-                                                        ) : (
-                                                            <span className="w-1 h-0.5 bg-current rounded" />
-                                                        )}
+                                                        {plan.icon}
                                                     </div>
-                                                    <span
-                                                        className={`text-sm ${
-                                                            f.included ? 'text-gray-300' : 'text-gray-600 line-through decoration-gray-700'
-                                                        }`}
-                                                    >
-                                                        {f.text}
-                                                    </span>
-                                                </li>
-                                            ))}
-                                        </ul>
+                                                    {plan.badge && (
+                                                        <span className="text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-full bg-brand-500/10 text-brand-400 border border-brand-500/20 shadow-inner">
+                                                            {plan.badge}
+                                                        </span>
+                                                    )}
+                                                </div>
 
-                                        {/* CTA */}
-                                        <a
-                                            href={plan.ctaHref}
-                                            className={`flex items-center justify-center gap-2 w-full py-3 px-5 rounded-xl text-sm font-semibold transition-all duration-300 ${
-                                                plan.highlighted
-                                                    ? 'bg-brand-500 text-surface-300 hover:bg-brand-400 shadow-glow hover:shadow-glow-lg'
-                                                    : 'bg-white/5 text-gray-300 border border-white/10 hover:bg-white/10'
-                                            }`}
-                                        >
-                                            <HiOutlineMail size={15} />
-                                            {plan.cta}
-                                        </a>
+                                                <h3 className="text-2xl font-bold font-sans text-white mb-3 tracking-tight">{plan.name}</h3>
+                                                <p className="text-sm text-gray-400 leading-relaxed font-medium">{plan.description}</p>
+                                            </div>
+
+                                            {/* Price */}
+                                            <div className="mb-8 pb-8 border-b border-white/5 relative">
+                                                <div className="absolute bottom-0 left-0 w-1/3 h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+                                                <div className="flex items-baseline gap-1">
+                                                    <span
+                                                        className={`text-5xl font-black tracking-tighter ${plan.highlighted ? 'text-white' : 'text-white'
+                                                            }`}
+                                                    >
+                                                        {plan.price}
+                                                    </span>
+                                                </div>
+                                                <p className="text-xs text-brand-400 font-semibold tracking-wide mt-2">{plan.priceNote}</p>
+                                            </div>
+
+                                            {/* Features */}
+                                            <ul className="space-y-4 flex-1 mb-10">
+                                                {plan.features.map((f, fi) => (
+                                                    <li key={fi} className="flex items-start gap-3 group/feature">
+                                                        <div
+                                                            className={`mt-1 w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 transition-colors shadow-inner ${f.included
+                                                                    ? plan.highlighted
+                                                                        ? 'bg-brand-500/20 text-brand-400 border border-brand-500/20'
+                                                                        : 'bg-surface-300 text-gray-300 border border-white/10 group-hover/feature:border-white/20'
+                                                                    : 'bg-transparent text-gray-700 border border-transparent'
+                                                                }`}
+                                                        >
+                                                            {f.included ? (
+                                                                <HiOutlineCheck size={12} strokeWidth={2.5} />
+                                                            ) : (
+                                                                <span className="w-1.5 h-0.5 bg-current rounded" />
+                                                            )}
+                                                        </div>
+                                                        <span
+                                                            className={`text-sm pt-0.5 ${f.included ? 'text-gray-300 font-medium' : 'text-gray-600 line-through decoration-gray-700/50'
+                                                                }`}
+                                                        >
+                                                            {f.text}
+                                                        </span>
+                                                    </li>
+                                                ))}
+                                            </ul>
+
+                                            {/* CTA */}
+                                            <a
+                                                href={plan.ctaHref}
+                                                className={`group/btn relative flex items-center justify-center gap-2 w-full py-4 px-6 rounded-xl font-bold transition-all duration-300 overflow-hidden ${plan.highlighted
+                                                        ? 'bg-brand-500 text-white shadow-[0_0_20px_rgba(249,115,22,0.2)] hover:shadow-[0_0_30px_rgba(249,115,22,0.4)]'
+                                                        : 'bg-surface-300 text-white border border-white/5 hover:bg-surface-200 hover:border-white/10'
+                                                    }`}
+                                            >
+                                                {plan.highlighted && (
+                                                    <>
+                                                        <div className="absolute inset-0 bg-white/20 opacity-0 group-hover/btn:opacity-100 transition-opacity duration-300" />
+                                                        <div className="absolute inset-0 bg-gradient-to-b from-white/20 to-transparent opacity-30" />
+                                                    </>
+                                                )}
+                                                <HiOutlineMail size={18} className="relative z-10" />
+                                                <span className="relative z-10">{plan.cta}</span>
+                                            </a>
+                                        </div>
                                     </div>
                                 </div>
                             ))}

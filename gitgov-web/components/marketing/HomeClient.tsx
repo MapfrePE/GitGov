@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Hero, SectionHeader, FeatureCard, CTASection, RoleCards, FlowDiagram } from '@/components/marketing';
+import { Hero, SectionHeader, FeatureCard, CTASection, RoleCards, FlowDiagram, FAQSection } from '@/components/marketing';
 import { Container } from '@/components/layout';
 import { SectionReveal } from '@/components/ui';
 import { useTranslation } from '@/lib/i18n';
@@ -151,6 +151,9 @@ export function HomeClient() {
                     />
                 </Container>
             </section>
+
+            {/* ═══ FAQ ═══ */}
+            <FAQSection />
 
             {/* ═══ CTA ═══ */}
             <CTASection

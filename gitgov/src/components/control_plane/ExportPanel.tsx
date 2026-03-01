@@ -2,14 +2,7 @@ import { useEffect, useState } from 'react'
 import { Download, RefreshCw, FileJson } from 'lucide-react'
 import { useControlPlaneStore, type ExportLogEntry } from '@/store/useControlPlaneStore'
 import { Button } from '@/components/shared/Button'
-
-function formatTimestamp(ms: number | null | undefined): string {
-  if (!ms) return '—'
-  return new Date(ms).toLocaleDateString('es', {
-    year: 'numeric', month: 'short', day: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  })
-}
+import { formatTs } from '@/lib/timezone'
 
 function fromDateInputValue(s: string): number | undefined {
   if (!s) return undefined
@@ -17,7 +10,7 @@ function fromDateInputValue(s: string): number | undefined {
 }
 
 export function ExportPanel() {
-  const { exportLogs, exportAuditData, loadExportLogs } = useControlPlaneStore()
+  const { exportLogs, exportAuditData, loadExportLogs, displayTimezone } = useControlPlaneStore()
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [isExporting, setIsExporting] = useState(false)
@@ -128,12 +121,12 @@ export function ExportPanel() {
                   <td className="py-1.5 pr-2 font-mono text-surface-300">{log.exported_by}</td>
                   <td className="py-1.5 pr-2 text-surface-300">{log.record_count.toLocaleString()}</td>
                   <td className="py-1.5 pr-2 text-surface-400">
-                    {formatTimestamp(log.date_range_start)}
+                    {formatTs(log.date_range_start, displayTimezone)}
                   </td>
                   <td className="py-1.5 pr-2 text-surface-400">
-                    {formatTimestamp(log.date_range_end)}
+                    {formatTs(log.date_range_end, displayTimezone)}
                   </td>
-                  <td className="py-1.5 text-surface-400">{formatTimestamp(log.created_at)}</td>
+                  <td className="py-1.5 text-surface-400">{formatTs(log.created_at, displayTimezone)}</td>
                 </tr>
               ))}
             </tbody>

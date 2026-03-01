@@ -29,11 +29,11 @@ interface PulseRing {
 interface NexusBurst { radius: number; maxRadius: number; alpha: number; color: string }
 
 const COLORS = {
-    commit: { r: 0, g: 229, b: 218 },
-    ci: { r: 34, g: 197, b: 94 },
-    ticket: { r: 59, g: 130, b: 246 },
-    audit: { r: 168, g: 85, b: 247 },
-    default: { r: 180, g: 195, b: 210 },
+    commit: { r: 249, g: 115, b: 22 },
+    ci: { r: 245, g: 158, b: 11 },
+    ticket: { r: 251, g: 146, b: 60 },
+    audit: { r: 234, g: 88, b: 12 },
+    default: { r: 196, g: 163, b: 120 },
     amber: { r: 255, g: 187, b: 26 },
 };
 function clamp(v: number) { return Math.max(0, Math.min(1, v)); }
@@ -85,7 +85,7 @@ function GovernanceCanvas() {
         const R = 200;
         const nodes = generateSphereNodes(130, R);
         const edges = buildEdges(nodes, R * 0.52);
-        const cols = ['#00e5da', '#22c55e', '#3b82f6', '#a855f7', '#ffbb1a'];
+        const cols = ['#f97316', '#f59e0b', '#fb923c', '#ea580c', '#ffbb1a'];
         const flow: FlowParticle[] = Array.from({ length: 38 }, (_, i) => {
             const ei = Math.floor(Math.random() * edges.length);
             return { fromIdx: edges[ei][0], toIdx: edges[ei][1], progress: Math.random(), speed: 0.004 + Math.random() * 0.009, color: cols[i % cols.length], trail: [] };
@@ -140,8 +140,8 @@ function GovernanceCanvas() {
             {
                 const pulse = 0.5 + 0.5 * Math.sin(t * 0.7);
                 const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 1.7);
-                g.addColorStop(0, `rgba(0,229,218,${0.07 + pulse * 0.05})`);
-                g.addColorStop(0.5, `rgba(0,229,218,${0.02})`);
+                g.addColorStop(0, `rgba(249,115,22,${0.07 + pulse * 0.05})`);
+                g.addColorStop(0.5, `rgba(249,115,22,${0.02})`);
                 g.addColorStop(1, 'rgba(0,0,0,0)');
                 ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
             }
@@ -232,19 +232,19 @@ function GovernanceCanvas() {
                 const p2 = 0.6 + 0.4 * Math.sin(t * 1.1);
                 const cr = R * 0.045;
                 const outer = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 0.30);
-                outer.addColorStop(0, `rgba(0,229,218,${0.20 + p2 * 0.12})`);
-                outer.addColorStop(0.4, `rgba(0,229,218,${0.06 + p2 * 0.04})`);
-                outer.addColorStop(1, 'rgba(0,229,218,0)');
+                outer.addColorStop(0, `rgba(249,115,22,${0.20 + p2 * 0.12})`);
+                outer.addColorStop(0.4, `rgba(249,115,22,${0.06 + p2 * 0.04})`);
+                outer.addColorStop(1, 'rgba(249,115,22,0)');
                 ctx.fillStyle = outer; ctx.beginPath(); ctx.arc(cx, cy, R * 0.30, 0, Math.PI * 2); ctx.fill();
 
                 const inner = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 0.12);
-                inner.addColorStop(0, `rgba(0,255,248,${0.60 + p2 * 0.25})`);
-                inner.addColorStop(0.5, `rgba(0,229,218,${0.22 + p2 * 0.10})`);
-                inner.addColorStop(1, 'rgba(0,229,218,0)');
+                inner.addColorStop(0, `rgba(255,209,168,${0.60 + p2 * 0.25})`);
+                inner.addColorStop(0.5, `rgba(249,115,22,${0.22 + p2 * 0.10})`);
+                inner.addColorStop(1, 'rgba(249,115,22,0)');
                 ctx.fillStyle = inner; ctx.beginPath(); ctx.arc(cx, cy, R * 0.12, 0, Math.PI * 2); ctx.fill();
 
                 ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI * 2);
-                ctx.fillStyle = `rgba(220,255,252,${0.90 + p2 * 0.10})`; ctx.fill();
+                ctx.fillStyle = `rgba(255,236,214,${0.90 + p2 * 0.10})`; ctx.fill();
 
                 for (let li = 0; li < 4; li++) {
                     const angle = t * 0.35 + (li * Math.PI) / 2;
@@ -252,7 +252,7 @@ function GovernanceCanvas() {
                     ctx.beginPath();
                     ctx.moveTo(cx + Math.cos(angle) * cr * 1.6, cy + Math.sin(angle) * cr * 1.6);
                     ctx.lineTo(cx + Math.cos(angle) * ll, cy + Math.sin(angle) * ll);
-                    ctx.strokeStyle = `rgba(0,255,248,${0.28 + p2 * 0.18})`; ctx.lineWidth = 1.1; ctx.stroke();
+                    ctx.strokeStyle = `rgba(255,170,94,${0.28 + p2 * 0.18})`; ctx.lineWidth = 1.1; ctx.stroke();
                 }
             }
 
@@ -390,11 +390,11 @@ function SatCard({ subtitle, title, extra, rgb, delay, floatY, floatDuration, cl
    EVIDENCE CHAIN — animated commit-to-audit pipeline strip
 ════════════════════════════════════════════════════════ */
 const CHAIN_NODES = [
-    { id: 'commit', label: 'Commit', detail: 'a3f8c2e → main', rgb: [0, 229, 218] as [number, number, number] },
-    { id: 'ci', label: 'CI Pipeline', detail: 'Build #142 ✓', rgb: [34, 197, 94] as [number, number, number] },
+    { id: 'commit', label: 'Commit', detail: 'a3f8c2e → main', rgb: [249, 115, 22] as [number, number, number] },
+    { id: 'ci', label: 'CI Pipeline', detail: 'Build #142 ✓', rgb: [245, 158, 11] as [number, number, number] },
     { id: 'policy', label: 'Policy', detail: 'COMPLIANT', rgb: [255, 187, 26] as [number, number, number] },
-    { id: 'jira', label: 'Jira', detail: 'GOV-1247 linked', rgb: [59, 130, 246] as [number, number, number] },
-    { id: 'audit', label: 'Audit Log', detail: '4,821 events', rgb: [168, 85, 247] as [number, number, number] },
+    { id: 'jira', label: 'Jira', detail: 'GOV-1247 linked', rgb: [251, 146, 60] as [number, number, number] },
+    { id: 'audit', label: 'Audit Log', detail: '4,821 events', rgb: [234, 88, 12] as [number, number, number] },
 ];
 
 interface EvidenceChainProps {
@@ -440,8 +440,8 @@ function EvidenceChain({ demoStep }: EvidenceChainProps) {
                         </div>
                     </div>
                     <div className="flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-[#00e5da] animate-pulse" />
-                        <span className="text-[8px] font-mono text-[#00e5da]/60 uppercase tracking-wider">Live</span>
+                        <span className="w-1.5 h-1.5 rounded-full bg-[#f97316] animate-pulse" />
+                        <span className="text-[8px] font-mono text-[#f97316]/70 uppercase tracking-wider">Live</span>
                     </div>
                 </div>
 
@@ -520,13 +520,13 @@ function EvidenceChain({ demoStep }: EvidenceChainProps) {
                     {isComplete && (
                         <motion.div
                             className="flex items-center gap-2.5 px-5 py-2 rounded-full border"
-                            style={{ borderColor: 'rgba(0,229,218,0.4)', background: 'rgba(0,229,218,0.06)' }}
+                            style={{ borderColor: 'rgba(249,115,22,0.45)', background: 'rgba(249,115,22,0.10)' }}
                             initial={{ opacity: 0, scale: 0.85, y: 8 }}
                             animate={{ opacity: 1, scale: 1, y: 0 }}
                             transition={{ duration: 0.5, type: 'spring', stiffness: 120 }}
                         >
-                            <span className="w-2 h-2 rounded-full bg-[#00e5da] animate-pulse" />
-                            <span className="text-[11px] font-black text-[#00e5da] tracking-wide">COMPLIANT</span>
+                            <span className="w-2 h-2 rounded-full bg-[#f97316] animate-pulse" />
+                            <span className="text-[11px] font-black text-[#f97316] tracking-wide">COMPLIANT</span>
                             <span className="text-[9px] font-mono text-white/35">· evidence recorded immutably</span>
                         </motion.div>
                     )}
@@ -701,8 +701,8 @@ function SvgDataTunnel({ demoStep }: SvgDataTunnelProps) {
                         {isActivePath && (
                             <motion.circle
                                 r="4"
-                                fill="#00e5da"
-                                style={{ filter: 'drop-shadow(0 0 10px #00e5da)' }}
+                                fill="#f97316"
+                                style={{ filter: 'drop-shadow(0 0 10px #f97316)' }}
                             >
                                 <animateMotion dur="0.5s" repeatCount="1" fill="freeze" path={p.d} />
                             </motion.circle>
@@ -739,9 +739,9 @@ export function Hero() {
 
     return (
         <section
-            className="relative overflow-hidden flex flex-col items-center justify-center bg-[#03070c]"
+            className="relative overflow-hidden flex flex-col items-center justify-start bg-[#03070c]"
             id="hero"
-            style={{ minHeight: '100vh', perspective: '1000px' }}
+            style={{ minHeight: '92vh', perspective: '1000px' }}
             onMouseMove={handleMouseMove}
         >
             {/* INMERSIVE BACKGROUND CANVAS (Now restricted conceptually, but visually spans to give atmosphere) */}
@@ -784,7 +784,7 @@ export function Hero() {
             <motion.div
                 className="pointer-events-none absolute inset-0 z-10 opacity-30"
                 animate={{
-                    background: `radial-gradient(800px circle at ${mousePos.x}px ${mousePos.y}px, rgba(0,229,218,0.06), transparent 60%)`,
+                    background: `radial-gradient(800px circle at ${mousePos.x}px ${mousePos.y}px, rgba(249,115,22,0.08), transparent 60%)`,
                 }}
             />
 
@@ -824,9 +824,9 @@ export function Hero() {
                             </span>
                             {/* Standard Brand Color Text */}
                             <span
-                                className="block text-transparent bg-clip-text bg-gradient-to-r from-brand-400 to-[#00b3aa] pb-4 mt-2 h-[120%] text-5xl sm:text-6xl md:text-[4rem] lg:text-[4.5rem]"
+                                className="block text-transparent bg-clip-text bg-gradient-to-r from-brand-500 to-warning-300 pb-4 mt-2 h-[120%] text-5xl sm:text-6xl md:text-[4rem] lg:text-[4.5rem]"
                                 style={{
-                                    filter: 'drop-shadow(0px 4px 12px rgba(0,229,218,0.25))'
+                                    filter: 'drop-shadow(0px 4px 12px rgba(249,115,22,0.3))'
                                 }}
                             >
                                 {t('hero.title2')}
@@ -855,11 +855,11 @@ export function Hero() {
                                 disabled={demoActive}
                                 className="group relative overflow-hidden flex items-center justify-center gap-2.5 px-8 py-4 rounded-xl font-bold text-base transition-all disabled:opacity-80 disabled:cursor-wait"
                                 style={{
-                                    background: demoActive ? 'rgba(0,229,218,0.1)' : 'rgba(255,255,255,0.03)',
-                                    color: demoActive ? '#00e5da' : '#fff',
+                                    background: demoActive ? 'rgba(249,115,22,0.14)' : 'rgba(255,255,255,0.03)',
+                                    color: demoActive ? '#f97316' : '#fff',
                                     border: '1px solid',
-                                    borderColor: demoActive ? 'rgba(0,229,218,0.4)' : 'rgba(255,255,255,0.15)',
-                                    boxShadow: demoActive ? 'inset 0 0 20px rgba(0,229,218,0.1)' : '0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.1)',
+                                    borderColor: demoActive ? 'rgba(249,115,22,0.45)' : 'rgba(255,255,255,0.15)',
+                                    boxShadow: demoActive ? 'inset 0 0 20px rgba(249,115,22,0.16)' : '0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.1)',
                                     backdropFilter: 'blur(12px)'
                                 }}
                             >
@@ -874,7 +874,7 @@ export function Hero() {
                                             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-400 opacity-75"></span>
                                             <span className="relative inline-flex rounded-full h-3 w-3 bg-brand-500"></span>
                                         </span>
-                                        <span>Tracking Event...</span>
+                                        <span>Trazando evento...</span>
                                     </>
                                 ) : (
                                     <>
@@ -892,7 +892,7 @@ export function Hero() {
                                 }}
                             >
                                 <HiOutlineDownload size={18} />
-                                Descargar CLI
+                                Descargar App Desktop
                             </a>
                         </motion.div>
 
@@ -924,8 +924,8 @@ export function Hero() {
                                 animate={{ opacity: 1, scale: 1, y: 0 }}
                                 transition={{ type: 'spring', stiffness: 200, damping: 15 }}
                             >
-                                <span className="w-2 h-2 rounded-full bg-[#00e5da] animate-pulse shadow-[0_0_10px_#00e5da]" />
-                                <span className="text-xs font-black text-[#00e5da] tracking-widest uppercase">Certificado Inmutable Guardado</span>
+                                <span className="w-2 h-2 rounded-full bg-[#f97316] animate-pulse shadow-[0_0_10px_#f97316]" />
+                                <span className="text-xs font-black text-[#f97316] tracking-widest uppercase">Certificado Inmutable Guardado</span>
                             </motion.div>
                         )}
                     </div>

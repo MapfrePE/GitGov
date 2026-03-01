@@ -21,20 +21,36 @@ export function CTASection({
     secondaryCta,
 }: CTASectionProps) {
     return (
-        <section className="relative py-24 md:py-32 overflow-hidden">
+        <section className="relative py-24 md:py-32 overflow-hidden bg-[#05070c]">
             {/* Background gradient — pointer-events-none so clicks reach buttons */}
             <div className="absolute inset-0 pointer-events-none">
                 <div
                     className="absolute inset-0"
                     style={{
-                        background: 'radial-gradient(ellipse at center, rgba(0, 229, 218, 0.06) 0%, transparent 70%)',
+                        background:
+                            'linear-gradient(180deg, rgba(5,7,12,0.88) 0%, rgba(5,7,12,0.98) 56%, rgba(4,6,10,1) 100%)',
+                    }}
+                />
+                <div
+                    className="absolute inset-0"
+                    style={{
+                        background:
+                            'radial-gradient(90% 55% at 50% 42%, rgba(249,115,22,0.10) 0%, rgba(249,115,22,0.04) 30%, rgba(249,115,22,0.00) 65%)',
+                    }}
+                />
+                <div
+                    className="absolute inset-0 opacity-[0.025]"
+                    style={{
+                        backgroundImage:
+                            'linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px)',
+                        backgroundSize: '64px 64px',
                     }}
                 />
             </div>
 
             {/* Top/bottom lines */}
-            <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-brand-500/20 to-transparent pointer-events-none" />
-            <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-brand-500/10 to-transparent pointer-events-none" />
+            <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent pointer-events-none" />
+            <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-white/8 to-transparent pointer-events-none" />
 
             <Container className="relative z-10">
                 <SectionReveal>

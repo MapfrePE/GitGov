@@ -12,7 +12,7 @@ export function Footer() {
     const { t } = useTranslation();
 
     return (
-        <footer className="relative border-t border-white/[0.06] bg-surface-300/50" role="contentinfo">
+        <footer className="relative border-t border-white/[0.06] bg-[#04060a]" role="contentinfo">
             <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-brand-500/30 to-transparent" />
 
             <Container>
@@ -24,9 +24,9 @@ export function Footer() {
                                 <Image
                                     src="/logo.png"
                                     alt="GitGov"
-                                    width={56}
-                                    height={56}
-                                    className="w-14 h-14 object-contain"
+                                    width={80}
+                                    height={80}
+                                    className="w-20 h-20 object-contain"
                                 />
                                 <span className="text-lg font-bold">
                                     <span className="text-white">Git</span>

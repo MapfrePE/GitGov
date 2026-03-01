@@ -349,6 +349,205 @@ pub struct RevokeApiKeyResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamRepoSummary {
+    pub repo_name: String,
+    pub events: i64,
+    pub commits: i64,
+    pub pushes: i64,
+    pub blocked_pushes: i64,
+    pub last_seen: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamDeveloperOverview {
+    pub login: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    pub role: String,
+    pub status: String,
+    #[serde(default)]
+    pub last_seen: Option<i64>,
+    pub total_events: i64,
+    pub commits: i64,
+    pub pushes: i64,
+    pub blocked_pushes: i64,
+    pub repos_active_count: i64,
+    #[serde(default)]
+    pub repos: Vec<TeamRepoSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamOverviewResponse {
+    pub entries: Vec<TeamDeveloperOverview>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamRepoOverview {
+    pub repo_name: String,
+    pub developers_active: i64,
+    pub total_events: i64,
+    pub commits: i64,
+    pub pushes: i64,
+    pub blocked_pushes: i64,
+    pub last_seen: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamReposResponse {
+    pub entries: Vec<TeamRepoOverview>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OrgUser {
+    pub id: String,
+    pub org_id: String,
+    pub login: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    pub role: String,
+    pub status: String,
+    #[serde(default)]
+    pub created_by: Option<String>,
+    #[serde(default)]
+    pub updated_by: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateOrgRequest {
+    pub login: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateOrgResponse {
+    pub org_id: String,
+    pub login: String,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateOrgUserRequest {
+    pub login: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub org_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateOrgUserResponse {
+    pub user: OrgUser,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OrgUsersResponse {
+    pub entries: Vec<OrgUser>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateOrgUserStatusRequest {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ApiKeyResponse {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    pub client_id: String,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OrgInvitation {
+    pub id: String,
+    pub org_id: String,
+    #[serde(default)]
+    pub invite_email: Option<String>,
+    #[serde(default)]
+    pub invite_login: Option<String>,
+    pub role: String,
+    pub status: String,
+    pub invited_by: String,
+    #[serde(default)]
+    pub accepted_by: Option<String>,
+    #[serde(default)]
+    pub accepted_at: Option<i64>,
+    #[serde(default)]
+    pub revoked_by: Option<String>,
+    #[serde(default)]
+    pub revoked_at: Option<i64>,
+    pub expires_at: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateOrgInvitationRequest {
+    #[serde(default)]
+    pub org_name: Option<String>,
+    #[serde(default)]
+    pub invite_email: Option<String>,
+    #[serde(default)]
+    pub invite_login: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub expires_in_days: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateOrgInvitationResponse {
+    pub invitation: OrgInvitation,
+    pub invite_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OrgInvitationsResponse {
+    pub entries: Vec<OrgInvitation>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ResendOrgInvitationRequest {
+    #[serde(default)]
+    pub expires_in_days: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AcceptOrgInvitationRequest {
+    pub token: String,
+    #[serde(default)]
+    pub login: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AcceptOrgInvitationResponse {
+    pub invitation: OrgInvitation,
+    pub client_id: String,
+    pub role: String,
+    pub org_id: String,
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExportResponse {
     pub id: String,
     pub export_type: String,
@@ -377,6 +576,47 @@ pub struct ExportLogEntry {
     #[serde(default)]
     pub file_path: Option<String>,
     pub created_at: i64,
+}
+
+// ============================================================================
+// CHAT STRUCTS (must mirror server models.rs ChatAskRequest / ChatAskResponse)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatAskRequest {
+    pub question: String,
+    #[serde(default)]
+    pub org_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatAskResponse {
+    pub status: String,
+    pub answer: String,
+    #[serde(default)]
+    pub missing_capability: Option<String>,
+    pub can_report_feature: bool,
+    #[serde(default)]
+    pub data_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FeatureRequestInput {
+    pub question: String,
+    #[serde(default)]
+    pub missing_capability: Option<String>,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    #[serde(default)]
+    pub user_login: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FeatureRequestCreated {
+    pub id: String,
+    pub status: String,
 }
 
 pub struct ControlPlaneClient {
@@ -592,6 +832,80 @@ impl ControlPlaneClient {
             )));
         }
 
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn get_team_overview(
+        &self,
+        org_name: Option<&str>,
+        status: Option<&str>,
+        days: i64,
+        limit: usize,
+        offset: usize,
+    ) -> Result<TeamOverviewResponse, ServerError> {
+        let url = format!("{}/team/overview", self.config.url);
+        let mut query_params: Vec<(String, String)> = vec![
+            ("days".to_string(), days.to_string()),
+            ("limit".to_string(), limit.to_string()),
+            ("offset".to_string(), offset.to_string()),
+        ];
+        if let Some(org_name) = org_name {
+            query_params.push(("org_name".to_string(), org_name.to_string()));
+        }
+        if let Some(status) = status {
+            query_params.push(("status".to_string(), status.to_string()));
+        }
+
+        let mut request = self.client.get(&url).query(&query_params);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn get_team_repos(
+        &self,
+        org_name: Option<&str>,
+        days: i64,
+        limit: usize,
+        offset: usize,
+    ) -> Result<TeamReposResponse, ServerError> {
+        let url = format!("{}/team/repos", self.config.url);
+        let mut query_params: Vec<(String, String)> = vec![
+            ("days".to_string(), days.to_string()),
+            ("limit".to_string(), limit.to_string()),
+            ("offset".to_string(), offset.to_string()),
+        ];
+        if let Some(org_name) = org_name {
+            query_params.push(("org_name".to_string(), org_name.to_string()));
+        }
+
+        let mut request = self.client.get(&url).query(&query_params);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
         response
             .json()
             .map_err(|e| ServerError::SerializationError(e.to_string()))
@@ -926,6 +1240,277 @@ impl ControlPlaneClient {
             .map_err(|e| ServerError::SerializationError(e.to_string()))
     }
 
+    pub fn create_org(&self, payload: &CreateOrgRequest) -> Result<CreateOrgResponse, ServerError> {
+        let url = format!("{}/orgs", self.config.url);
+        let mut request = self.client.post(&url).json(payload);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn create_org_user(
+        &self,
+        payload: &CreateOrgUserRequest,
+    ) -> Result<CreateOrgUserResponse, ServerError> {
+        let url = format!("{}/org-users", self.config.url);
+        let mut request = self.client.post(&url).json(payload);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn list_org_users(
+        &self,
+        org_name: Option<&str>,
+        status: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<OrgUsersResponse, ServerError> {
+        let url = format!("{}/org-users", self.config.url);
+        let mut query_params: Vec<(String, String)> = Vec::new();
+        if let Some(org_name) = org_name {
+            query_params.push(("org_name".to_string(), org_name.to_string()));
+        }
+        if let Some(status) = status {
+            query_params.push(("status".to_string(), status.to_string()));
+        }
+        query_params.push(("limit".to_string(), limit.to_string()));
+        query_params.push(("offset".to_string(), offset.to_string()));
+
+        let mut request = self.client.get(&url).query(&query_params);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn update_org_user_status(
+        &self,
+        user_id: &str,
+        status: &str,
+    ) -> Result<OrgUser, ServerError> {
+        let url = self.endpoint_url(&["org-users", user_id, "status"])?;
+        let mut request = self
+            .client
+            .patch(url)
+            .json(&UpdateOrgUserStatusRequest {
+                status: status.to_string(),
+            });
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn create_api_key_for_org_user(&self, user_id: &str) -> Result<ApiKeyResponse, ServerError> {
+        let url = self.endpoint_url(&["org-users", user_id, "api-key"])?;
+        let mut request = self.client.post(url).body("");
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn create_org_invitation(
+        &self,
+        payload: &CreateOrgInvitationRequest,
+    ) -> Result<CreateOrgInvitationResponse, ServerError> {
+        let url = format!("{}/org-invitations", self.config.url);
+        let mut request = self.client.post(&url).json(payload);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn list_org_invitations(
+        &self,
+        org_name: Option<&str>,
+        status: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<OrgInvitationsResponse, ServerError> {
+        let url = format!("{}/org-invitations", self.config.url);
+        let mut query_params: Vec<(String, String)> = Vec::new();
+        if let Some(org_name) = org_name {
+            query_params.push(("org_name".to_string(), org_name.to_string()));
+        }
+        if let Some(status) = status {
+            query_params.push(("status".to_string(), status.to_string()));
+        }
+        query_params.push(("limit".to_string(), limit.to_string()));
+        query_params.push(("offset".to_string(), offset.to_string()));
+
+        let mut request = self.client.get(&url).query(&query_params);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn resend_org_invitation(
+        &self,
+        invitation_id: &str,
+        payload: &ResendOrgInvitationRequest,
+    ) -> Result<CreateOrgInvitationResponse, ServerError> {
+        let url = self.endpoint_url(&["org-invitations", invitation_id, "resend"])?;
+        let mut request = self.client.post(url).json(payload);
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn revoke_org_invitation(&self, invitation_id: &str) -> Result<OrgInvitation, ServerError> {
+        let url = self.endpoint_url(&["org-invitations", invitation_id, "revoke"])?;
+        let mut request = self.client.post(url).body("");
+        if let Some(ref api_key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = request
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn preview_org_invitation(&self, token: &str) -> Result<OrgInvitation, ServerError> {
+        let url = self.endpoint_url(&["org-invitations", "preview", token])?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn accept_org_invitation(
+        &self,
+        payload: &AcceptOrgInvitationRequest,
+    ) -> Result<AcceptOrgInvitationResponse, ServerError> {
+        let url = format!("{}/org-invitations/accept", self.config.url);
+        let response = self
+            .client
+            .post(url)
+            .json(payload)
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
     pub fn list_api_keys(&self) -> Result<Vec<ApiKeyInfo>, ServerError> {
         let url = format!("{}/api-keys", self.config.url);
         let mut request = self.client.get(&url);
@@ -956,6 +1541,51 @@ impl ControlPlaneClient {
             .send()
             .map_err(|e| ServerError::NetworkError(e.to_string()))?;
         if !response.status().is_success() && response.status().as_u16() != 404 {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    // ── Chat & Feature Requests ─────────────────────────────────────────────
+
+    pub fn chat_ask(&self, request: &ChatAskRequest) -> Result<ChatAskResponse, ServerError> {
+        let url = format!("{}/chat/ask", self.config.url);
+        let mut req = self.client.post(&url).json(request);
+        if let Some(ref api_key) = self.config.api_key {
+            req = req.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = req
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(ServerError::ServerError(format!(
+                "Server returned status: {}",
+                response.status()
+            )));
+        }
+        response
+            .json()
+            .map_err(|e| ServerError::SerializationError(e.to_string()))
+    }
+
+    pub fn create_feature_request(
+        &self,
+        input: &FeatureRequestInput,
+    ) -> Result<FeatureRequestCreated, ServerError> {
+        let url = format!("{}/feature-requests", self.config.url);
+        let mut req = self.client.post(&url).json(input);
+        if let Some(ref api_key) = self.config.api_key {
+            req = req.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = req
+            .send()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+        if !response.status().is_success() {
             return Err(ServerError::ServerError(format!(
                 "Server returned status: {}",
                 response.status()

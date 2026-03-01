@@ -1434,6 +1434,165 @@ pub struct UpdateOrgUserStatusRequest {
 }
 
 // ============================================================================
+// TEAM MANAGEMENT (V1.5-B)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamOverviewQuery {
+    #[serde(default)]
+    pub org_name: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub days: Option<i64>,
+    #[serde(default)]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamRepoSummary {
+    pub repo_name: String,
+    pub events: i64,
+    pub commits: i64,
+    pub pushes: i64,
+    pub blocked_pushes: i64,
+    pub last_seen: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamDeveloperOverview {
+    pub login: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    pub role: String,
+    pub status: String,
+    #[serde(default)]
+    pub last_seen: Option<i64>,
+    pub total_events: i64,
+    pub commits: i64,
+    pub pushes: i64,
+    pub blocked_pushes: i64,
+    pub repos_active_count: i64,
+    #[serde(default)]
+    pub repos: Vec<TeamRepoSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamOverviewResponse {
+    pub entries: Vec<TeamDeveloperOverview>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamRepoOverview {
+    pub repo_name: String,
+    pub developers_active: i64,
+    pub total_events: i64,
+    pub commits: i64,
+    pub pushes: i64,
+    pub blocked_pushes: i64,
+    pub last_seen: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamReposResponse {
+    pub entries: Vec<TeamRepoOverview>,
+    pub total: i64,
+}
+
+// ============================================================================
+// ORG INVITATIONS (V1.5-A)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OrgInvitation {
+    pub id: String,
+    pub org_id: String,
+    #[serde(default)]
+    pub invite_email: Option<String>,
+    #[serde(default)]
+    pub invite_login: Option<String>,
+    pub role: String,
+    pub status: String,
+    pub invited_by: String,
+    #[serde(default)]
+    pub accepted_by: Option<String>,
+    #[serde(default)]
+    pub accepted_at: Option<i64>,
+    #[serde(default)]
+    pub revoked_by: Option<String>,
+    #[serde(default)]
+    pub revoked_at: Option<i64>,
+    pub expires_at: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateOrgInvitationRequest {
+    #[serde(default)]
+    pub org_name: Option<String>,
+    #[serde(default)]
+    pub invite_email: Option<String>,
+    #[serde(default)]
+    pub invite_login: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub expires_in_days: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateOrgInvitationResponse {
+    pub invitation: OrgInvitation,
+    pub invite_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OrgInvitationsQuery {
+    #[serde(default)]
+    pub org_name: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OrgInvitationsResponse {
+    pub entries: Vec<OrgInvitation>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ResendOrgInvitationRequest {
+    #[serde(default)]
+    pub expires_in_days: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AcceptOrgInvitationRequest {
+    pub token: String,
+    #[serde(default)]
+    pub login: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AcceptOrgInvitationResponse {
+    pub invitation: OrgInvitation,
+    pub client_id: String,
+    pub role: String,
+    pub org_id: String,
+    pub api_key: String,
+}
+
+// ============================================================================
 // IDENTITY ALIAS HELPERS
 // ============================================================================
 
@@ -1453,6 +1612,53 @@ pub fn expand_login_aliases(canonical: &str, aliases: &[IdentityAlias]) -> Vec<S
         }
     }
     logins
+}
+
+// ============================================================================
+// CONVERSATIONAL CHAT (MVP)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAskRequest {
+    pub question: String,
+    #[serde(default)]
+    pub org_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatAskResponse {
+    /// "ok" | "insufficient_data" | "feature_not_available" | "error"
+    pub status: String,
+    pub answer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_capability: Option<String>,
+    pub can_report_feature: bool,
+    #[serde(default)]
+    pub data_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureRequestInput {
+    pub question: String,
+    #[serde(default)]
+    pub missing_capability: Option<String>,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    #[serde(default)]
+    pub user_login: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureRequestRecord {
+    pub id: String,
+    pub org_id: Option<String>,
+    pub requested_by: String,
+    pub question: String,
+    pub missing_capability: Option<String>,
+    pub status: String,
+    pub created_at: i64,
 }
 
 /// Keeps public contract types referenced under strict `-D warnings` builds.

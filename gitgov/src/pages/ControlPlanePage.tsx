@@ -1,11 +1,14 @@
+import { useState } from 'react'
 import { ServerConfigPanel } from '@/components/control_plane/ServerConfigPanel'
 import { ServerDashboard } from '@/components/control_plane/ServerDashboard'
 import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Link } from 'react-router-dom'
-import { Settings, Server, Wifi, WifiOff } from 'lucide-react'
+import { Link2, Settings, Server, Wifi, WifiOff } from 'lucide-react'
+import { Modal } from '@/components/shared/Modal'
 
 export function ControlPlanePage() {
   const { isConnected, serverConfig } = useControlPlaneStore()
+  const [showConnectionModal, setShowConnectionModal] = useState(false)
 
   return (
     <div className="h-full flex flex-col bg-surface-950">
@@ -31,13 +34,23 @@ export function ControlPlanePage() {
           )}
         </div>
 
-        <Link
-          to="/settings"
-          className="w-7 h-7 flex items-center justify-center rounded-lg text-surface-500 hover:text-surface-300 hover:bg-white/4 transition-all duration-200"
-          title="Configuración"
-        >
-          <Settings size={14} strokeWidth={1.5} />
-        </Link>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setShowConnectionModal(true)}
+            className="w-7 h-7 flex items-center justify-center rounded-lg text-surface-500 hover:text-surface-300 hover:bg-white/4 transition-all duration-200"
+            title="Conexión Control Plane"
+          >
+            <Link2 size={14} strokeWidth={1.5} />
+          </button>
+          <Link
+            to="/settings"
+            className="w-7 h-7 flex items-center justify-center rounded-lg text-surface-500 hover:text-surface-300 hover:bg-white/4 transition-all duration-200"
+            title="Configuración"
+          >
+            <Settings size={14} strokeWidth={1.5} />
+          </Link>
+        </div>
       </div>
 
       {/* Content — full width, no max-w constraint */}
@@ -56,6 +69,15 @@ export function ControlPlanePage() {
           </div>
         )}
       </div>
+
+      <Modal
+        isOpen={showConnectionModal}
+        onClose={() => setShowConnectionModal(false)}
+        title="Conexión Control Plane"
+        size="md"
+      >
+        <ServerConfigPanel />
+      </Modal>
     </div>
   )
 }

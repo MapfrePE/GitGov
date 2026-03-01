@@ -1,17 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Key, RefreshCw, ShieldOff } from 'lucide-react'
 import { useControlPlaneStore, type ApiKeyInfo } from '@/store/useControlPlaneStore'
-
-function formatTimestamp(ms: number | null | undefined): string {
-  if (!ms) return '—'
-  return new Date(ms).toLocaleDateString('es', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
+import { formatTs } from '@/lib/timezone'
 
 function roleBadgeClass(role: string): string {
   if (role === 'Admin') return 'bg-amber-500/20 text-amber-300 border-amber-500/30'
@@ -20,7 +10,7 @@ function roleBadgeClass(role: string): string {
 }
 
 export function ApiKeyManagerWidget() {
-  const { apiKeys, isLoadingApiKeys, loadApiKeys, revokeApiKey } = useControlPlaneStore()
+  const { apiKeys, isLoadingApiKeys, loadApiKeys, revokeApiKey, displayTimezone } = useControlPlaneStore()
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [revokingId, setRevokingId] = useState<string | null>(null)
 
@@ -85,10 +75,10 @@ export function ApiKeyManagerWidget() {
                     </span>
                   </td>
                   <td className="py-2 pr-3 text-surface-400 whitespace-nowrap">
-                    {formatTimestamp(key.created_at)}
+                    {formatTs(key.created_at, displayTimezone)}
                   </td>
                   <td className="py-2 pr-3 text-surface-400 whitespace-nowrap">
-                    {formatTimestamp(key.last_used)}
+                    {formatTs(key.last_used, displayTimezone)}
                   </td>
                   <td className="py-2 pr-3">
                     {key.is_active ? (

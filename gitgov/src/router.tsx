@@ -4,6 +4,7 @@ import { DashboardPage } from '@/pages/DashboardPage'
 import { AuditPage } from '@/pages/AuditPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { ControlPlanePage } from '@/pages/ControlPlanePage'
+import { HelpPage } from '@/pages/HelpPage'
 import { AlertCircle } from 'lucide-react'
 
 function NotFoundPage() {
@@ -52,6 +53,14 @@ const appRouter = createBrowserRouter([
     element: (
       <MainLayout>
         <ControlPlanePage />
+      </MainLayout>
+    ),
+  },
+  {
+    path: '/help',
+    element: (
+      <MainLayout>
+        <HelpPage />
       </MainLayout>
     ),
   },

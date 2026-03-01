@@ -1,6 +1,7 @@
 # Guía para Agentes de IA - GitGov
 
 > Este archivo proporciona contexto esencial para agentes de IA. Léelo completo antes de hacer cambios.
+> Nota de alcance: los bloques de "Modo Auditor" y checklist estricto están redactados principalmente para sesiones con Claude Code.
 
 ## Guardrail Ejecutivo (leer primero)
 

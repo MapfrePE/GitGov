@@ -1,9 +1,14 @@
 use crate::control_plane::{
-    ApiKeyInfo, AuditFilter, CombinedEvent, CommitPipelineCorrelation, ControlPlaneClient,
-    DailyActivityFilter, DailyActivityPoint, EventPayload, ExportLogEntry, ExportResponse,
+    AcceptOrgInvitationRequest, AcceptOrgInvitationResponse, ApiKeyInfo, ApiKeyResponse, AuditFilter,
+    ChatAskRequest, ChatAskResponse, CombinedEvent, CommitPipelineCorrelation, ControlPlaneClient,
+    CreateOrgInvitationRequest, CreateOrgInvitationResponse, CreateOrgRequest, CreateOrgResponse,
+    CreateOrgUserRequest, CreateOrgUserResponse, DailyActivityFilter, DailyActivityPoint,
+    EventPayload, ExportLogEntry, ExportResponse, FeatureRequestCreated, FeatureRequestInput,
     JenkinsCorrelationFilter, JiraCorrelateRequest, JiraCorrelateResponse, JiraTicketDetailResponse,
-    MeResponse, PrMergeEvidenceEntry, PrMergeEvidenceFilter, RevokeApiKeyResponse, ServerConfig,
-    ServerStats, TicketCoverageQuery, TicketCoverageResponse,
+    MeResponse, OrgInvitation, OrgInvitationsResponse, OrgUser, OrgUsersResponse,
+    PrMergeEvidenceEntry, PrMergeEvidenceFilter, ResendOrgInvitationRequest, RevokeApiKeyResponse,
+    ServerConfig, ServerStats, TeamReposResponse, TeamOverviewResponse, TicketCoverageQuery,
+    TicketCoverageResponse,
 };
 use crate::outbox::Outbox;
 use serde::{Deserialize, Serialize};
@@ -197,6 +202,54 @@ pub fn cmd_server_get_daily_activity(
 }
 
 #[tauri::command]
+pub fn cmd_server_get_team_overview(
+    config: ServerConnectionConfig,
+    org_name: Option<String>,
+    status: Option<String>,
+    days: Option<i64>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<TeamOverviewResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .get_team_overview(
+            org_name.as_deref(),
+            status.as_deref(),
+            days.unwrap_or(30),
+            limit.unwrap_or(50),
+            offset.unwrap_or(0),
+        )
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_get_team_repos(
+    config: ServerConnectionConfig,
+    org_name: Option<String>,
+    days: Option<i64>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<TeamReposResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .get_team_repos(
+            org_name.as_deref(),
+            days.unwrap_or(30),
+            limit.unwrap_or(50),
+            offset.unwrap_or(0),
+        )
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
 pub fn cmd_server_get_jenkins_correlations(
     config: ServerConnectionConfig,
     filter: JenkinsCorrelationFilter,
@@ -284,6 +337,193 @@ pub fn cmd_server_get_me(config: ServerConnectionConfig) -> Result<MeResponse, S
 }
 
 #[tauri::command]
+pub fn cmd_server_create_org(
+    config: ServerConnectionConfig,
+    payload: CreateOrgRequest,
+) -> Result<CreateOrgResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .create_org(&payload)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_create_org_user(
+    config: ServerConnectionConfig,
+    payload: CreateOrgUserRequest,
+) -> Result<CreateOrgUserResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .create_org_user(&payload)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_list_org_users(
+    config: ServerConnectionConfig,
+    org_name: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<OrgUsersResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .list_org_users(
+            org_name.as_deref(),
+            status.as_deref(),
+            limit.unwrap_or(50),
+            offset.unwrap_or(0),
+        )
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_update_org_user_status(
+    config: ServerConnectionConfig,
+    user_id: String,
+    status: String,
+) -> Result<OrgUser, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .update_org_user_status(&user_id, &status)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_create_api_key_for_org_user(
+    config: ServerConnectionConfig,
+    user_id: String,
+) -> Result<ApiKeyResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .create_api_key_for_org_user(&user_id)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_create_org_invitation(
+    config: ServerConnectionConfig,
+    payload: CreateOrgInvitationRequest,
+) -> Result<CreateOrgInvitationResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .create_org_invitation(&payload)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_list_org_invitations(
+    config: ServerConnectionConfig,
+    org_name: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<OrgInvitationsResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .list_org_invitations(
+            org_name.as_deref(),
+            status.as_deref(),
+            limit.unwrap_or(50),
+            offset.unwrap_or(0),
+        )
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_resend_org_invitation(
+    config: ServerConnectionConfig,
+    invitation_id: String,
+    expires_in_days: Option<i64>,
+) -> Result<CreateOrgInvitationResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .resend_org_invitation(
+            &invitation_id,
+            &ResendOrgInvitationRequest { expires_in_days },
+        )
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_revoke_org_invitation(
+    config: ServerConnectionConfig,
+    invitation_id: String,
+) -> Result<OrgInvitation, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .revoke_org_invitation(&invitation_id)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_preview_org_invitation(
+    config: ServerConnectionConfig,
+    token: String,
+) -> Result<OrgInvitation, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .preview_org_invitation(&token)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_accept_org_invitation(
+    config: ServerConnectionConfig,
+    token: String,
+    login: Option<String>,
+) -> Result<AcceptOrgInvitationResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+
+    client
+        .accept_org_invitation(&AcceptOrgInvitationRequest { token, login })
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
 pub fn cmd_server_list_api_keys(config: ServerConnectionConfig) -> Result<Vec<ApiKeyInfo>, String> {
     let client = ControlPlaneClient::new(ServerConfig {
         url: config.url,
@@ -337,5 +577,35 @@ pub fn cmd_server_list_exports(config: ServerConnectionConfig) -> Result<Vec<Exp
 
     client
         .list_exports()
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+// ── Conversational Chat ──────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn cmd_server_chat_ask(
+    config: ServerConnectionConfig,
+    request: ChatAskRequest,
+) -> Result<ChatAskResponse, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+    client
+        .chat_ask(&request)
+        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub fn cmd_server_create_feature_request(
+    config: ServerConnectionConfig,
+    input: FeatureRequestInput,
+) -> Result<FeatureRequestCreated, String> {
+    let client = ControlPlaneClient::new(ServerConfig {
+        url: config.url,
+        api_key: config.api_key,
+    });
+    client
+        .create_feature_request(&input)
         .map_err(|e| to_command_error(e, "SERVER_ERROR"))
 }

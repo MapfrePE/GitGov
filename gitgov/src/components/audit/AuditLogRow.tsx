@@ -1,9 +1,11 @@
 import { useState, memo } from 'react'
-import { format, formatDistanceToNow } from 'date-fns'
+import { formatDistanceToNow } from 'date-fns'
 import { es } from 'date-fns/locale'
 import type { AuditLogEntry } from '@/lib/types'
 import { Badge } from '@/components/shared/Badge'
 import { ChevronDown, ChevronUp, FileText, GitCommit } from 'lucide-react'
+import { useControlPlaneStore } from '@/store/useControlPlaneStore'
+import { formatTs } from '@/lib/timezone'
 
 interface AuditLogRowProps {
   log: AuditLogEntry
@@ -12,12 +14,13 @@ interface AuditLogRowProps {
 export const AuditLogRow = memo(function AuditLogRow({ log }: AuditLogRowProps) {
   const [expanded, setExpanded] = useState(false)
   const [renderedAt] = useState(() => Date.now())
+  const displayTimezone = useControlPlaneStore((s) => s.displayTimezone)
 
   const timestamp = new Date(log.timestamp)
   const isRecent = renderedAt - log.timestamp < 24 * 60 * 60 * 1000
   const formattedDate = isRecent
     ? formatDistanceToNow(timestamp, { addSuffix: true, locale: es })
-    : format(timestamp, 'dd/MM/yyyy HH:mm')
+    : formatTs(log.timestamp, displayTimezone)
 
   const statusVariant = {
     Success: 'success' as const,

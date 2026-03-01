@@ -38,6 +38,7 @@ struct Args {
 const JOB_WORKER_TTL_SECS: u64 = 300;
 const JOB_POLL_INTERVAL_SECS: u64 = 5;
 const JOB_ERROR_BACKOFF_SECS: u64 = 10;
+const MIN_AUDIT_RETENTION_DAYS: i64 = 365 * 5;
 
 #[derive(Debug)]
 struct RateBucket {
@@ -141,6 +142,13 @@ fn parse_bool_env(key: &str, default: bool) -> bool {
     std::env::var(key)
         .ok()
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(default)
+}
+
+fn parse_i64_env(key: &str, default: i64) -> i64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(default)
 }
 
@@ -428,6 +436,9 @@ async fn main() {
 
     let alert_webhook_url = std::env::var("GITGOV_ALERT_WEBHOOK_URL").ok();
     let strict_actor_match = parse_bool_env("GITGOV_STRICT_ACTOR_MATCH", true);
+    let reject_synthetic_logins = parse_bool_env("GITGOV_REJECT_SYNTHETIC_LOGINS", false);
+    let llm_api_key = std::env::var("GEMINI_API_KEY").ok();
+    let feature_request_webhook_url = std::env::var("FEATURE_REQUEST_WEBHOOK_URL").ok();
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -444,6 +455,9 @@ async fn main() {
         http_client,
         alert_webhook_url,
         strict_actor_match,
+        reject_synthetic_logins,
+        llm_api_key,
+        feature_request_webhook_url,
     });
 
     // Keep utility APIs exercised in non-test builds so strict linting does not
@@ -461,22 +475,42 @@ async fn main() {
     
     let worker_id_for_log = worker_id_clone;
 
-    // TTL cleanup task — prunes stale client_sessions rows older than DATA_RETENTION_DAYS (default 365)
+    // Audit trail retention policy (append-only tables are NOT deleted here).
+    // Compliance guard: minimum 5 years for audit data.
+    let configured_audit_retention_days =
+        parse_i64_env("AUDIT_RETENTION_DAYS", MIN_AUDIT_RETENTION_DAYS);
+    let effective_audit_retention_days = if configured_audit_retention_days < MIN_AUDIT_RETENTION_DAYS {
+        tracing::warn!(
+            configured = configured_audit_retention_days,
+            min_days = MIN_AUDIT_RETENTION_DAYS,
+            "AUDIT_RETENTION_DAYS below compliance minimum; clamping to min"
+        );
+        MIN_AUDIT_RETENTION_DAYS
+    } else {
+        configured_audit_retention_days
+    };
+    tracing::info!(
+        audit_retention_days = effective_audit_retention_days,
+        "Audit retention policy loaded (append-only audit tables)"
+    );
+
+    // TTL cleanup task — prunes stale client_sessions rows only.
+    // Backward compatibility: DATA_RETENTION_DAYS still works as fallback.
     let db_ttl = Arc::clone(&db);
-    let retention_days = std::env::var("DATA_RETENTION_DAYS")
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(365);
+    let client_session_retention_days = parse_i64_env(
+        "CLIENT_SESSION_RETENTION_DAYS",
+        parse_i64_env("DATA_RETENTION_DAYS", 365),
+    );
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(tokio::time::Duration::from_secs(86_400)); // 24 h
         interval.tick().await; // skip first tick (fires immediately)
         loop {
             interval.tick().await;
-            match db_ttl.delete_old_events(retention_days).await {
+            match db_ttl.delete_old_events(client_session_retention_days).await {
                 Ok(count) => tracing::info!(
                     deleted = count,
-                    retention_days = retention_days,
+                    retention_days = client_session_retention_days,
                     "TTL cleanup: deleted stale client sessions"
                 ),
                 Err(e) => tracing::warn!(error = %e, "TTL cleanup failed"),
@@ -546,6 +580,14 @@ async fn main() {
             Arc::clone(&admin_rate_limit),
             rate_limit_middleware,
         )))
+        .route("/team/overview", get(handlers::get_team_overview).layer(middleware::from_fn_with_state(
+            Arc::clone(&admin_rate_limit),
+            rate_limit_middleware,
+        )))
+        .route("/team/repos", get(handlers::get_team_repos).layer(middleware::from_fn_with_state(
+            Arc::clone(&admin_rate_limit),
+            rate_limit_middleware,
+        )))
         .route(
             "/integrations/jenkins",
             post(handlers::ingest_jenkins_pipeline_event)
@@ -588,6 +630,9 @@ async fn main() {
         .route("/org-users", get(handlers::list_org_users).post(handlers::create_org_user))
         .route("/org-users/{id}/status", patch(handlers::update_org_user_status))
         .route("/org-users/{id}/api-key", post(handlers::create_api_key_for_org_user))
+        .route("/org-invitations", get(handlers::list_org_invitations).post(handlers::create_org_invitation))
+        .route("/org-invitations/{id}/resend", post(handlers::resend_org_invitation))
+        .route("/org-invitations/{id}/revoke", post(handlers::revoke_org_invitation))
         .route("/api-keys", get(handlers::list_api_keys).post(handlers::create_api_key))
         .route("/api-keys/{id}/revoke", post(handlers::revoke_api_key))
         .route(
@@ -620,12 +665,17 @@ async fn main() {
         .route("/clients", get(handlers::get_clients))
         // Identity aliases — T3.B
         .route("/identities/aliases", post(handlers::create_identity_alias).get(handlers::list_identity_aliases))
+        // Conversational Chat (MVP)
+        .route("/chat/ask", post(handlers::chat_ask))
+        .route("/feature-requests", post(handlers::create_feature_request_handler))
         .layer(middleware::from_fn_with_state(Arc::clone(&db), auth::auth_middleware));
 
     let app = Router::new()
         .route("/health", get(handlers::health))
         .route("/health/detailed", get(handlers::detailed_health))
         .route("/webhooks/github", post(handlers::handle_github_webhook))
+        .route("/org-invitations/preview/{token}", get(handlers::preview_org_invitation))
+        .route("/org-invitations/accept", post(handlers::accept_org_invitation))
         .merge(auth_routes)
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .layer(TraceLayer::new_for_http())
@@ -650,6 +700,8 @@ async fn main() {
     tracing::info!("  GET  /stats                     - Statistics (admin)");
     tracing::info!("  GET  /stats/daily               - Daily commits/pushes series (admin)");
     tracing::info!("  GET  /dashboard                 - Dashboard (admin)");
+    tracing::info!("  GET  /team/overview             - Team overview by developer (admin)");
+    tracing::info!("  GET  /team/repos                - Team overview by repository (admin)");
     tracing::info!("  POST /integrations/jenkins      - Jenkins pipeline ingest (admin)");
     tracing::info!("  GET  /integrations/jenkins/status - Jenkins integration health (admin)");
     tracing::info!("  GET  /integrations/jenkins/correlations - Commit->pipeline correlations (admin)");
@@ -676,6 +728,12 @@ async fn main() {
     tracing::info!("  GET  /org-users                 - List org users (admin)");
     tracing::info!("  PATCH /org-users/:id/status     - Activate/disable org user (admin)");
     tracing::info!("  POST /org-users/:id/api-key     - Issue API key for org user (admin)");
+    tracing::info!("  POST /org-invitations           - Create org invitation (admin)");
+    tracing::info!("  GET  /org-invitations           - List org invitations (admin)");
+    tracing::info!("  POST /org-invitations/:id/resend - Regenerate invite token (admin)");
+    tracing::info!("  POST /org-invitations/:id/revoke - Revoke invite (admin)");
+    tracing::info!("  GET  /org-invitations/preview/:token - Preview invite (public)");
+    tracing::info!("  POST /org-invitations/accept    - Accept invite and issue key (public)");
     tracing::info!("  POST /api-keys                  - Create API key (admin)");
     tracing::info!("  POST /audit-stream/github       - GitHub audit log stream (admin)");
     tracing::info!("  (opt) JENKINS_WEBHOOK_SECRET    - Extra shared secret header x-gitgov-jenkins-secret");

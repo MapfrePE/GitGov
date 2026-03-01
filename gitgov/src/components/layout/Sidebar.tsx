@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import { useAuthStore } from '@/store/useAuthStore'
-import { GitBranch, Settings, LogOut, Shield, Server } from 'lucide-react'
+import { GitBranch, Settings, LogOut, Shield, Server, HelpCircle } from 'lucide-react'
 import clsx from 'clsx'
 
 export function Sidebar() {
@@ -11,6 +11,7 @@ export function Sidebar() {
     { to: '/control-plane', icon: Server, label: 'Control Plane' },
     ...(user?.is_admin ? [{ to: '/audit', icon: Shield, label: 'Auditoría' }] : []),
     { to: '/settings', icon: Settings, label: 'Configuración' },
+    { to: '/help', icon: HelpCircle, label: 'Ayuda / FAQ' },
   ]
 
   return (

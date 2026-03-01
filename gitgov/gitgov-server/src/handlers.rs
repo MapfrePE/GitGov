@@ -31,6 +31,15 @@ fn sanitize_db_error(e: &DbError) -> String {
     }
 }
 
+fn is_likely_synthetic_login(login: &str) -> bool {
+    static SYNTHETIC_LOGIN_RE: OnceLock<Regex> = OnceLock::new();
+    let re = SYNTHETIC_LOGIN_RE.get_or_init(|| {
+        Regex::new(r"^(alias_|erase_ok_|hb_user_|user_[0-9a-f]{6,}|test_?user|golden_?test|smoke|manual-check|victim_|dev_team_|e2e_)")
+            .expect("valid synthetic login regex")
+    });
+    re.is_match(login)
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Database>,
@@ -43,6 +52,11 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub alert_webhook_url: Option<String>,
     pub strict_actor_match: bool,
+    pub reject_synthetic_logins: bool,
+    /// Gemini API key for conversational chat (env: GEMINI_API_KEY)
+    pub llm_api_key: Option<String>,
+    /// Webhook URL to notify on new feature requests (env: FEATURE_REQUEST_WEBHOOK_URL)
+    pub feature_request_webhook_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1744,6 +1758,26 @@ pub async fn ingest_client_events(
             auth_user.client_id.clone()
         };
 
+        if state.reject_synthetic_logins && is_likely_synthetic_login(&effective_user_login) {
+            tracing::warn!(
+                auth_user = %auth_user.client_id,
+                rejected_user_login = %effective_user_login,
+                event_uuid = %input.event_uuid,
+                "Rejecting client event due to synthetic login policy"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ClientEventResponse {
+                    accepted: vec![],
+                    duplicates: vec![],
+                    errors: vec![EventError {
+                        event_uuid: input.event_uuid,
+                        error: "synthetic user_login is not allowed in this environment".to_string(),
+                    }],
+                }),
+            );
+        }
+
         // Get org and repo IDs
         let requested_org_id = if let Some(ref org_name) = input.org_name {
             state.db.get_org_by_login(org_name).await
@@ -1787,10 +1821,26 @@ pub async fn ingest_client_events(
             auth_user.org_id.clone().or(requested_org_id)
         };
 
-        let repo = if let Some(ref repo_full_name) = input.repo_full_name {
-            state.db.get_repo_by_full_name(repo_full_name).await
-                .ok()
-                .flatten()
+        let inferred_repo_full_name = input
+            .repo_full_name
+            .clone()
+            .or_else(|| {
+                input
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("repo_name"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+            });
+
+        let repo = if let Some(ref repo_full_name) = inferred_repo_full_name {
+            state
+                .db
+                .get_repo_by_full_name(repo_full_name)
+                .await
+                .unwrap_or_default()
         } else {
             None
         };
@@ -1817,7 +1867,37 @@ pub async fn ingest_client_events(
                 }
             }
         }
-        let repo_id = repo.map(|r| r.id);
+        let repo_id = if let Some(repo) = repo {
+            Some(repo.id)
+        } else if let (Some(full_name), Some(effective_org_id)) =
+            (inferred_repo_full_name.as_deref(), org_id.as_deref())
+        {
+            let repo_name = full_name
+                .split('/')
+                .next_back()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(full_name);
+            match state
+                .db
+                .upsert_repo_by_full_name(Some(effective_org_id), full_name, repo_name, true)
+                .await
+            {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        full_name = %full_name,
+                        org_id = %effective_org_id,
+                        event_uuid = %input.event_uuid,
+                        "Failed to upsert repo from client event (non-fatal)"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let event = ClientEvent {
             id: Uuid::new_v4().to_string(),
@@ -2000,6 +2080,131 @@ pub async fn get_stats(
             (StatusCode::OK, Json(stats))
         }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(AuditStats::default())),
+    }
+}
+
+pub async fn get_team_overview(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TeamOverviewQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let status = if let Some(raw) = query.status.as_deref() {
+        match normalize_org_user_status(Some(raw)) {
+            Ok(s) => Some(s),
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": msg })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
+    let days = query.days.unwrap_or(30).clamp(1, 180);
+    let limit = if query.limit == 0 { 50 } else { query.limit.min(500) } as i64;
+    let offset = query.offset as i64;
+
+    let org_id = match resolve_and_check_org_scope(
+        &state,
+        auth_user.org_id.as_deref(),
+        query.org_name.as_deref(),
+        true,
+    )
+    .await
+    {
+        Ok(Some(org_id)) => org_id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "org_name is required for global admin keys" })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            let error = match err {
+                OrgScopeError::BadRequest => "org_name is required for global admin keys",
+                OrgScopeError::NotFound => "Organization not found",
+                OrgScopeError::Forbidden => "Requested org is outside API key scope",
+                OrgScopeError::Internal => "Internal database error",
+            };
+            return (org_scope_status(err), Json(serde_json::json!({ "error": error }))).into_response();
+        }
+    };
+
+    match state
+        .db
+        .get_team_overview(&org_id, status.as_deref(), days, limit, offset)
+        .await
+    {
+        Ok((entries, total)) => (StatusCode::OK, Json(TeamOverviewResponse { entries, total })).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, org_id = %org_id, "Failed to load team overview");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn get_team_repos(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TeamOverviewQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let days = query.days.unwrap_or(30).clamp(1, 180);
+    let limit = if query.limit == 0 { 50 } else { query.limit.min(500) } as i64;
+    let offset = query.offset as i64;
+
+    let org_id = match resolve_and_check_org_scope(
+        &state,
+        auth_user.org_id.as_deref(),
+        query.org_name.as_deref(),
+        true,
+    )
+    .await
+    {
+        Ok(Some(org_id)) => org_id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "org_name is required for global admin keys" })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            let error = match err {
+                OrgScopeError::BadRequest => "org_name is required for global admin keys",
+                OrgScopeError::NotFound => "Organization not found",
+                OrgScopeError::Forbidden => "Requested org is outside API key scope",
+                OrgScopeError::Internal => "Internal database error",
+            };
+            return (org_scope_status(err), Json(serde_json::json!({ "error": error }))).into_response();
+        }
+    };
+
+    match state.db.get_team_repos(&org_id, days, limit, offset).await {
+        Ok((entries, total)) => (StatusCode::OK, Json(TeamReposResponse { entries, total })).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, org_id = %org_id, "Failed to load team repo overview");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -2487,6 +2692,390 @@ fn normalize_org_user_status(raw: Option<&str>) -> Result<String, &'static str> 
     match normalized.as_str() {
         "active" | "disabled" => Ok(normalized),
         _ => Err("status must be 'active' or 'disabled'"),
+    }
+}
+
+fn normalize_org_invitation_status_filter(raw: Option<&str>) -> Result<String, &'static str> {
+    let normalized = raw.unwrap_or("").trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "pending" | "accepted" | "revoked" | "expired" => Ok(normalized),
+        _ => Err("status must be one of: pending, accepted, revoked, expired"),
+    }
+}
+
+// ============================================================================
+// ORG INVITATIONS (admin onboarding)
+// ============================================================================
+
+pub async fn create_org_invitation(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateOrgInvitationRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let invite_email = payload.invite_email.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let invite_login = payload.invite_login.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if invite_email.is_none() && invite_login.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invite_email or invite_login is required" })),
+        ).into_response();
+    }
+
+    let role = match parse_user_role_strict(payload.role.as_deref()) {
+        Ok(role) => role,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
+            ).into_response();
+        }
+    };
+
+    let org_id = match resolve_and_check_org_scope(
+        &state,
+        auth_user.org_id.as_deref(),
+        payload.org_name.as_deref(),
+        true,
+    ).await {
+        Ok(Some(org_id)) => org_id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "org_name is required for global admin keys" })),
+            ).into_response();
+        }
+        Err(err) => {
+            let error = match err {
+                OrgScopeError::BadRequest => "org_name is required for global admin keys",
+                OrgScopeError::NotFound => "Organization not found",
+                OrgScopeError::Forbidden => "Requested org is outside API key scope",
+                OrgScopeError::Internal => "Internal database error",
+            };
+            return (org_scope_status(err), Json(serde_json::json!({ "error": error }))).into_response();
+        }
+    };
+
+    let expires_days = payload.expires_in_days.unwrap_or(7).clamp(1, 30);
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(expires_days);
+    let invite_token = Uuid::new_v4().to_string();
+    let token_hash = format!("{:x}", Sha256::digest(invite_token.as_bytes()));
+
+    match state.db.create_org_invitation(&crate::db::CreateOrgInvitationInput {
+        org_id: &org_id,
+        invite_email,
+        invite_login,
+        role: role.as_str(),
+        token_hash: &token_hash,
+        invited_by: &auth_user.client_id,
+        expires_at,
+    }).await {
+        Ok(invitation) => {
+            let audit = AdminAuditLogEntry {
+                id: Uuid::new_v4().to_string(),
+                actor_client_id: auth_user.client_id.clone(),
+                action: "create_org_invitation".to_string(),
+                target_type: Some("org_invitation".to_string()),
+                target_id: Some(invitation.id.clone()),
+                metadata: serde_json::json!({
+                    "org_id": invitation.org_id,
+                    "invite_email": invitation.invite_email,
+                    "invite_login": invitation.invite_login,
+                    "role": invitation.role,
+                    "expires_at": invitation.expires_at
+                }),
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = state.db.insert_admin_audit_log(&audit).await {
+                tracing::warn!(error = %e, "Failed to write admin audit log (create_org_invitation)");
+            }
+
+            (
+                StatusCode::CREATED,
+                Json(CreateOrgInvitationResponse {
+                    invitation,
+                    invite_token,
+                }),
+            ).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, org_id = %org_id, "Failed to create org invitation");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            ).into_response()
+        }
+    }
+}
+
+pub async fn list_org_invitations(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<OrgInvitationsQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let status = if let Some(raw) = query.status.as_deref() {
+        match normalize_org_invitation_status_filter(Some(raw)) {
+            Ok(value) => Some(value),
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": msg })),
+                ).into_response();
+            }
+        }
+    } else {
+        None
+    };
+
+    let org_id = match resolve_and_check_org_scope(
+        &state,
+        auth_user.org_id.as_deref(),
+        query.org_name.as_deref(),
+        true,
+    ).await {
+        Ok(Some(org_id)) => org_id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "org_name is required for global admin keys" })),
+            ).into_response();
+        }
+        Err(err) => {
+            let error = match err {
+                OrgScopeError::BadRequest => "org_name is required for global admin keys",
+                OrgScopeError::NotFound => "Organization not found",
+                OrgScopeError::Forbidden => "Requested org is outside API key scope",
+                OrgScopeError::Internal => "Internal database error",
+            };
+            return (org_scope_status(err), Json(serde_json::json!({ "error": error }))).into_response();
+        }
+    };
+
+    let limit = if query.limit == 0 { 50 } else { query.limit.min(500) } as i64;
+    let offset = query.offset as i64;
+
+    match state
+        .db
+        .list_org_invitations(&org_id, status.as_deref(), limit, offset)
+        .await
+    {
+        Ok((entries, total)) => (StatusCode::OK, Json(OrgInvitationsResponse { entries, total })).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, org_id = %org_id, "Failed to list org invitations");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            ).into_response()
+        }
+    }
+}
+
+pub async fn resend_org_invitation(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Path(invitation_id): Path<String>,
+    Json(payload): Json<ResendOrgInvitationRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let invite_token = Uuid::new_v4().to_string();
+    let token_hash = format!("{:x}", Sha256::digest(invite_token.as_bytes()));
+    let expires_days = payload.expires_in_days.unwrap_or(7).clamp(1, 30);
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(expires_days);
+
+    match state
+        .db
+        .resend_org_invitation(
+            &invitation_id,
+            auth_user.org_id.as_deref(),
+            &token_hash,
+            &auth_user.client_id,
+            expires_at,
+        )
+        .await
+    {
+        Ok(Some(invitation)) => {
+            let audit = AdminAuditLogEntry {
+                id: Uuid::new_v4().to_string(),
+                actor_client_id: auth_user.client_id.clone(),
+                action: "resend_org_invitation".to_string(),
+                target_type: Some("org_invitation".to_string()),
+                target_id: Some(invitation.id.clone()),
+                metadata: serde_json::json!({
+                    "org_id": invitation.org_id,
+                    "invite_email": invitation.invite_email,
+                    "invite_login": invitation.invite_login,
+                    "role": invitation.role,
+                    "expires_at": invitation.expires_at
+                }),
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = state.db.insert_admin_audit_log(&audit).await {
+                tracing::warn!(error = %e, "Failed to write admin audit log (resend_org_invitation)");
+            }
+
+            (
+                StatusCode::OK,
+                Json(CreateOrgInvitationResponse {
+                    invitation,
+                    invite_token,
+                }),
+            ).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "invitation not found or already accepted" })),
+        ).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, invitation_id = %invitation_id, "Failed to resend org invitation");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            ).into_response()
+        }
+    }
+}
+
+pub async fn revoke_org_invitation(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Path(invitation_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    match state
+        .db
+        .revoke_org_invitation(&invitation_id, auth_user.org_id.as_deref(), &auth_user.client_id)
+        .await
+    {
+        Ok(Some(invitation)) => {
+            let audit = AdminAuditLogEntry {
+                id: Uuid::new_v4().to_string(),
+                actor_client_id: auth_user.client_id.clone(),
+                action: "revoke_org_invitation".to_string(),
+                target_type: Some("org_invitation".to_string()),
+                target_id: Some(invitation.id.clone()),
+                metadata: serde_json::json!({
+                    "org_id": invitation.org_id,
+                    "invite_email": invitation.invite_email,
+                    "invite_login": invitation.invite_login
+                }),
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = state.db.insert_admin_audit_log(&audit).await {
+                tracing::warn!(error = %e, "Failed to write admin audit log (revoke_org_invitation)");
+            }
+            (StatusCode::OK, Json(invitation)).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "invitation not found or not pending" })),
+        ).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, invitation_id = %invitation_id, "Failed to revoke org invitation");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            ).into_response()
+        }
+    }
+}
+
+pub async fn preview_org_invitation(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> impl IntoResponse {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "token is required" })),
+        ).into_response();
+    }
+
+    let token_hash = format!("{:x}", Sha256::digest(trimmed.as_bytes()));
+    match state.db.get_org_invitation_by_token_hash(&token_hash).await {
+        Ok(Some(invitation)) => (StatusCode::OK, Json(invitation)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "invitation not found" })),
+        ).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to preview invitation");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            ).into_response()
+        }
+    }
+}
+
+pub async fn accept_org_invitation(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<AcceptOrgInvitationRequest>,
+) -> impl IntoResponse {
+    let token = payload.token.trim();
+    if token.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "token is required" })),
+        ).into_response();
+    }
+    let login = payload.login.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let token_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+
+    match state.db.accept_org_invitation(&token_hash, login).await {
+        Ok(Some(result)) => {
+            let audit = AdminAuditLogEntry {
+                id: Uuid::new_v4().to_string(),
+                actor_client_id: result.org_user.login.clone(),
+                action: "accept_org_invitation".to_string(),
+                target_type: Some("org_invitation".to_string()),
+                target_id: Some(result.invitation.id.clone()),
+                metadata: serde_json::json!({
+                    "org_id": result.invitation.org_id,
+                    "client_id": result.org_user.login,
+                    "role": result.invitation.role
+                }),
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = state.db.insert_admin_audit_log(&audit).await {
+                tracing::warn!(error = %e, "Failed to write admin audit log (accept_org_invitation)");
+            }
+
+            (
+                StatusCode::OK,
+                Json(AcceptOrgInvitationResponse {
+                    invitation: result.invitation,
+                    client_id: result.org_user.login,
+                    role: result.org_user.role,
+                    org_id: result.org_user.org_id,
+                    api_key: result.api_key,
+                }),
+            ).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "invitation not found, expired or already used" })),
+        ).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to accept invitation");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Internal database error" })),
+            ).into_response()
+        }
     }
 }
 
@@ -3817,6 +4406,567 @@ fn export_result_status(event_count: usize) -> StatusCode {
     } else {
         StatusCode::OK
     }
+}
+
+// ============================================================================
+// CONVERSATIONAL CHAT — POST /chat/ask  (admin-only MVP)
+// ============================================================================
+
+const CHAT_SYSTEM_PROMPT: &str = "Eres el asistente de GitGov.\n\
+Reglas:\n\
+- Responde preguntas sobre: governance Git, commits, pushes, bloqueos, tickets, pipelines, integraciones (GitHub/Jira/Jenkins/GitHub Actions), configuración, troubleshooting y FAQ del proyecto.\n\
+- Usa EXCLUSIVAMENTE los datos/contexto provistos por el backend en el campo <data>. NO inventes datos.\n\
+- Si los datos están vacíos o son insuficientes, devuelve status=\"insufficient_data\".\n\
+- Si la capacidad no existe en el sistema, devuelve status=\"feature_not_available\".\n\
+- Si puedes responder con los datos/contexto, devuelve status=\"ok\".\n\
+- Responde siempre en el idioma del usuario.\n\
+- Sé claro y breve.\n\
+- Tu respuesta DEBE ser JSON válido con este esquema exacto:\n\
+  {\"status\":\"ok\"|\"insufficient_data\"|\"feature_not_available\"|\"error\",\
+\"answer\":\"<string>\",\"missing_capability\":\"<string o null>\",\
+\"can_report_feature\":true|false,\"data_refs\":[\"<strings>\"]}\n\
+- Si status=ok: answer contiene la respuesta en lenguaje natural, can_report_feature=false.\n\
+- Si status=feature_not_available: answer explica qué falta, can_report_feature=true, \
+missing_capability describe la capacidad faltante.\n\
+- Si status=insufficient_data: answer explica por qué no hay suficientes datos, can_report_feature=false.\n\
+- NUNCA devuelvas texto fuera del JSON.";
+
+const PROJECT_KNOWLEDGE_BASE: &[(&str, &[&str], &str)] = &[
+    (
+        "Integracion GitHub",
+        &["github", "webhook", "push", "hmac", "firma", "delivery"],
+        "GitHub se integra por POST /webhooks/github. Se valida firma HMAC X-Hub-Signature-256 con GITHUB_WEBHOOK_SECRET. La cabecera X-GitHub-Delivery se usa para idempotencia de eventos.",
+    ),
+    (
+        "Integracion Jenkins",
+        &["jenkins", "pipeline", "ci", "build", "correlation", "correlacion"],
+        "Jenkins ingresa por POST /integrations/jenkins (Bearer auth). Si JENKINS_WEBHOOK_SECRET está configurado, exige x-gitgov-jenkins-secret. Estado: GET /integrations/jenkins/status. Correlaciones: GET /integrations/jenkins/correlations.",
+    ),
+    (
+        "Integracion Jira",
+        &["jira", "ticket", "issue", "correlate", "cobertura", "coverage"],
+        "Jira ingresa por POST /integrations/jira (Bearer auth). Si JIRA_WEBHOOK_SECRET está configurado, exige x-gitgov-jira-secret. Estado: GET /integrations/jira/status. Correlación batch: POST /integrations/jira/correlate. Cobertura: GET /integrations/jira/ticket-coverage.",
+    ),
+    (
+        "GitHub Actions",
+        &["github actions", "actions", "workflow", "gha"],
+        "GitGov no tiene endpoint dedicado para ingestar GitHub Actions por nombre. La trazabilidad CI actual está implementada vía integración Jenkins y correlación commit->pipeline. Para Actions, se requiere capacidad nueva o puente que envíe eventos a endpoint soportado.",
+    ),
+    (
+        "Auth API",
+        &["auth", "api key", "bearer", "401", "token"],
+        "La autenticación al Control Plane usa Authorization: Bearer <api_key>. El servidor no acepta X-API-Key. Roles y scope por org dependen de la API key almacenada en tabla api_keys.",
+    ),
+    (
+        "Onboarding Admin",
+        &["onboarding", "org", "organizacion", "invitation", "invitacion", "admin"],
+        "Flujo admin: crear org (POST /orgs), crear invitaciones (POST /org-invitations), validar/aceptar invitación (GET /org-invitations/preview/{token}, POST /org-invitations/accept).",
+    ),
+    (
+        "Golden Path",
+        &["golden path", "flujo", "desktop", "events", "dashboard"],
+        "Golden Path crítico: Desktop stage/commit/push -> /events -> PostgreSQL -> Dashboard sin 401. Cualquier cambio en auth/outbox/handlers/dashboard debe preservar ese flujo.",
+    ),
+    (
+        "Deploy EC2",
+        &["ec2", "deploy", "aws", "systemd", "nginx", "restart"],
+        "En producción actual, backend corre en EC2 con systemd y Nginx. Para ver cambios nuevos del servidor se debe desplegar binario/servicio actualizado y reiniciar systemd; si no, endpoints nuevos no existen en runtime.",
+    ),
+    (
+        "Rate Limits",
+        &["rate", "429", "limit", "throttle"],
+        "El servidor aplica rate limits por endpoint con middlewares en memoria. Variables GITGOV_RATE_LIMIT_* controlan req/min para /events, audit-stream, jenkins, jira y admin.",
+    ),
+    (
+        "Datos y retencion",
+        &["retencion", "retention", "compliance", "5 years", "auditoria"],
+        "La retención de auditoría está gobernada por AUDIT_RETENTION_DAYS con mínimo legal de 1825 días. client_sessions tiene retención separada por CLIENT_SESSION_RETENTION_DAYS (fallback DATA_RETENTION_DAYS).",
+    ),
+    (
+        "Timezone audit trail",
+        &["timezone", "zona horaria", "timestamp", "utc"],
+        "Los timestamps se almacenan en UTC y se visualizan en zona horaria seleccionada por el usuario en Settings para trazabilidad de auditoría.",
+    ),
+    (
+        "Chatbot capacidades",
+        &["chatbot", "chat", "faq", "feature", "bot"],
+        "El chatbot combina consultas analíticas SQL en tiempo real y modo conocimiento del proyecto. Si falta capacidad, responde feature_not_available y puede habilitar reporte de feature.",
+    ),
+];
+
+#[derive(Debug, serde::Serialize)]
+struct GeminiPart {
+    text: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct GeminiContent {
+    role: String,
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct GeminiSystemInstruction {
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiGenerationConfig {
+    temperature: f32,
+    max_output_tokens: u32,
+    response_mime_type: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiRequest {
+    system_instruction: GeminiSystemInstruction,
+    contents: Vec<GeminiContent>,
+    generation_config: GeminiGenerationConfig,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GeminiResponsePart {
+    text: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GeminiResponseContent {
+    parts: Option<Vec<GeminiResponsePart>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GeminiCandidate {
+    content: Option<GeminiResponseContent>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GeminiResponse {
+    candidates: Option<Vec<GeminiCandidate>>,
+}
+
+/// Pattern matching for the 3 supported queries.
+enum ChatQuery {
+    PushesNoTicket,
+    BlockedPushesMonth,
+    UserCommitsRange { user: String, start_ms: i64, end_ms: i64 },
+}
+
+fn detect_query(question: &str) -> Option<ChatQuery> {
+    let q = question.to_lowercase();
+
+    // Q1: push a main esta semana sin ticket de Jira
+    if (q.contains("push") || q.contains("empujo") || q.contains("empujaron"))
+        && (q.contains("main") || q.contains("principal"))
+        && (q.contains("semana") || q.contains("week") || q.contains("últimos 7") || q.contains("last 7"))
+        && (q.contains("ticket") || q.contains("jira") || q.contains("sin ticket") || q.contains("without ticket"))
+    {
+        return Some(ChatQuery::PushesNoTicket);
+    }
+
+    // Q2: pushes bloqueados este mes
+    if (q.contains("bloqueado") || q.contains("bloqueados") || q.contains("blocked"))
+        && (q.contains("push") || q.contains("pushes"))
+        && (q.contains("mes") || q.contains("month") || q.contains("este mes") || q.contains("this month"))
+    {
+        return Some(ChatQuery::BlockedPushesMonth);
+    }
+
+    // Q3: commits de {usuario} entre {fecha_inicio} y {fecha_fin}
+    if q.contains("commit") {
+        // Extract user login — look for "de {word}" or "by {word}" or "del usuario {word}"
+        let user_re = Regex::new(r"(?:de |by |del usuario |of user )([a-z0-9_\-\.]+)").ok()?;
+        let user = user_re
+            .captures(&q)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string())?;
+
+        // Extract date range — look for "entre YYYY-MM-DD y YYYY-MM-DD" or "from ... to ..."
+        let date_re = Regex::new(
+            r"(?:entre|from|desde)\s+(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+(?:y|and|to|hasta)\s+(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})"
+        ).ok()?;
+
+        let (start_ms, end_ms) = if let Some(caps) = date_re.captures(&q) {
+            let parse_date = |s: &str| -> Option<i64> {
+                chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                    .or_else(|_| chrono::NaiveDate::parse_from_str(s, "%d/%m/%Y"))
+                    .ok()
+                    .map(|d| {
+                        d.and_hms_opt(0, 0, 0)
+                            .map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc).timestamp_millis())
+                            .unwrap_or(0)
+                    })
+            };
+            let s = parse_date(caps.get(1)?.as_str())?;
+            let e = parse_date(caps.get(2)?.as_str())?;
+            (s, e)
+        } else {
+            // Default to last 30 days if no dates found
+            let now = chrono::Utc::now().timestamp_millis();
+            let thirty_days_ago = now - 30 * 24 * 60 * 60 * 1000;
+            (thirty_days_ago, now)
+        };
+
+        return Some(ChatQuery::UserCommitsRange { user, start_ms, end_ms });
+    }
+
+    None
+}
+
+fn build_project_knowledge_payload(question: &str) -> serde_json::Value {
+    let q = question.to_lowercase();
+    let mut ranked: Vec<(i32, &str, &str)> = Vec::new();
+    for (title, keywords, content) in PROJECT_KNOWLEDGE_BASE {
+        let mut score = 0;
+        for kw in *keywords {
+            if q.contains(kw) {
+                score += 2;
+            }
+        }
+        if score > 0 {
+            ranked.push((score, *title, *content));
+        }
+    }
+
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    let selected: Vec<serde_json::Value> = if ranked.is_empty() {
+        PROJECT_KNOWLEDGE_BASE
+            .iter()
+            .take(4)
+            .map(|(title, _keywords, content)| {
+                serde_json::json!({ "title": title, "content": content })
+            })
+            .collect()
+    } else {
+        ranked
+            .into_iter()
+            .take(8)
+            .map(|(_score, title, content)| serde_json::json!({ "title": title, "content": content }))
+            .collect()
+    };
+
+    serde_json::json!({
+        "mode": "project_knowledge",
+        "snippets": selected
+    })
+}
+
+async fn call_llm(
+    http_client: &reqwest::Client,
+    api_key: &str,
+    question: &str,
+    data: &serde_json::Value,
+) -> Result<ChatAskResponse, String> {
+    let user_message = format!(
+        "Pregunta: {}\n<data>{}</data>",
+        question,
+        serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".to_string())
+    );
+
+    let req_body = GeminiRequest {
+        system_instruction: GeminiSystemInstruction {
+            parts: vec![GeminiPart {
+                text: CHAT_SYSTEM_PROMPT.to_string(),
+            }],
+        },
+        contents: vec![GeminiContent {
+            role: "user".to_string(),
+            parts: vec![GeminiPart { text: user_message }],
+        }],
+        generation_config: GeminiGenerationConfig {
+            temperature: 0.2,
+            max_output_tokens: 1024,
+            response_mime_type: "application/json".to_string(),
+        },
+    };
+
+    let response = http_client
+        .post(format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+            api_key
+        ))
+        .header("content-type", "application/json")
+        .json(&req_body)
+        .send()
+        .await
+        .map_err(|e| format!("LLM network error: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("LLM API returned {}: {}", status, &body[..body.len().min(200)]));
+    }
+
+    let gemini_resp: GeminiResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
+
+    let text = gemini_resp
+        .candidates
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|c| c.content)
+        .and_then(|content| content.parts)
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|p| p.text)
+        .ok_or_else(|| "LLM response had no text content".to_string())?;
+
+    // Strip markdown code fences if present
+    let json_str = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    serde_json::from_str::<ChatAskResponse>(json_str)
+        .map_err(|e| format!("Failed to parse LLM JSON: {} — raw: {}", e, &json_str[..json_str.len().min(300)]))
+}
+
+pub async fn chat_ask(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ChatAskRequest>,
+) -> impl IntoResponse {
+    if require_admin(&auth_user).is_err() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ChatAskResponse {
+                status: "error".to_string(),
+                answer: "Admin access required".to_string(),
+                missing_capability: None,
+                can_report_feature: false,
+                data_refs: vec![],
+            }),
+        );
+    }
+
+    let question = payload.question.trim().to_string();
+    if question.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ChatAskResponse {
+                status: "error".to_string(),
+                answer: "La pregunta no puede estar vacía".to_string(),
+                missing_capability: None,
+                can_report_feature: false,
+                data_refs: vec![],
+            }),
+        );
+    }
+
+    let Some(api_key) = state.llm_api_key.as_deref() else {
+        tracing::warn!("GEMINI_API_KEY not configured; returning feature_not_available");
+        return (
+            StatusCode::OK,
+            Json(ChatAskResponse {
+                status: "feature_not_available".to_string(),
+                answer: "El asistente conversacional no está configurado en este servidor. Configura GEMINI_API_KEY para activarlo.".to_string(),
+                missing_capability: Some("llm_integration".to_string()),
+                can_report_feature: true,
+                data_refs: vec![],
+            }),
+        );
+    };
+
+    let org_name = payload.org_name.as_deref();
+    let scoped_org_id = match resolve_and_check_org_scope(
+        &state,
+        auth_user.org_id.as_deref(),
+        org_name,
+        false,
+    )
+    .await
+    {
+        Ok(org_id) => org_id,
+        Err(err) => {
+            let error = match err {
+                OrgScopeError::BadRequest => "org_name is required",
+                OrgScopeError::NotFound => "Organization not found",
+                OrgScopeError::Forbidden => "Requested org is outside API key scope",
+                OrgScopeError::Internal => "Internal database error",
+            };
+            return (
+                org_scope_status(err),
+                Json(ChatAskResponse {
+                    status: "error".to_string(),
+                    answer: error.to_string(),
+                    missing_capability: None,
+                    can_report_feature: false,
+                    data_refs: vec![],
+                }),
+            );
+        }
+    };
+
+    // Run query engine
+    let query = detect_query(&question);
+
+    let (data, data_refs) = match query {
+        Some(ChatQuery::PushesNoTicket) => {
+            match state.db.chat_query_pushes_no_ticket(scoped_org_id.as_deref()).await {
+                Ok(rows) => {
+                    let refs = vec!["github_events".to_string(), "commit_ticket_correlations".to_string()];
+                    (serde_json::json!({ "pushes_to_main_no_ticket": rows }), refs)
+                }
+                Err(e) => {
+                    tracing::error!("chat_query_pushes_no_ticket error: {}", e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(ChatAskResponse {
+                        status: "error".to_string(),
+                        answer: "Error consultando la base de datos".to_string(),
+                        missing_capability: None,
+                        can_report_feature: false,
+                        data_refs: vec![],
+                    }));
+                }
+            }
+        }
+        Some(ChatQuery::BlockedPushesMonth) => {
+            match state.db.chat_query_blocked_pushes_month(scoped_org_id.as_deref()).await {
+                Ok(count) => {
+                    let refs = vec!["client_events".to_string()];
+                    (serde_json::json!({ "blocked_pushes_this_month": count }), refs)
+                }
+                Err(e) => {
+                    tracing::error!("chat_query_blocked_pushes_month error: {}", e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(ChatAskResponse {
+                        status: "error".to_string(),
+                        answer: "Error consultando la base de datos".to_string(),
+                        missing_capability: None,
+                        can_report_feature: false,
+                        data_refs: vec![],
+                    }));
+                }
+            }
+        }
+        Some(ChatQuery::UserCommitsRange { ref user, start_ms, end_ms }) => {
+            match state
+                .db
+                .chat_query_user_commits_range(user, start_ms, end_ms, scoped_org_id.as_deref())
+                .await
+            {
+                Ok(rows) => {
+                    let refs = vec!["client_events".to_string()];
+                    (serde_json::json!({
+                        "user": user,
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                        "commits": rows
+                    }), refs)
+                }
+                Err(e) => {
+                    tracing::error!("chat_query_user_commits_range error: {}", e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(ChatAskResponse {
+                        status: "error".to_string(),
+                        answer: "Error consultando la base de datos".to_string(),
+                        missing_capability: None,
+                        can_report_feature: false,
+                        data_refs: vec![],
+                    }));
+                }
+            }
+        }
+        None => {
+            let refs = vec!["project_docs_kb".to_string()];
+            (build_project_knowledge_payload(&question), refs)
+        }
+    };
+
+    // Call LLM
+    match call_llm(&state.http_client, api_key, &question, &data).await {
+        Ok(mut resp) => {
+            resp.data_refs = data_refs;
+            (StatusCode::OK, Json(resp))
+        }
+        Err(e) => {
+            tracing::error!("LLM call failed: {}", e);
+            (StatusCode::OK, Json(ChatAskResponse {
+                status: "error".to_string(),
+                answer: "El asistente no pudo generar una respuesta. Intenta de nuevo.".to_string(),
+                missing_capability: None,
+                can_report_feature: false,
+                data_refs,
+            }))
+        }
+    }
+}
+
+// ============================================================================
+// FEATURE REQUESTS — POST /feature-requests
+// ============================================================================
+
+pub async fn create_feature_request_handler(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<FeatureRequestInput>,
+) -> impl IntoResponse {
+    let question = payload.question.trim().to_string();
+    if question.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "question is required" })),
+        );
+    }
+
+    let requested_by = auth_user.client_id.as_str();
+
+    let effective_org_id = if let Some(scoped_org_id) = auth_user.org_id.as_deref() {
+        if let Some(ref requested_org_id) = payload.org_id {
+            if requested_org_id != scoped_org_id {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": "org_id is outside API key scope" })),
+                );
+            }
+        }
+        Some(scoped_org_id.to_string())
+    } else {
+        payload.org_id.clone()
+    };
+
+    let sanitized_payload = FeatureRequestInput {
+        question: payload.question.clone(),
+        missing_capability: payload.missing_capability.clone(),
+        org_id: effective_org_id,
+        user_login: None,
+        metadata: payload.metadata.clone(),
+    };
+
+    let id = match state.db.create_feature_request(&sanitized_payload, requested_by).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("create_feature_request db error: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Failed to save feature request" })),
+            );
+        }
+    };
+
+    // Optional webhook notification
+    if let Some(ref webhook_url) = state.feature_request_webhook_url {
+        let body = serde_json::json!({
+            "id": &id,
+            "requested_by": requested_by,
+            "question": &question,
+            "missing_capability": &sanitized_payload.missing_capability,
+            "org_id": &sanitized_payload.org_id,
+            "timestamp": chrono::Utc::now().timestamp_millis(),
+        });
+        let client = state.http_client.clone();
+        let url = webhook_url.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.post(&url).json(&body).send().await {
+                tracing::warn!("feature_request webhook failed: {}", e);
+            }
+        });
+    }
+
+    tracing::info!(id = %id, requested_by = %requested_by, "Feature request created");
+    (StatusCode::CREATED, Json(serde_json::json!({ "id": id, "status": "new" })))
 }
 
 #[cfg(test)]

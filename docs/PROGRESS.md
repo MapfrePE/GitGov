@@ -2,6 +2,221 @@
 
 ---
 
+## Actualización (2026-03-01) — Zona Horaria Configurable en Audit Trail
+
+### Motivación
+Audit trail con horas incorrectas es inválido legalmente. Los timestamps UTC almacenados en PostgreSQL se mostraban sin conversión de zona horaria en toda la UI.
+
+### Qué se implementó
+- **`gitgov/src/lib/timezone.ts`** (nuevo): utilidad de zona horaria con `formatTs()`, `formatTimeOnly()`, `formatDateOnly()`, lista `TIMEZONES` (12 zonas IANA: América Latina, España, UK, EE.UU.), `detectBrowserTimezone()`, clave localStorage `gitgov:displayTimezone`.
+- **`useControlPlaneStore`**: estado `displayTimezone` (string IANA, default = browser timezone o localStorage), acción `setDisplayTimezone(tz)` persiste a localStorage.
+- **`SettingsPage.tsx`**: nueva sección "Zona Horaria del Audit Trail" con `<select>` de zonas, botón "Auto-detectar del sistema", muestra zona activa. También corrige `toLocaleString()` del updater.
+- **`ServerDashboard.tsx`**: badge "Timezone: UTC" → "TZ: {displayTimezone}" dinámico. Timestamps de activeDevs7d actualizados con `formatTs()`.
+- **`RecentCommitsTable.tsx`**: timestamp de la columna Hora usa `formatTs()`.
+- **`TeamManagementPanel.tsx`**: elimina `formatDate()` local, usa `formatTs(…, displayTimezone)`.
+- **`AdminOnboardingPanel.tsx`**: elimina `formatDate()` local, usa `formatTs(…, displayTimezone)` para `expires_at` de invitaciones.
+- **`ApiKeyManagerWidget.tsx`**: elimina `formatTimestamp()` local, usa `formatTs(…, displayTimezone)`.
+- **`ExportPanel.tsx`**: elimina `formatTimestamp()` local, usa `formatTs(…, displayTimezone)` en historial de exports.
+- **`AuditLogRow.tsx`**: mantiene `formatDistanceToNow` para eventos recientes (<24h), reemplaza `format(timestamp, 'dd/MM/yyyy HH:mm')` con `formatTs(…, displayTimezone)` para eventos históricos.
+- **`ConversationalChatPanel.tsx`**: reemplaza `toLocaleTimeString('es-PE', …)` con `formatTimeOnly(…, displayTimezone)`.
+
+### Comportamiento
+- Zona horaria elegida se persiste en localStorage bajo `gitgov:displayTimezone`.
+- Al primer arranque, auto-detecta el timezone del sistema operativo.
+- La zona se puede cambiar desde Settings → "Zona Horaria del Audit Trail".
+- **No hay cambios en el servidor ni en PostgreSQL**: los datos siguen almacenándose en UTC. Solo cambia la capa de display.
+
+### Validación
+- `tsc -b --noEmit`: 0 errores.
+- `eslint <archivos tocados>`: 0 errores nuevos.
+- Golden Path no tocado (no se modificaron auth, outbox, handlers, models, routes).
+
+### Archivos modificados/creados
+- `gitgov/src/lib/timezone.ts` (**NUEVO**)
+- `gitgov/src/store/useControlPlaneStore.ts` (+import timezone, +displayTimezone state, +setDisplayTimezone action)
+- `gitgov/src/pages/SettingsPage.tsx` (+sección Zona Horaria, +formatTs para updater timestamps)
+- `gitgov/src/components/control_plane/ServerDashboard.tsx` (+displayTimezone, UTC badge dinámico)
+- `gitgov/src/components/control_plane/RecentCommitsTable.tsx` (+formatTs para columna Hora)
+- `gitgov/src/components/control_plane/TeamManagementPanel.tsx` (formatDate → formatTs)
+- `gitgov/src/components/control_plane/AdminOnboardingPanel.tsx` (formatDate → formatTs)
+- `gitgov/src/components/control_plane/ApiKeyManagerWidget.tsx` (formatTimestamp → formatTs)
+- `gitgov/src/components/control_plane/ExportPanel.tsx` (formatTimestamp → formatTs)
+- `gitgov/src/components/control_plane/ConversationalChatPanel.tsx` (toLocaleTimeString → formatTimeOnly)
+- `gitgov/src/components/audit/AuditLogRow.tsx` (date-fns format → formatTs para histórico)
+
+---
+
+## Actualización (2026-03-01) — Dashboard Conversacional MVP (chat de gobernanza)
+
+### Qué se implementó
+- **Backend (Axum/Rust):**
+  - `POST /chat/ask` (admin, Bearer): pregunta en lenguaje natural → query engine → LLM Anthropic → respuesta JSON estructurada.
+  - `POST /feature-requests` (Bearer): registra capacidades solicitadas por usuarios vía chat.
+  - Query engine soporta 3 consultas SQL reales: (1) pushes a main esta semana sin ticket Jira, (2) pushes bloqueados este mes, (3) commits de {usuario} entre fechas.
+  - LLM: Anthropic Messages API (`claude-haiku-4-5-20251001`) con system prompt estricto; activado con `ANTHROPIC_API_KEY`.
+  - Webhook opcional de notificación (`FEATURE_REQUEST_WEBHOOK_URL`).
+  - `AppState` extiende con `llm_api_key` y `feature_request_webhook_url`.
+- **Migración SQL:**
+  - `supabase_schema_v11.sql`: tabla `feature_requests` (append-only, org_id, requested_by, question, missing_capability, status, metadata, created_at).
+- **Tauri Bridge:**
+  - Structs: `ChatAskRequest`, `ChatAskResponse`, `FeatureRequestInput`, `FeatureRequestCreated` en `control_plane/server.rs`.
+  - Nuevos métodos HTTP en `ControlPlaneClient`: `chat_ask()`, `create_feature_request()`.
+  - Nuevos comandos: `cmd_server_chat_ask`, `cmd_server_create_feature_request`.
+- **Desktop Frontend:**
+  - Nuevo componente `ConversationalChatPanel.tsx`: terminal estética, suggestion chips, status badges, botón "Reportar necesidad".
+  - Store: `chatMessages`, `isChatLoading`, acciones `chatAsk()`, `reportFeature()`, `clearChatMessages()`.
+  - Integrado en `ServerDashboard` (solo admins conectados).
+
+### Golden Path
+- No modifica rutas `/events`, `/logs`, `/stats`, `/dashboard`.
+- No modifica `auth_middleware`, `outbox`, ni structs compartidas existentes.
+- `cargo test`: 52 passed; 0 failed.
+- `cargo clippy -- -D warnings`: 0 errores nuevos.
+- `tsc -b --noEmit`: 0 errores.
+- `eslint <archivos tocados>`: 0 errores nuevos.
+
+### Archivos modificados/creados
+- `gitgov/gitgov-server/supabase/supabase_schema_v11.sql` (**NUEVO**)
+- `gitgov/gitgov-server/src/models.rs` (+4 structs)
+- `gitgov/gitgov-server/src/db.rs` (+4 funciones: chat_query_pushes_no_ticket, chat_query_blocked_pushes_month, chat_query_user_commits_range, create_feature_request)
+- `gitgov/gitgov-server/src/handlers.rs` (+2 campos AppState, +handlers chat_ask + create_feature_request_handler)
+- `gitgov/gitgov-server/src/main.rs` (+2 env vars, +2 routes)
+- `gitgov/src-tauri/src/control_plane/server.rs` (+4 structs, +2 métodos HTTP)
+- `gitgov/src-tauri/src/commands/server_commands.rs` (+2 Tauri commands)
+- `gitgov/src-tauri/src/lib.rs` (+2 commands registrados)
+- `gitgov/src/store/useControlPlaneStore.ts` (+interfaces, +state, +actions)
+- `gitgov/src/components/control_plane/ConversationalChatPanel.tsx` (**NUEVO**)
+- `gitgov/src/components/control_plane/ServerDashboard.tsx` (+import + render ChatPanel)
+
+---
+
+## Actualización Reciente (2026-03-01) — Panel de gestión de equipo (admin: developers + repos)
+
+### Qué se implementó
+- Backend: nuevas vistas agregadas para gestión de equipo por organización:
+  - `GET /team/overview` (admin): lista developers de `org_users` con métricas por ventana (`days`) y resumen de repos activos por developer.
+  - `GET /team/repos` (admin): vista invertida por repositorio con developers activos y métricas de actividad.
+- Scope/Auth:
+  - ambos endpoints exigen Bearer auth y rol admin.
+  - respetan scope por `org_id` y `org_name` (global admin requiere `org_name`).
+- Tauri bridge:
+  - nuevos métodos y comandos para consumir `/team/overview` y `/team/repos`.
+- Desktop UI:
+  - nuevo componente `TeamManagementPanel` en Control Plane (solo admin), con:
+    - filtros `org`, `days`, `status`
+    - tab Developers (rol/estado, actividad, repos activos, last seen)
+    - tab Repos (developers activos, eventos, commits/pushes/blocked, last seen)
+  - integrado en `ServerDashboard` junto a onboarding admin.
+
+### Archivos
+- `gitgov/gitgov-server/src/models.rs`
+- `gitgov/gitgov-server/src/db.rs`
+- `gitgov/gitgov-server/src/handlers.rs`
+- `gitgov/gitgov-server/src/main.rs`
+- `gitgov/src-tauri/src/control_plane/server.rs`
+- `gitgov/src-tauri/src/commands/server_commands.rs`
+- `gitgov/src-tauri/src/lib.rs`
+- `gitgov/src/store/useControlPlaneStore.ts`
+- `gitgov/src/components/control_plane/TeamManagementPanel.tsx` (nuevo)
+- `gitgov/src/components/control_plane/ServerDashboard.tsx`
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> OK
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+- `cd gitgov && npm run typecheck` -> OK
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ServerDashboard.tsx src/components/control_plane/TeamManagementPanel.tsx` -> `0 errores`
+
+### Validación empírica (E2E endpoints nuevos)
+- Se ejecutó smoke funcional en server local temporal `127.0.0.1:3001`:
+  - seed de org + org_users + eventos
+  - `/team/overview` devolvió developers esperados
+  - `/team/repos` devolvió repos esperados cuando los eventos incluyen `metadata.repo_name` o repo resuelto
+
+### Nota operativa
+- En esta sesión, `127.0.0.1:3000` seguía ocupado por un proceso `node`; la validación live se realizó en `127.0.0.1:3001` para evitar split-brain operativo durante la prueba.
+
+### Fix adicional aplicado (misma fecha)
+- Se corrigió la causa raíz de repos faltantes en la vista de equipo:
+  - Desktop ahora adjunta `repo_full_name`/`org_name` inferidos desde `origin` en eventos clave (`stage_files`, `commit`, `attempt_push`, `blocked_push`, `successful_push`, `push_failed`).
+  - Server ingesta `/events` ahora intenta resolver repo desde `repo_full_name` o `metadata.repo_name`; si no existe en `repos`, lo upsertea automáticamente por `full_name` dentro del `org_id` del evento.
+- Validación empírica del fix:
+  - Seed con eventos que solo traen `repo_full_name` (sin repo preexistente en DB) y ventana `30d`.
+  - Resultado esperado/obtenido: `/team/overview` muestra developers con `repos_active_count` correcto y `/team/repos` lista repos activos.
+
+---
+
+## Actualización Reciente (2026-03-01) — Onboarding admin completo (org -> invitaciones -> vistas por rol)
+
+### Qué se implementó
+- **Backend onboarding de organizaciones e invitaciones:**
+  - Nuevo schema `gitgov/gitgov-server/supabase_schema_v10.sql` con tabla `org_invitations` (token hasheado, expiración, estados `pending/accepted/revoked`, auditoría de aceptación/revocación).
+  - Nuevos endpoints admin:
+    - `POST/GET /org-invitations`
+    - `POST /org-invitations/{id}/resend`
+    - `POST /org-invitations/{id}/revoke`
+  - Nuevos endpoints públicos para flujo de invitación:
+    - `GET /org-invitations/preview/{token}`
+    - `POST /org-invitations/accept`
+  - Aceptación de invitación transaccional en DB: activa/provisiona `org_users`, emite API key scopeada (`Authorization: Bearer`) y marca invitación como `accepted`.
+  - Registro en `admin_audit_log` para crear/reenviar/revocar/aceptar invitaciones.
+
+- **Cliente Tauri (Control Plane) extendido:**
+  - Nuevas operaciones para orgs, org users e invitaciones en:
+    - `gitgov/src-tauri/src/control_plane/server.rs`
+    - `gitgov/src-tauri/src/commands/server_commands.rs`
+    - `gitgov/src-tauri/src/lib.rs` (registro de comandos)
+
+- **Desktop UI (Control Plane) con onboarding y vistas por rol:**
+  - Nuevo panel admin `AdminOnboardingPanel`:
+    - crear org
+    - provisionar miembros directos
+    - invitar developers
+    - listar miembros/invitaciones
+    - emitir API key por usuario
+  - Nuevo panel developer `DeveloperAccessPanel`:
+    - validar token de invitación
+    - aceptar invitación y recibir API key
+  - `ServerDashboard` ahora aplica refresh por rol:
+    - Admin: dashboard completo + onboarding + gestión
+    - Developer: vista acotada + aceptación de invitación + commits recientes
+  - `useControlPlaneStore` ampliado con estado/acciones de onboarding (orgs, users, invitations, accept/preview, refresh por rol).
+
+### Archivos clave
+- `gitgov/gitgov-server/supabase_schema_v10.sql` (nuevo)
+- `gitgov/gitgov-server/src/models.rs`
+- `gitgov/gitgov-server/src/db.rs`
+- `gitgov/gitgov-server/src/handlers.rs`
+- `gitgov/gitgov-server/src/main.rs`
+- `gitgov/src-tauri/src/control_plane/server.rs`
+- `gitgov/src-tauri/src/commands/server_commands.rs`
+- `gitgov/src-tauri/src/lib.rs`
+- `gitgov/src/store/useControlPlaneStore.ts`
+- `gitgov/src/components/control_plane/ServerDashboard.tsx`
+- `gitgov/src/components/control_plane/AdminOnboardingPanel.tsx` (nuevo)
+- `gitgov/src/components/control_plane/DeveloperAccessPanel.tsx` (nuevo)
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`
+- `cd gitgov && npm run typecheck` -> OK
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ServerDashboard.tsx src/components/control_plane/AdminOnboardingPanel.tsx src/components/control_plane/DeveloperAccessPanel.tsx` -> `0 errores`
+
+### Nota de validación
+- No se ejecutó smoke live contra server/DB real (`make smoke`, `e2e_flow_test.sh`) en esta pasada; pendiente para validar empíricamente el Golden Path completo en entorno levantado.
+
+---
+
+## Actualización Reciente (2026-02-28) — Aclaración de alcance en AGENTS.md
+
+### Qué se hizo
+- Se agregó una nota explícita en `AGENTS.md` para aclarar que el bloque de "Modo Auditor" y su checklist estricto están orientados principalmente a sesiones con Claude Code.
+
+### Archivos
+- `AGENTS.md`
+- `docs/PROGRESS.md`
+
+---
+
 ## Actualización Reciente (2026-02-28) — Tema Desktop a neutro oscuro + logo sidebar más grande
 
 ### Qué se hizo
@@ -1290,3 +1505,72 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
 3. **Agregar drift detection** para validación de políticas
 4. **Expandir tests** para mayor cobertura
 5. **Deploy a producción** cuando esté listo
+
+---
+
+## 2026-03-01 - Conversational Chat hardening
+
+- Se corrigió scope de organización en la consulta de chat para commits por usuario (`chat_query_user_commits_range`) agregando filtro `org_id` opcional y propagándolo desde `chat_ask`.
+- Impacto: evita mezcla de commits entre organizaciones cuando la API key está scopeada por org.
+- Se migró proveedor LLM de chat desde Anthropic a Gemini API (`GEMINI_API_KEY`) en backend (`main.rs` + `handlers.rs`) usando `generateContent` con salida JSON.
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`
+
+## 2026-03-01 - Timezone UI review hardening
+
+- Revisión de implementación de zona horaria configurable en frontend.
+- Fix 1: `formatTs/formatTimeOnly/formatDateOnly` ahora acepta timestamp `0` correctamente (`epochMs == null` en vez de `!epochMs`).
+- Fix 2: persistencia de timezone robusta (`readStoredTimezone`/`persistTimezone`) con guardas de `window/localStorage` y validación IANA para evitar fallos en entornos restringidos.
+- Store actualizado para usar helpers centralizados de timezone (`useControlPlaneStore`).
+- Validación ejecutada:
+  - `cd gitgov && npm run typecheck` -> sin errores
+  - `cd gitgov && npx eslint src/lib/timezone.ts src/store/useControlPlaneStore.ts` -> sin errores
+
+## 2026-03-01 - Retención configurable (compliance)
+
+- Se agregó política explícita de retención de auditoría con mínimo legal de 5 años:
+  - nuevo env `AUDIT_RETENTION_DAYS` (se clamp a mínimo `1825` días).
+  - log de arranque con política efectiva cargada.
+- Se separó retención de sesiones efímeras del concepto de retención de auditoría:
+  - nuevo env `CLIENT_SESSION_RETENTION_DAYS`.
+  - compatibilidad hacia atrás: `DATA_RETENTION_DAYS` se mantiene como fallback.
+- No se agregó borrado de tablas de auditoría (append-only intacto).
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`
+
+## 2026-03-01 - Fallback de rol admin para servidores legacy
+
+- Se corrigió un bloqueo de UX en Control Plane cuando el backend no expone `GET /me` (retorna `404`), situación que forzaba erróneamente la vista Developer.
+- Nuevo fallback en frontend (`loadMe`):
+  - intenta `cmd_server_get_me`;
+  - si falla, intenta `cmd_server_get_stats`;
+  - si `stats` responde, asigna rol `Admin`; si no, `Developer`.
+- Objetivo: compatibilidad con servidores legacy sin perder acceso al onboarding/panel admin cuando la API key sí es admin.
+- Validación ejecutada:
+  - `cd gitgov && npm run typecheck` -> sin errores
+
+## 2026-03-01 - Saneo de datos de prueba + hardening anti-contaminación
+
+- Saneo operativo en base de datos del entorno activo:
+  - se eliminaron eventos sintéticos de `client_events` (patrones `dev_team_`, `e2e_`, `alias_`, `user_*`, `test_*`, `golden_*`, `smoke`, `manual-check`, `victim_`, etc.).
+  - respaldo CSV previo en raíz del workspace: `test_data_backup_20260301_032754.client_events.csv` y `test_data_backup_20260301_032754.github_events.csv`.
+- Hardening backend:
+  - nuevo flag env `GITGOV_REJECT_SYNTHETIC_LOGINS` (default `false`) para rechazar ingesta `/events` con `user_login` sintético.
+  - cambios en `handlers.rs` y wiring en `main.rs`.
+- Hardening métrica:
+  - nueva migración `gitgov/gitgov-server/supabase/supabase_schema_v12.sql` para excluir logins sintéticos de `active_devs_week` en `get_audit_stats`.
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`
+
+## 2026-03-01 - Chatbot ampliado a modo conocimiento del proyecto
+
+- El endpoint `/chat/ask` ahora tiene fallback de **modo conocimiento** cuando la pregunta no cae en una query SQL analítica.
+- Se actualizó el system prompt para permitir respuestas sobre:
+  - integraciones (GitHub/Jira/Jenkins/GitHub Actions),
+  - configuración operativa,
+  - troubleshooting,
+  - FAQ del proyecto.
+- Se agregó base de conocimiento interna (`PROJECT_KNOWLEDGE_BASE`) con snippets operativos y selección por keywords.
+- Las 3 queries SQL originales se mantienen intactas.
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`

@@ -2,14 +2,17 @@ import { useState } from 'react'
 import { useAuthStore } from '@/store/useAuthStore'
 import { useRepoStore } from '@/store/useRepoStore'
 import { useUpdateStore } from '@/store/useUpdateStore'
+import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Header } from '@/components/layout/Header'
 import { Button } from '@/components/shared/Button'
 import { Modal } from '@/components/shared/Modal'
-import { User, FolderOpen, FileCode, LogOut, Shield, Users, Download, RefreshCw, Sparkles, ExternalLink } from 'lucide-react'
+import { User, FolderOpen, FileCode, LogOut, Shield, Users, Download, RefreshCw, Sparkles, ExternalLink, Globe } from 'lucide-react'
+import { TIMEZONES, detectBrowserTimezone, formatTs } from '@/lib/timezone'
 
 export function SettingsPage() {
   const { user, logout, isPinEnabled, setLocalPin, clearLocalPin, lockSession, pinError } = useAuthStore()
   const { repoPath, config } = useRepoStore()
+  const { displayTimezone, setDisplayTimezone } = useControlPlaneStore()
   const {
     status: updaterStatus,
     isChecking,
@@ -39,6 +42,45 @@ export function SettingsPage() {
 
       <div className="flex-1 overflow-auto p-6">
         <div className="max-w-2xl mx-auto space-y-5 animate-fade-in">
+          <section className="rounded-2xl border border-surface-700/30 bg-surface-800/40 p-6">
+            <div className="card-header mb-2">
+              <Globe size={12} strokeWidth={1.5} />
+              Zona Horaria del Audit Trail
+            </div>
+            <p className="text-xs text-surface-400 mb-4">
+              Los eventos se almacenan en UTC en la base de datos. Selecciona la zona horaria local para mostrar los timestamps correctamente en auditorías legales.
+            </p>
+            <div className="space-y-3">
+              <div className="rounded-lg border border-surface-700/30 bg-surface-900/50 p-3 space-y-2">
+                <p className="text-[10px] text-surface-500 uppercase tracking-widest font-medium">Zona horaria de visualización</p>
+                <select
+                  value={displayTimezone}
+                  onChange={(e) => setDisplayTimezone(e.target.value)}
+                  className="w-full bg-surface-900 border border-surface-700/50 rounded-lg px-3 py-2 text-xs text-surface-100 focus:outline-none focus:border-brand-500/60"
+                >
+                  {TIMEZONES.map((tz) => (
+                    <option key={tz.value} value={tz.value}>{tz.label}</option>
+                  ))}
+                  {!TIMEZONES.some((tz) => tz.value === displayTimezone) && (
+                    <option value={displayTimezone}>{displayTimezone}</option>
+                  )}
+                </select>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setDisplayTimezone(detectBrowserTimezone())}
+                  >
+                    Auto-detectar del sistema
+                  </Button>
+                  <span className="text-[10px] text-surface-500">
+                    Activa: <span className="text-surface-300 font-medium font-mono">{displayTimezone}</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </section>
+
           <section className="rounded-2xl border border-surface-700/30 bg-surface-800/40 p-6">
             <div className="card-header mb-5">
               <Sparkles size={12} strokeWidth={1.5} />
@@ -98,7 +140,7 @@ export function SettingsPage() {
                 </p>
                 {lastCheckedAt && (
                   <p className="text-[10px] text-surface-500 mt-1">
-                    Última verificación: {new Date(lastCheckedAt).toLocaleString()}
+                    Última verificación: {formatTs(lastCheckedAt, displayTimezone)}
                   </p>
                 )}
                 <p className="text-[10px] text-surface-500 mt-1">
@@ -106,7 +148,7 @@ export function SettingsPage() {
                 </p>
                 {updaterTelemetry.lastEventAt && (
                   <p className="text-[10px] text-surface-500 mt-1">
-                    Último resultado: <span className="text-surface-300">{updaterTelemetry.lastOutcome}</span> · {new Date(updaterTelemetry.lastEventAt).toLocaleString()}
+                    Último resultado: <span className="text-surface-300">{updaterTelemetry.lastOutcome}</span> · {formatTs(updaterTelemetry.lastEventAt, displayTimezone)}
                   </p>
                 )}
                 {updaterError && (
@@ -128,7 +170,7 @@ export function SettingsPage() {
                       </p>
                       <p className="text-[10px] text-surface-500">
                         Actual: v{updateInfo.currentVersion}
-                        {updateInfo.date ? ` · ${new Date(updateInfo.date).toLocaleString()}` : ''}
+                        {updateInfo.date ? ` · ${formatTs(Date.parse(updateInfo.date), displayTimezone)}` : ''}
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2">

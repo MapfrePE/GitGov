@@ -1,43 +1,18 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { usePathname } from 'next/navigation';
 
 export function Preloader() {
-    const pathname = usePathname();
     const [phase, setPhase] = useState(0);
-    const [enabled, setEnabled] = useState(false);
     // 0 = fox visible + glow fades in, 1 = fade out, 2 = done
 
     useEffect(() => {
-        // Show intro only on home and only once per browser session.
-        if (pathname !== '/') {
-            setEnabled(false);
-            setPhase(2);
-            return;
-        }
-
-        try {
-            const key = 'gitgov:web:preloader:shown';
-            if (window.sessionStorage.getItem(key) === '1') {
-                setEnabled(false);
-                setPhase(2);
-                return;
-            }
-            window.sessionStorage.setItem(key, '1');
-        } catch {
-            // If storage is unavailable, keep preloader behavior.
-        }
-
-        setEnabled(true);
-        setPhase(0);
-
         const t0 = setTimeout(() => setPhase(1), 550);
         const t1 = setTimeout(() => setPhase(2), 850);
         return () => [t0, t1].forEach(clearTimeout);
-    }, [pathname]);
+    }, []);
 
-    if (!enabled || phase >= 2) return null;
+    if (phase >= 2) return null;
 
     return (
         <div style={{
