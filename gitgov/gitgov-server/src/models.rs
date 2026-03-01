@@ -1677,6 +1677,7 @@ pub fn touch_contract_types() {
         std::mem::size_of::<AuditFilter>(),
         std::mem::size_of::<Claims>(),
         std::mem::size_of::<CorrelationConfig>(),
+        std::mem::size_of::<FeatureRequestRecord>(),
     );
 }
 
