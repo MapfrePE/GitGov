@@ -55,6 +55,8 @@ pub struct AppState {
     pub reject_synthetic_logins: bool,
     /// Gemini API key for conversational chat (env: GEMINI_API_KEY)
     pub llm_api_key: Option<String>,
+    /// Gemini model for conversational chat (env: GEMINI_MODEL)
+    pub llm_model: String,
     /// Webhook URL to notify on new feature requests (env: FEATURE_REQUEST_WEBHOOK_URL)
     pub feature_request_webhook_url: Option<String>,
 }
@@ -4655,6 +4657,7 @@ fn build_project_knowledge_payload(question: &str) -> serde_json::Value {
 async fn call_llm(
     http_client: &reqwest::Client,
     api_key: &str,
+    model: &str,
     question: &str,
     data: &serde_json::Value,
 ) -> Result<ChatAskResponse, String> {
@@ -4683,8 +4686,8 @@ async fn call_llm(
 
     let response = http_client
         .post(format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
-            api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            model, api_key
         ))
         .header("content-type", "application/json")
         .json(&req_body)
@@ -4876,7 +4879,7 @@ pub async fn chat_ask(
     };
 
     // Call LLM
-    match call_llm(&state.http_client, api_key, &question, &data).await {
+    match call_llm(&state.http_client, api_key, &state.llm_model, &question, &data).await {
         Ok(mut resp) => {
             resp.data_refs = data_refs;
             (StatusCode::OK, Json(resp))

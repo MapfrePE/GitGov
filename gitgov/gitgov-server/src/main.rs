@@ -438,6 +438,7 @@ async fn main() {
     let strict_actor_match = parse_bool_env("GITGOV_STRICT_ACTOR_MATCH", true);
     let reject_synthetic_logins = parse_bool_env("GITGOV_REJECT_SYNTHETIC_LOGINS", false);
     let llm_api_key = std::env::var("GEMINI_API_KEY").ok();
+    let llm_model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string());
     let feature_request_webhook_url = std::env::var("FEATURE_REQUEST_WEBHOOK_URL").ok();
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -457,6 +458,7 @@ async fn main() {
         strict_actor_match,
         reject_synthetic_logins,
         llm_api_key,
+        llm_model,
         feature_request_webhook_url,
     });
 
