@@ -2,6 +2,7 @@
 
 import React from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { siteConfig } from '@/lib/config/site';
 import { useTranslation } from '@/lib/i18n';
 import { Container } from './Container';
@@ -20,10 +21,12 @@ export function Footer() {
                         {/* Brand */}
                         <div className="col-span-2 md:col-span-1">
                             <Link href="/" className="inline-flex items-center gap-2 mb-4">
-                                <img
+                                <Image
                                     src="/logo.png"
                                     alt="GitGov"
-                                    className="w-10 h-10 object-contain"
+                                    width={56}
+                                    height={56}
+                                    className="w-14 h-14 object-contain"
                                 />
                                 <span className="text-lg font-bold">
                                     <span className="text-white">Git</span>

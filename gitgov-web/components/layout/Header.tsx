@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { motion, AnimatePresence } from 'framer-motion';
 import { HiOutlineMenuAlt3, HiOutlineX } from 'react-icons/hi';
 import { siteConfig } from '@/lib/config/site';
@@ -52,10 +53,13 @@ export function Header() {
                     <nav className="flex items-center justify-between h-16 md:h-20" aria-label="Main navigation">
                         {/* Logo */}
                         <Link href="/" className="flex items-center gap-2.5 group" aria-label="GitGov Home">
-                            <img
+                            <Image
                                 src="/logo.png"
                                 alt="GitGov"
-                                className="w-11 h-11 md:w-13 md:h-13 object-contain group-hover:scale-110 transition-transform duration-300"
+                                width={64}
+                                height={64}
+                                priority
+                                className="w-14 h-14 md:w-16 md:h-16 object-contain group-hover:scale-110 transition-transform duration-300"
                             />
                             <span className="text-lg md:text-xl font-bold tracking-tight">
                                 <span className="text-white">Git</span>
