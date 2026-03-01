@@ -13,6 +13,7 @@ use axum::{
 };
 use hmac::Mac;
 use regex::Regex;
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -4414,86 +4415,463 @@ fn export_result_status(event_count: usize) -> StatusCode {
 // CONVERSATIONAL CHAT — POST /chat/ask  (admin-only MVP)
 // ============================================================================
 
-const CHAT_SYSTEM_PROMPT: &str = "Eres el asistente de GitGov.\n\
-Reglas:\n\
-- Responde preguntas sobre: governance Git, commits, pushes, bloqueos, tickets, pipelines, integraciones (GitHub/Jira/Jenkins/GitHub Actions), configuración, troubleshooting y FAQ del proyecto.\n\
-- Usa EXCLUSIVAMENTE los datos/contexto provistos por el backend en el campo <data>. NO inventes datos.\n\
-- Si los datos están vacíos o son insuficientes, devuelve status=\"insufficient_data\".\n\
-- Si la capacidad no existe en el sistema, devuelve status=\"feature_not_available\".\n\
-- Si puedes responder con los datos/contexto, devuelve status=\"ok\".\n\
-- Responde siempre en el idioma del usuario.\n\
-- Sé claro y breve.\n\
-- Tu respuesta DEBE ser JSON válido con este esquema exacto:\n\
-  {\"status\":\"ok\"|\"insufficient_data\"|\"feature_not_available\"|\"error\",\
-\"answer\":\"<string>\",\"missing_capability\":\"<string o null>\",\
-\"can_report_feature\":true|false,\"data_refs\":[\"<strings>\"]}\n\
-- Si status=ok: answer contiene la respuesta en lenguaje natural, can_report_feature=false.\n\
-- Si status=feature_not_available: answer explica qué falta, can_report_feature=true, \
-missing_capability describe la capacidad faltante.\n\
-- Si status=insufficient_data: answer explica por qué no hay suficientes datos, can_report_feature=false.\n\
-- NUNCA devuelvas texto fuera del JSON.";
+const CHAT_SYSTEM_PROMPT: &str = "Eres GitGov Assistant, el asistente inteligente integrado en la plataforma GitGov.\n\
+\n\
+== IDENTIDAD ==\n\
+Eres un asistente amigable, experto y orientado al equipo de ingeniería. Tu misión es ayudar a developers, tech leads y managers a sacar el máximo provecho de GitGov: entender métricas, resolver problemas, configurar integraciones y tomar decisiones de gobernanza informadas.\n\
+Puedes conversar de forma natural. Si alguien te saluda, responde cálidamente. Si alguien hace una pregunta off-topic breve, puedes responderla brevemente y luego ofrecer ayuda con GitGov. No seas rígido ni robótico.\n\
+\n\
+== TEMAS EN LOS QUE ERES EXPERTO ==\n\
+- Gobernanza Git: commits, pushes, branch protection, políticas, flujos de trabajo\n\
+- Control Plane: endpoints, métricas, logs, dashboard, stats, jobs queue\n\
+- Integraciones: GitHub (webhooks, OAuth), Jenkins (pipelines, correlaciones), Jira (tickets, cobertura), GitHub Actions\n\
+- Compliance y auditoría: señales, violaciones, decisiones, retención de datos, audit trail\n\
+- Configuración: API keys, roles, variables de entorno, rate limits, timezones\n\
+- Desktop App: stage/commit/push, outbox offline, sync de eventos\n\
+- Troubleshooting: errores 401/404/429, split-brain, deserialización, deployments\n\
+- Roadmap y capacidades futuras del producto\n\
+- Onboarding de organizaciones y equipos\n\
+- Políticas de repositorio (gitgov.toml)\n\
+- Exportación de datos y gestión de retención\n\
+\n\
+== REGLAS DE RESPUESTA ==\n\
+- Usa EXCLUSIVAMENTE los datos/contexto provistos por el backend en el campo <data>. NO inventes datos numéricos ni eventos.\n\
+- Si <data>.mode = \"project_knowledge\", prioriza los snippets incluidos para responder de forma accionable y técnica.\n\
+- Si <data>.mode = \"sql_result\", interpreta los datos y explícalos en lenguaje natural.\n\
+- Si los datos están vacíos o son insuficientes para responder la pregunta específica, usa status=\"insufficient_data\".\n\
+- Si la capacidad solicitada no existe aún en el sistema, usa status=\"feature_not_available\".\n\
+- Si puedes responder con los datos/contexto disponibles, usa status=\"ok\".\n\
+- Para saludos, preguntas generales o conversación normal sin necesidad de datos: usa status=\"ok\" y responde naturalmente.\n\
+- Responde SIEMPRE en el idioma del usuario (detecta automáticamente español, inglés u otro).\n\
+- Sé claro, concreto y útil. Usa pasos numerados cuando la respuesta implique acciones. Usa ejemplos cuando sea apropiado.\n\
+- Cuando respondas sobre configuración o troubleshooting, incluye el comando o endpoint exacto si lo conoces.\n\
+- Cuando detectes que el usuario podría beneficiarse de una funcionalidad que no conoce, menciónala proactivamente.\n\
+\n\
+== PERSONALIDAD ==\n\
+- Cálido pero profesional. No formal en exceso.\n\
+- Directo: ve al punto, sin rodeos innecesarios.\n\
+- Empático: si alguien está frustrado con un error, reconócelo antes de dar la solución.\n\
+- Orientado al equipo: piensa en el impacto para el equipo, no solo para el usuario individual.\n\
+- Si no sabes algo con certeza, dilo. No adivines datos del sistema.\n\
+\n\
+== FORMATO JSON OBLIGATORIO ==\n\
+Tu respuesta DEBE ser JSON válido con este esquema exacto (sin texto fuera del JSON):\n\
+{\"status\":\"ok\"|\"insufficient_data\"|\"feature_not_available\"|\"error\",\
+\"answer\":\"<respuesta en lenguaje natural, markdown permitido>\",\
+\"missing_capability\":\"<string descriptivo o null>\",\
+\"can_report_feature\":true|false,\"data_refs\":[\"<strings con refs opcionales>\"]}\n\
+\n\
+Reglas por status:\n\
+- ok: answer tiene la respuesta completa, can_report_feature=false, missing_capability=null.\n\
+- feature_not_available: answer explica qué falta y por qué es útil, can_report_feature=true, missing_capability describe la capacidad en una frase corta.\n\
+- insufficient_data: answer explica qué datos faltan o por qué no se puede responder, can_report_feature=false.\n\
+- error: answer describe el problema técnico encontrado, can_report_feature=false.\n\
+\n\
+NUNCA devuelvas texto fuera del JSON. Nunca incluyas markdown code fences alrededor del JSON.";
 
 const PROJECT_KNOWLEDGE_BASE: &[(&str, &[&str], &str)] = &[
+    // ── PRODUCTO / VISIÓN ──────────────────────────────────────────────────
     (
-        "Integracion GitHub",
-        &["github", "webhook", "push", "hmac", "firma", "delivery"],
-        "GitHub se integra por POST /webhooks/github. Se valida firma HMAC X-Hub-Signature-256 con GITHUB_WEBHOOK_SECRET. La cabecera X-GitHub-Delivery se usa para idempotencia de eventos.",
+        "Qué es GitGov",
+        &["que es gitgov", "para que sirve", "producto", "herramienta", "plataforma", "vision", "mision"],
+        "GitGov es una plataforma de gobernanza de Git distribuida. Permite a equipos de ingeniería auditar su flujo de trabajo (commits, pushes, ramas), correlacionar código con tickets y pipelines CI, detectar incumplimientos de políticas y tomar decisiones de governance con trazabilidad completa. Ideal para equipos que necesitan cumplimiento, visibilidad y control sin frenar la velocidad de desarrollo.",
     ),
     (
-        "Integracion Jenkins",
-        &["jenkins", "pipeline", "ci", "build", "correlation", "correlacion"],
-        "Jenkins ingresa por POST /integrations/jenkins (Bearer auth). Si JENKINS_WEBHOOK_SECRET está configurado, exige x-gitgov-jenkins-secret. Estado: GET /integrations/jenkins/status. Correlaciones: GET /integrations/jenkins/correlations.",
+        "Componentes del sistema",
+        &["arquitectura", "componentes", "partes", "desktop", "tauri", "axum", "supabase", "postgres", "backend", "frontend"],
+        "GitGov tiene 4 componentes: (1) Desktop App — Tauri v2 + React 19 + Tailwind v4 + Zustand v5, donde el developer hace commits y pushes; (2) Control Plane — servidor Axum en Rust que recibe eventos, guarda en PostgreSQL (Supabase) y expone API REST; (3) Integraciones — GitHub webhooks, Jenkins pipelines, Jira tickets; (4) Web App — Next.js 14 en git-gov.vercel.app para marketing y documentación.",
     ),
     (
-        "Integracion Jira",
-        &["jira", "ticket", "issue", "correlate", "cobertura", "coverage"],
-        "Jira ingresa por POST /integrations/jira (Bearer auth). Si JIRA_WEBHOOK_SECRET está configurado, exige x-gitgov-jira-secret. Estado: GET /integrations/jira/status. Correlación batch: POST /integrations/jira/correlate. Cobertura: GET /integrations/jira/ticket-coverage.",
+        "Desktop App funcionalidades",
+        &["desktop", "app", "cliente", "tauri", "staging", "commit desde app", "push desde app", "interfaz"],
+        "La Desktop App permite: ver archivos cambiados en el repo, hacer stage selectivo, escribir y hacer commit, hacer push a la rama actual, ver el dashboard del Control Plane y configurar conexión al servidor. Opera offline con outbox: si no hay conexión, los eventos se encolan y se envían al reconectarse.",
+    ),
+    (
+        "Web App (marketing/docs)",
+        &["web app", "website", "vercel", "marketing", "documentacion", "git-gov.vercel.app", "landing", "nextjs"],
+        "La Web App en git-gov.vercel.app (Next.js 14) es la cara pública del producto: landing page, documentación en markdown, internacionalización EN/ES. No requiere autenticación. Se despliega automáticamente en Vercel desde la rama main.",
+    ),
+    // ── AUTENTICACIÓN ─────────────────────────────────────────────────────
+    (
+        "Auth y headers",
+        &["auth", "autenticacion", "api key", "bearer", "401", "token", "x-api-key", "header", "unauthorized"],
+        "Toda autenticación usa el header: `Authorization: Bearer <api_key>`. NUNCA usar `X-API-Key` (devolverá 401). El servidor calcula SHA256 del token y lo busca en la tabla api_keys. Si ves 401, verifica: (1) el header es `Authorization: Bearer ...`, (2) la API key está vigente (no revocada), (3) la key tiene el rol correcto para ese endpoint.",
+    ),
+    (
+        "Roles y permisos",
+        &["roles", "admin", "developer", "architect", "pm", "scope", "visibilidad", "permisos", "acceso"],
+        "GitGov tiene 4 roles: Admin (acceso total: stats, dashboard, todas las integraciones, gestión de keys), Architect (reservado para futuras restricciones), Developer (solo ve sus propios eventos en /logs), PM (reservado). El rol se asigna al crear la API key. Admin ve toda la organización; Developer ve solo su propio contexto.",
+    ),
+    (
+        "Crear y gestionar API keys",
+        &["api keys", "crear key", "nueva key", "revocar key", "rotar", "listar keys", "emitir", "issue key"],
+        "Para crear una API key: POST /api-keys con Bearer de admin, body: {\"name\":\"nombre\",\"role\":\"developer\"}. La respuesta incluye la key en texto plano (solo se muestra una vez). Para revocar: usar el panel de Settings > API Keys o endpoint DELETE /api-keys/{id}. Nunca exponer keys en logs, UI pública ni commits.",
+    ),
+    (
+        "GitHub OAuth en Desktop",
+        &["oauth", "device flow", "github login", "conectar github", "token github", "autenticar github"],
+        "La Desktop App usa GitHub Device Flow para autenticación: el usuario ve un código, lo ingresa en github.com/login/device, y el token queda guardado en el keyring del sistema operativo (nunca en archivo plano). Este token permite ver repos, ramas y hacer push autenticado.",
+    ),
+    // ── CONTROL PLANE / ENDPOINTS ─────────────────────────────────────────
+    (
+        "Endpoints principales",
+        &["endpoints", "api", "rutas", "health", "stats", "logs", "dashboard", "events"],
+        "Endpoints clave del Control Plane: GET /health (sin auth, básico), GET /health/detailed (con latencia DB y uptime), POST /events (ingesta batch de eventos, Bearer auth), GET /logs (eventos combinados, dev ve solo propios), GET /stats (admin, estadísticas globales + pipeline 7d), GET /dashboard (admin, datos dashboard completo).",
+    ),
+    (
+        "Endpoint /events (ingesta)",
+        &["ingesta", "enviar eventos", "batch", "event_uuid", "events endpoint", "post events"],
+        "POST /events acepta un batch de eventos del cliente. Body: {\"events\":[{\"event_uuid\":\"uuid\",\"event_type\":\"commit\",\"user_login\":\"...\",\"files\":[],\"status\":\"success\",\"timestamp\":0}],\"client_version\":\"1.0\"}. Devuelve: {\"accepted\":[...],\"duplicates\":[...],\"errors\":[...]}. Deduplicación por event_uuid.",
+    ),
+    (
+        "Endpoint /logs",
+        &["logs", "ver eventos", "historial", "actividad", "filtrar logs", "paginacion"],
+        "GET /logs devuelve eventos combinados con paginación. Params opcionales: limit (default 50), offset (default 0), event_type, user_login, repo, start_ts, end_ts. Admin ve todos; Developer ve solo sus propios eventos. Response: {\"events\":[...]}.",
+    ),
+    (
+        "Endpoint /stats",
+        &["stats", "estadisticas", "metricas", "total commits", "total pushes", "kpis"],
+        "GET /stats (admin) devuelve ServerStats: total_events, total_commits, total_pushes, blocked_pushes, active_developers, active_repos, pipeline_health (7d), commits_by_day, top_repos, top_developers. Útil para dashboards de management.",
+    ),
+    (
+        "Endpoint /dashboard",
+        &["dashboard", "panel", "vista", "resumen", "admin dashboard"],
+        "GET /dashboard (admin) devuelve datos consolidados del dashboard: commits recientes, pipelines, señales activas, correlaciones CI/Jira. Es el endpoint que alimenta la vista principal del dashboard en la Desktop App.",
+    ),
+    (
+        "Jobs queue y métricas",
+        &["jobs", "queue", "cola", "job queue", "dead jobs", "retry job", "jobs metrics"],
+        "GET /jobs/metrics (admin) devuelve métricas del job worker: pending, running, completed, failed. GET /jobs/dead lista jobs muertos. POST /jobs/{job_id}/retry reintenta un job muerto. El worker tiene TTL de 300s, polling cada 5s y backoff exponencial (base 10s, máx x32).",
+    ),
+    (
+        "Endpoint /compliance/{org}",
+        &["compliance", "cumplimiento", "org compliance", "dashboard compliance", "reporte"],
+        "GET /compliance/{org_name} (admin) devuelve dashboard de compliance de la organización: porcentaje de commits con ticket, pushes bloqueados, señales activas, violaciones pendientes. Permite una vista ejecutiva del estado de gobernanza.",
+    ),
+    (
+        "Endpoint /export",
+        &["export", "exportar", "exportacion", "descargar datos", "audit export"],
+        "POST /export (Bearer auth) exporta eventos en formato estructurado. Crea un registro de auditoría del export (quién exportó, cuándo, qué rango). Útil para compliance reporting externo o integración con SIEM.",
+    ),
+    (
+        "Endpoint /governance-events",
+        &["governance events", "branch protection events", "governance", "eventos governance"],
+        "GET /governance-events devuelve eventos de governance: cambios de branch protection, modificaciones de política, overrides administrativos. Permite auditar quién cambió qué configuración de gobernanza.",
+    ),
+    // ── INTEGRACIONES ────────────────────────────────────────────────────
+    (
+        "Integración GitHub webhooks",
+        &["github", "webhook", "push github", "hmac", "firma", "x-hub-signature", "github webhook", "delivery"],
+        "GitHub se integra via POST /webhooks/github. Requiere configurar GITHUB_WEBHOOK_SECRET en el servidor y en la config del webhook de GitHub. La firma HMAC se valida con X-Hub-Signature-256. X-GitHub-Delivery se usa para idempotencia. Soporta eventos: push, create (ramas/tags).",
+    ),
+    (
+        "Configurar webhook GitHub",
+        &["configurar github", "setup github", "webhook url", "github setup", "como integrar github"],
+        "Para configurar GitHub webhook: (1) En GitHub repo/org > Settings > Webhooks > Add webhook, (2) URL: https://tu-servidor/webhooks/github, (3) Content type: application/json, (4) Secret: mismo valor que GITHUB_WEBHOOK_SECRET en el servidor, (5) Eventos: push, branch_or_tag_creation. El servidor responde 200 si la firma es válida.",
+    ),
+    (
+        "Integración Jenkins",
+        &["jenkins", "pipeline", "ci jenkins", "build jenkins", "jenkins webhook", "jenkins status", "jenkins correlacion"],
+        "Jenkins ingesta por POST /integrations/jenkins con Bearer auth. Si JENKINS_WEBHOOK_SECRET está configurado, se exige header x-gitgov-jenkins-secret. Estado de integración: GET /integrations/jenkins/status. Correlaciones commit↔pipeline: GET /integrations/jenkins/correlations. Policy check advisory: POST /policy/check.",
+    ),
+    (
+        "Configurar Jenkins",
+        &["configurar jenkins", "setup jenkins", "jenkins setup", "como integrar jenkins", "jenkins gitgov"],
+        "Para integrar Jenkins con GitGov: (1) En Jenkins, configurar un post-build action o pipeline step con HTTP POST a https://tu-servidor/integrations/jenkins, (2) Header: Authorization: Bearer <admin_api_key>, (3) Opcionalmente: header x-gitgov-jenkins-secret si JENKINS_WEBHOOK_SECRET está configurado en el servidor, (4) Body: {\"job_name\":\"...\",\"build_number\":N,\"status\":\"SUCCESS\"|\"FAILURE\",\"commit_sha\":\"...\",\"branch\":\"...\",\"duration_ms\":N}.",
+    ),
+    (
+        "Jenkins correlaciones",
+        &["jenkins correlaciones", "commit pipeline", "ci correlation", "build commit", "correlacion jenkins"],
+        "GitGov correlaciona automáticamente commits con builds de Jenkins usando el commit SHA. GET /integrations/jenkins/correlations devuelve pares commit↔pipeline con estado del build. Visible en la tabla de commits del dashboard como badges de CI (verde/rojo).",
+    ),
+    (
+        "Integración Jira",
+        &["jira", "ticket jira", "issue jira", "jira webhook", "jira status", "jira correlate"],
+        "Jira ingesta por POST /integrations/jira con Bearer auth. Si JIRA_WEBHOOK_SECRET está configurado, se exige header x-gitgov-jira-secret. Estado: GET /integrations/jira/status. Correlación batch: POST /integrations/jira/correlate. Cobertura: GET /integrations/jira/ticket-coverage. Detalle de ticket: GET /integrations/jira/tickets/{id}.",
+    ),
+    (
+        "Configurar Jira",
+        &["configurar jira", "setup jira", "jira setup", "como integrar jira", "jira gitgov"],
+        "Para integrar Jira con GitGov: (1) En Jira: Project Settings > Webhooks > Create webhook, (2) URL: https://tu-servidor/integrations/jira, (3) Eventos: issue updated, issue created, comment created, (4) Header adicional (si se configura JIRA_WEBHOOK_SECRET): x-gitgov-jira-secret: <secreto>. GitGov también puede recibir eventos de Jira via Automation rules que hacen HTTP POST.",
+    ),
+    (
+        "Cobertura de tickets Jira",
+        &["ticket coverage", "cobertura tickets", "commits sin ticket", "ticket huerfano", "orphan commit", "sin ticket"],
+        "GET /integrations/jira/ticket-coverage devuelve: porcentaje de commits con ticket asociado, lista de commits sin ticket (huérfanos), y tickets sin commits (tickets vacíos). Esto alimenta la métrica de compliance 'cobertura de tickets' visible en el dashboard.",
+    ),
+    (
+        "Correlación commit-ticket",
+        &["correlacion commit ticket", "commit jira", "vincular ticket", "ticket commit", "coverage", "batch correlate"],
+        "POST /integrations/jira/correlate dispara correlación batch: busca en mensajes de commit referencias a tickets (ej. PROJ-123, ABC-456) y crea registros de correlación. También detecta commits sin ticket para reporting. Los badges de ticket aparecen en la tabla de commits del dashboard.",
     ),
     (
         "GitHub Actions",
-        &["github actions", "actions", "workflow", "gha"],
-        "GitGov no tiene endpoint dedicado para ingestar GitHub Actions por nombre. La trazabilidad CI actual está implementada vía integración Jenkins y correlación commit->pipeline. Para Actions, se requiere capacidad nueva o puente que envíe eventos a endpoint soportado.",
+        &["github actions", "actions", "workflow", "gha", "actions ci"],
+        "GitGov no tiene endpoint dedicado para GitHub Actions aún. La trazabilidad CI está implementada vía Jenkins. Para usar GitHub Actions: opción A — crear un workflow step que envíe eventos al endpoint de Jenkins con el formato compatible; opción B — solicitar la capacidad nativa como feature request. Roadmap: V1.2-C incluye mejoras al correlation engine.",
+    ),
+    // ── GOLDEN PATH / FLUJO ───────────────────────────────────────────────
+    (
+        "Golden Path (flujo completo)",
+        &["golden path", "flujo completo", "flujo base", "flujo events", "como funciona el flujo", "pipeline datos"],
+        "El Golden Path es el flujo sagrado de GitGov: (1) Developer abre Desktop App y ve archivos cambiados, (2) Hace stage de los archivos deseados, (3) Escribe mensaje de commit y hace commit, (4) Hace push a la rama remota, (5) Desktop envía eventos [stage_files, commit, attempt_push, successful_push/blocked_push] a POST /events del Control Plane, (6) Control Plane guarda en PostgreSQL con deduplicación, (7) Dashboard muestra los datos sin errores 401.",
     ),
     (
-        "Auth API",
-        &["auth", "api key", "bearer", "401", "token"],
-        "La autenticación al Control Plane usa Authorization: Bearer <api_key>. El servidor no acepta X-API-Key. Roles y scope por org dependen de la API key almacenada en tabla api_keys.",
+        "Tipos de eventos",
+        &["tipos eventos", "event_type", "stage_files", "commit event", "push event", "blocked_push", "successful_push", "attempt_push"],
+        "Tipos de eventos que registra GitGov: stage_files (archivos marcados para commit), commit (commit realizado con SHA, mensaje, archivos), attempt_push (intento de push iniciado), successful_push (push completado exitosamente, rama destino), blocked_push (push rechazado por política o protección de rama). Cada evento lleva event_uuid único para deduplicación.",
     ),
     (
-        "Onboarding Admin",
-        &["onboarding", "org", "organizacion", "invitation", "invitacion", "admin"],
-        "Flujo admin: crear org (POST /orgs), crear invitaciones (POST /org-invitations), validar/aceptar invitación (GET /org-invitations/preview/{token}, POST /org-invitations/accept).",
+        "Outbox y modo offline",
+        &["outbox", "retry", "backoff", "offline", "sin conexion", "cola eventos", "reintentos", "flush"],
+        "Si el servidor no está disponible, la Desktop App encola los eventos en un outbox local. El worker de background intenta flush periódicamente con backoff exponencial. Al recuperar la conexión, los eventos se envían en orden. Garantiza que ningún evento se pierda por desconexión temporal. El outbox usa el mismo formato que /events.",
     ),
     (
-        "Golden Path",
-        &["golden path", "flujo", "desktop", "events", "dashboard"],
-        "Golden Path crítico: Desktop stage/commit/push -> /events -> PostgreSQL -> Dashboard sin 401. Cualquier cambio en auth/outbox/handlers/dashboard debe preservar ese flujo.",
+        "Branch protection y push bloqueado",
+        &["rama protegida", "protected branch", "push bloqueado", "blocked", "main bloqueado", "politica push"],
+        "Cuando un push viola una política o rama protegida (ej. push directo a main sin PR), se registra un evento blocked_push. Estos eventos: (1) aparecen en el log de actividad, (2) incrementan la métrica de blocked_pushes en /stats, (3) pueden generar una señal de no-compliance si la política lo configura. El developer ve el bloqueo en la Desktop App.",
+    ),
+    // ── POLÍTICAS ─────────────────────────────────────────────────────────
+    (
+        "Sistema de políticas (gitgov.toml)",
+        &["politica", "policy", "gitgov.toml", "reglas repo", "configuracion repo", "policy check"],
+        "Cada repositorio puede tener un archivo gitgov.toml que define políticas: ramas protegidas, requisito de ticket en commit, revisores obligatorios, etc. GET /policy/{repo_name} devuelve la política actual. POST /policy/check hace validación advisory (usado por Jenkins). PUT /policy/{repo_name}/override aplica un override administrativo.",
     ),
     (
-        "Deploy EC2",
-        &["ec2", "deploy", "aws", "systemd", "nginx", "restart"],
-        "En producción actual, backend corre en EC2 con systemd y Nginx. Para ver cambios nuevos del servidor se debe desplegar binario/servicio actualizado y reiniciar systemd; si no, endpoints nuevos no existen en runtime.",
+        "Historial de políticas",
+        &["historial politica", "policy history", "cambios politica", "audit politica"],
+        "GET /policy/{repo_name}/history devuelve el historial de cambios de política del repositorio: quién cambió qué, cuándo, y el valor anterior vs nuevo. Permite auditar la evolución de las reglas de gobernanza.",
     ),
     (
-        "Rate Limits",
-        &["rate", "429", "limit", "throttle"],
-        "El servidor aplica rate limits por endpoint con middlewares en memoria. Variables GITGOV_RATE_LIMIT_* controlan req/min para /events, audit-stream, jenkins, jira y admin.",
+        "Policy check en Jenkins",
+        &["policy check jenkins", "advisory jenkins", "check antes deploy", "policy advisory"],
+        "POST /policy/check es un endpoint advisory para Jenkins: recibe {\"repo\":\"...\",\"branch\":\"...\",\"commit_sha\":\"...\",\"actor\":\"...\"} y devuelve si el commit cumple con las políticas del repo. No bloquea el pipeline (es advisory), pero el resultado puede usarse en gates del pipeline de Jenkins.",
+    ),
+    // ── COMPLIANCE Y SEÑALES ─────────────────────────────────────────────
+    (
+        "Señales de no-compliance",
+        &["signals", "señales", "noncompliance", "no compliance", "alertas", "incumplimiento"],
+        "Las señales son indicadores de posible incumplimiento detectados automáticamente. GET /signals lista señales activas. POST /signals/{signal_id} actualiza una señal. POST /signals/{signal_id}/confirm (admin) confirma que se detectó un bypass real. POST /signals/detect/{org_name} dispara detección manual de señales para la org.",
     ),
     (
-        "Datos y retencion",
-        &["retencion", "retention", "compliance", "5 years", "auditoria"],
-        "La retención de auditoría está gobernada por AUDIT_RETENTION_DAYS con mínimo legal de 1825 días. client_sessions tiene retención separada por CLIENT_SESSION_RETENTION_DAYS (fallback DATA_RETENTION_DAYS).",
+        "Violaciones y decisiones",
+        &["violations", "violaciones", "decisions", "decisiones", "historial decisiones", "resolver violacion"],
+        "Cuando una señal se confirma, puede generar una violación. GET /violations/{id}/decisions lista el historial de decisiones sobre esa violación. POST /violations/{id}/decisions (admin) añade una decisión: {\"decision\":\"waived\"|\"escalated\"|\"resolved\",\"reason\":\"...\",\"actor\":\"...\"}. Permite trazabilidad de quién tomó qué acción y por qué.",
     ),
     (
-        "Timezone audit trail",
-        &["timezone", "zona horaria", "timestamp", "utc"],
-        "Los timestamps se almacenan en UTC y se visualizan en zona horaria seleccionada por el usuario en Settings para trazabilidad de auditoría.",
+        "Audit stream GitHub",
+        &["audit stream", "github audit", "audit log", "github audit log", "org audit"],
+        "POST /audit-stream/github (admin) ingesta el audit log stream de GitHub Enterprise o la API de audit log de GitHub. Permite correlacionar acciones en GitHub (creación de repos, cambios de permisos, etc.) con actividad de desarrollo en GitGov.",
+    ),
+    // ── CONFIGURACIÓN / DEPLOYMENT ────────────────────────────────────────
+    (
+        "Variables de entorno del servidor",
+        &["variables entorno", "env", "configuracion servidor", "env vars", "secrets", "database url"],
+        "Variables clave del servidor (.env): DATABASE_URL (PostgreSQL/Supabase), GITGOV_API_KEY (key del cliente desktop), GITGOV_JWT_SECRET (firmar JWTs, DEBE cambiarse en prod), GITHUB_WEBHOOK_SECRET, JENKINS_WEBHOOK_SECRET (opcional), JIRA_WEBHOOK_SECRET (opcional), GEMINI_API_KEY (para el chatbot), GEMINI_MODEL (modelo Gemini a usar), RUST_LOG (nivel de logging), GITGOV_SERVER_ADDR (default 0.0.0.0:3000).",
     ),
     (
-        "Chatbot capacidades",
-        &["chatbot", "chat", "faq", "feature", "bot"],
-        "El chatbot combina consultas analíticas SQL en tiempo real y modo conocimiento del proyecto. Si falta capacidad, responde feature_not_available y puede habilitar reporte de feature.",
+        "Rate limits configurables",
+        &["rate limit", "throttle", "429", "too many requests", "limite peticiones", "rate vars"],
+        "Rate limits configurables via variables de entorno: GITGOV_RATE_LIMIT_EVENTS_PER_MIN (default 240, ruta /events), GITGOV_RATE_LIMIT_AUDIT_STREAM_PER_MIN (default 60), GITGOV_RATE_LIMIT_JENKINS_PER_MIN (default 120), GITGOV_RATE_LIMIT_JIRA_PER_MIN (default 120), GITGOV_RATE_LIMIT_ADMIN_PER_MIN (default 60 para logs/stats/dashboard). Si recibes 429, aumenta el límite correspondiente.",
     ),
+    (
+        "Deploy en EC2 con systemd",
+        &["ec2", "deploy", "aws", "systemd", "nginx", "produccion", "restart server", "deploy produccion"],
+        "En producción, el Control Plane corre en EC2 con systemd y Nginx como reverse proxy. Para actualizar: (1) compilar release `cargo build --release`, (2) copiar binario al host, (3) `sudo systemctl restart gitgov-server`. Si un endpoint nuevo no responde (404), es probable que el binary desplegado sea anterior al último cambio.",
+    ),
+    (
+        "Pipeline CI/CD para deploy",
+        &["pipeline deploy", "auto deploy", "ci deploy", "jenkins deploy", "build release", "publicar"],
+        "El deploy efectivo requiere un pipeline que: (1) compile `cargo build --release --target x86_64-unknown-linux-gnu`, (2) transfiera el binario al host EC2 (ej. scp o S3), (3) reinicie el servicio systemd. Si Jenkins solo corre lint/tests sin el paso de deploy, el runtime en EC2 no se actualiza.",
+    ),
+    (
+        "HTTPS en producción",
+        &["https", "ssl", "tls", "certificado", "lets encrypt", "dominio", "seguridad produccion"],
+        "HTTPS en EC2 está en la lista de alta prioridad del roadmap. La recomendación es usar Let's Encrypt con certbot + Nginx como reverse proxy. En producción sin HTTPS, las API keys se transmiten en claro — riesgo de seguridad alto. Alternativa rápida: AWS ALB con certificado ACM.",
+    ),
+    (
+        "Anti split-brain (localhost vs 127.0.0.1)",
+        &["split brain", "localhost", "127.0.0.1", "ipv6", "eventos no aparecen", "dashboard vacio"],
+        "Problema clásico: Desktop envía eventos pero el dashboard no los muestra. Causa: 'localhost' puede resolver a IPv6 (::1) y pegar a un proceso diferente. Fix: usar siempre 127.0.0.1. El código normaliza localhost→127.0.0.1 en 4 lugares. Si el dashboard aparece vacío, verificar que la URL del servidor en Settings usa 127.0.0.1:3000 (no localhost:3000). Docker server va en 127.0.0.1:3001.",
+    ),
+    (
+        "Configuración de timezone",
+        &["timezone", "zona horaria", "timestamp", "utc", "hora", "configurar hora"],
+        "Los timestamps se almacenan en UTC en PostgreSQL. La Desktop App permite seleccionar la timezone de visualización en Settings. Esto afecta cómo se muestran los timestamps en el dashboard y la tabla de commits, pero no altera los datos almacenados. Para auditoría, siempre se puede ver el timestamp UTC raw.",
+    ),
+    // ── RETENCIÓN Y DATOS ────────────────────────────────────────────────
+    (
+        "Retención de datos y compliance",
+        &["retencion", "retention", "5 anos", "5 years", "borrar datos", "datos historicos", "audit retention"],
+        "AUDIT_RETENTION_DAYS define cuánto tiempo se retienen los eventos de auditoría, con un mínimo legal de 1825 días (5 años). client_sessions tiene una retención separada más corta para TTL operativo (CLIENT_SESSION_RETENTION_DAYS). Las tablas de auditoría son append-only: no se hacen UPDATE ni DELETE en eventos históricos.",
+    ),
+    (
+        "Append-only y deduplicación",
+        &["append only", "no borrar", "inmutabilidad", "audit trail", "deduplicacion", "event_uuid"],
+        "Los eventos de auditoría son inmutables (append-only). No se hacen UPDATE ni DELETE. La deduplicación se garantiza por el campo event_uuid (UUID v4 único por evento). Si se reenvía el mismo event_uuid, el servidor lo clasifica como 'duplicate' y no lo inserta de nuevo. Esto permite reintentos seguros del outbox.",
+    ),
+    (
+        "Datos de prueba y contaminación",
+        &["test data", "sintetico", "synthetic", "datos prueba", "dev_team", "e2e", "contaminacion metricas"],
+        "Para evitar contaminación de métricas con datos de prueba: GITGOV_REJECT_SYNTHETIC_LOGINS=true rechaza logins sintéticos (user_logins que coincidan con patrones de test). En pipelines E2E, usar user_logins distintos a los de producción. El endpoint /export también permite exportar solo rangos específicos para separar datos.",
+    ),
+    // ── DASHBOARD Y UI ────────────────────────────────────────────────────
+    (
+        "Dashboard del Control Plane",
+        &["dashboard ui", "panel control", "auto refresh", "tabla commits", "widgets", "dashboard vista"],
+        "El dashboard se refresca automáticamente cada 30 segundos. Carga datos en paralelo: stats, commits recientes, pipeline health, señales activas y correlaciones. La tabla de commits muestra badges de CI (Jenkins) y badges de ticket (Jira). Filtros disponibles: rango de fechas, developer, repositorio.",
+    ),
+    (
+        "Tabla de commits recientes",
+        &["tabla commits", "commits recientes", "recent commits", "badge ci", "badge ticket", "commit table"],
+        "La tabla de commits recientes muestra: SHA del commit (abreviado), mensaje, developer, repo, rama, timestamp, badge de CI (verde si pipeline pasó, rojo si falló, gris si no correlacionado) y badge(s) de ticket Jira (clickeable si está configurado). Permite identificar rápidamente qué commits tienen cobertura de tickets y CI.",
+    ),
+    (
+        "Settings de la Desktop App",
+        &["settings", "configuracion desktop", "server url", "api key settings", "preferencias"],
+        "En Settings de la Desktop App: URL del servidor (prioridad: input manual > .env VITE_SERVER_URL > localStorage > default 127.0.0.1:3000), API Key (prioridad similar), timezone de visualización, preferencias de notificaciones. Los cambios se aplican inmediatamente sin reiniciar la app.",
+    ),
+    (
+        "Settings para administración",
+        &["settings admin", "admin settings", "onboarding en settings", "gestion equipo settings", "api keys settings"],
+        "Settings concentra la administración operativa: onboarding admin (org, invitaciones, provisión por rol), gestión de equipo (developers y repos por actividad real) y administración de API keys. Export JSON se mantiene fuera de ese bloque por diseño.",
+    ),
+    (
+        "PR y merges",
+        &["pr", "pull request", "merge", "merges", "evidencia merge", "pr-merges"],
+        "GitGov expone evidencia de merges vía GET /pr-merges (admin). Se usa para auditoría de cumplimiento y para distinguir cambios por PR versus pushes directos.",
+    ),
+    (
+        "Docs y FAQ",
+        &["docs", "faq", "ayuda", "help", "soporte", "documentacion"],
+        "Existe documentación en web (`/docs`) y página de Ayuda/FAQ en la app desktop. El asistente puede guiar con pasos concretos y comandos/endpoints exactos cuando aplique.",
+    ),
+    (
+        "Pipeline Health widget",
+        &["pipeline health", "widget pipeline", "ci health", "salud pipeline", "jenkins widget"],
+        "El widget Pipeline Health (parte del dashboard, V1.2-A) muestra el estado de pipelines en los últimos 7 días: tasa de éxito, builds fallidos, promedio de duración. Requiere integración Jenkins activa. Si no hay datos de Jenkins, el widget muestra estado vacío o N/A.",
+    ),
+    // ── ONBOARDING ────────────────────────────────────────────────────────
+    (
+        "Onboarding de organización",
+        &["onboarding", "org", "organizacion", "crear org", "primera vez", "empezar", "setup inicial"],
+        "Flujo de onboarding admin: (1) Crear/upsert la organización, (2) Definir org activa para la sesión, (3) Provisionar miembros por rol (admin, developer) o generar invitaciones por email, (4) Cada developer acepta invitación y obtiene su API key, (5) Developers configuran la Desktop App con la URL del servidor y su API key, (6) Configurar integraciones (GitHub webhook, Jenkins, Jira) según necesidad.",
+    ),
+    (
+        "Gestión de equipo",
+        &["team", "equipo", "developers", "repos", "actividad", "miembros", "team management"],
+        "La vista de gestión de equipo muestra: developers activos (con último evento), repos activos (con último push), actividad por ventana temporal (7d/30d/90d), estado por developer (activo/inactivo). Permite filtrar por días y estado. Es útil para que el tech lead vea quién está trabajando y en qué.",
+    ),
+    (
+        "Invitaciones y provisioning",
+        &["invitacion", "invitar developer", "provisionar", "nueva cuenta", "agregar miembro"],
+        "Para agregar developers a la organización: (1) Admin genera invitación con rol asignado, (2) Developer recibe el token de invitación, (3) Developer acepta con POST /invitations/{token}/accept, (4) El sistema crea el registro de cliente y emite una API key, (5) Developer configura su Desktop App con la key recibida.",
+    ),
+    // ── TROUBLESHOOTING ───────────────────────────────────────────────────
+    (
+        "Error 401 Unauthorized",
+        &["401", "unauthorized", "no autorizado", "error auth", "forbidden", "403"],
+        "Causas de 401: (1) Usando header incorrecto — debe ser `Authorization: Bearer <key>`, NO `X-API-Key`, (2) API key revocada o expirada, (3) Rol insuficiente para el endpoint (ej. developer intentando acceder a /stats que requiere admin), (4) Key hasheada incorrectamente en DB (raro, verificar que la key no tenga espacios extra). Fix: verificar header, verificar estado de la key en Settings > API Keys.",
+    ),
+    (
+        "Error 404 Not Found",
+        &["404", "not found", "endpoint no existe", "ruta no encontrada"],
+        "Causas de 404: (1) Endpoint nuevo que aún no está desplegado en el servidor de producción — el binary desplegado es anterior, (2) URL mal formada, (3) Chat endpoint /chat/ask no disponible si el backend no fue recompilado con la feature. Fix: verificar versión desplegada y reiniciar el servicio systemd.",
+    ),
+    (
+        "Error 429 Too Many Requests",
+        &["429", "too many requests", "rate limit error", "cuota", "throttled"],
+        "429 significa que se superó el rate limit del endpoint. Causas: flujo de eventos muy frecuente, loop de reintentos sin backoff, o rate limit configurado demasiado bajo. Fix: (1) Aumentar GITGOV_RATE_LIMIT_*_PER_MIN en el .env del servidor, (2) Verificar que el outbox tiene backoff exponencial y no está en loop, (3) Revisar si hay un cliente mal configurado enviando eventos duplicados.",
+    ),
+    (
+        "Error de deserialización query string",
+        &["deserializacion", "missing field", "query string error", "offset missing", "limit missing", "parse error"],
+        "Error 'Failed to deserialize query string: missing field offset/limit': el cliente no enviaba campos de paginación. Fix aplicado (Feb 2026): todos los structs de query tienen #[serde(default)] en limit y offset. Si aparece este error, verificar que el servidor esté en la versión más reciente. Backward compatible: valores default son 0.",
+    ),
+    (
+        "Error de serialización / null JSON",
+        &["serialization error", "null json", "json null", "invalid type null", "coalesce", "panic json"],
+        "Error 'invalid type: null, expected a map': ocurre cuando json_object_agg() devuelve NULL sin filas. Fix: siempre usar COALESCE(json_object_agg(...), '{}') en SQL + #[serde(default)] en structs Rust. Si aparece en producción, revisar las queries en db.rs que agreguen JSON.",
+    ),
+    (
+        "Dashboard vacío o sin datos",
+        &["dashboard vacio", "no hay datos", "sin actividad", "eventos no llegan", "logs vacios"],
+        "Si el dashboard aparece vacío: (1) Verificar split-brain: URL del servidor debe ser 127.0.0.1:3000 (no localhost), (2) Verificar que el servidor local está corriendo (curl http://127.0.0.1:3000/health), (3) Verificar que la API key en Settings coincide con GITGOV_API_KEY del servidor, (4) Revisar el outbox — puede estar reteniendo eventos por fallo de conexión, (5) Verificar logs del servidor (RUST_LOG=info) para ver si llegan requests.",
+    ),
+    (
+        "Chatbot no responde o da error",
+        &["chatbot error", "chat no funciona", "gemini error", "llm error", "chat 404", "bot roto"],
+        "Errores comunes del chatbot: (1) 404 en /chat/ask — backend desactualizado sin deploy, (2) 401 — API key sin rol admin, (3) 429 — cuota de Gemini agotada (verificar en Google AI Studio), (4) Error de modelo deprecado — actualizar GEMINI_MODEL en .env del servidor, (5) GEMINI_API_KEY no configurada. El chatbot requiere GEMINI_API_KEY y GEMINI_MODEL válidos.",
+    ),
+    (
+        "JWT_SECRET inseguro",
+        &["jwt secret", "jwt inseguro", "token forjado", "jwt default", "cambiar jwt"],
+        "ADVERTENCIA: GITGOV_JWT_SECRET tiene un default hardcodeado: 'gitgov-secret-key-change-in-production'. Si no se cambia en producción, cualquiera puede forjar tokens JWT. Fix: establecer un secreto fuerte con `openssl rand -hex 32` y configurarlo en el .env del servidor. NUNCA usar el valor por defecto en producción.",
+    ),
+    // ── CAPACIDADES DEL CHATBOT ───────────────────────────────────────────
+    (
+        "Consultas analíticas del chatbot",
+        &["chatbot sql", "consultas chat", "preguntas soportadas", "quien hizo push", "blocked pushes", "commits usuario", "analitica chat"],
+        "El chatbot soporta estas consultas analíticas en tiempo real (con datos reales de la DB): (Q1) pushes a main sin ticket de Jira en los últimos 7 días, (Q2) pushes bloqueados en el mes actual, (Q3) conteo de commits por usuario en un rango de fechas, (Q4) listado de commits de un usuario. Ejemplo: 'Quién hizo push a main esta semana sin ticket?', 'Cuántos commits tiene juan este mes?'.",
+    ),
+    (
+        "Capacidades y limitaciones del chatbot",
+        &["chatbot capacidades", "que puede hacer el bot", "limitaciones bot", "feature bot", "bot faq"],
+        "El chatbot PUEDE: responder preguntas sobre el proyecto, consultar datos analíticos soportados, explicar configuración, ayudar en troubleshooting, orientar sobre integraciones. El chatbot NO PUEDE: acceder a datos fuera del scope de la API key, ejecutar acciones (crear keys, revocar, push), inventar datos numéricos. Si falta una capacidad, puede reportar el feature request.",
+    ),
+    (
+        "Feature requests desde el chat",
+        &["feature request", "reportar feature", "capacidad faltante", "solicitar funcion", "pedir feature"],
+        "Cuando el chatbot detecta que una capacidad no existe, devuelve status='feature_not_available' y can_report_feature=true. El usuario puede entonces confirmar el feature request, que se registra via POST /feature-requests y puede disparar un webhook para triage de producto. Es la forma de comunicar necesidades directamente desde el chat.",
+    ),
+    // ── SEGURIDAD ─────────────────────────────────────────────────────────
+    (
+        "Seguridad y buenas prácticas",
+        &["seguridad", "security", "keys", "tokens", "secretos", "best practices", "vulnerabilidades"],
+        "Prácticas de seguridad en GitGov: (1) API keys hasheadas con SHA256 antes de guardar en DB (nunca en texto plano), (2) Tokens OAuth en keyring del OS (no en archivos), (3) .env NUNCA se commitea al repo, (4) HTTPS obligatorio en producción, (5) JWT_SECRET debe ser fuerte y único por entorno, (6) Eventos de auditoría son append-only (no modificables), (7) No exponer secretos en logs ni en respuestas de error.",
+    ),
+    (
+        "Erasing / derecho al olvido",
+        &["erase", "borrar usuario", "derecho olvido", "gdpr", "eliminar datos", "privacidad"],
+        "GitGov tiene soporte para 'erase' de usuario: endpoint que anonimiza o elimina registros de un developer específico dentro del scope de la org. Devuelve 404 si el usuario no existe en la org (privacy-preserving: indistinguible de 'no existe'). Útil para cumplimiento GDPR/LOPD.",
+    ),
+    // ── ROADMAP ───────────────────────────────────────────────────────────
+    (
+        "Roadmap y estado del proyecto",
+        &["roadmap", "futuro", "proximas features", "cuando", "version", "v1.2", "v1.3", "pendiente"],
+        "Estado actual (Feb 2026): V1.2-A (Jenkins MVP) — FUNCIONAL. V1.2-B (Jira + Ticket Coverage) — PREVIEW. Pendiente alta prioridad: correlación de related_prs automática, HTTPS en EC2 (Let's Encrypt), tests de integración con DB mock. Roadmap futuro: V1.2-C (Correlation Engine V2 + Compliance Signals), V1.3 (AI Governance Insights).",
+    ),
+    (
+        "Tests y calidad",
+        &["tests", "pruebas", "cargo test", "ci tests", "unit tests", "e2e tests", "smoke tests"],
+        "Suite de tests: (1) cargo test — 36 unit tests en CI (models, handlers, auth), sin DB real, (2) smoke_contract.sh — 14 contract checks live (paginación + Golden Path), requiere servidor corriendo, (3) e2e_flow_test.sh — flujo E2E completo (manual), (4) jenkins_integration_test.sh y jira_integration_test.sh — tests de integración manuales. Pendiente: tests de integración con DB mock.",
+    ),
+    // ── CONVERSACIÓN NATURAL ──────────────────────────────────────────────
+    (
+        "Saludo y presentación",
+        &["hola", "buenos dias", "buenas tardes", "hello", "hi", "hey", "como estas", "que tal"],
+        "Soy GitGov Assistant, el asistente integrado en la plataforma GitGov. Puedo ayudarte con: métricas de tu equipo, configuración de integraciones (GitHub/Jenkins/Jira), troubleshooting, compliance, políticas de repositorio, y cualquier pregunta sobre cómo sacar el máximo de GitGov. ¿En qué te puedo ayudar hoy?",
+    ),
+    (
+        "Ayuda general",
+        &["ayuda", "help", "que puedes hacer", "como me ayudas", "menu", "opciones", "comandos"],
+        "Puedo ayudarte con: (1) Analítica — 'Quién hizo push a main sin ticket esta semana?', 'Cuántos commits tiene X este mes?', (2) Configuración — setup de GitHub/Jenkins/Jira, API keys, variables de entorno, (3) Troubleshooting — errores 401/404/429, dashboard vacío, outbox atascado, (4) Compliance — señales, violaciones, cobertura de tickets, (5) Producto — qué hace GitGov, roadmap, capacidades. ¿Por dónde empezamos?",
+    ),
+    (
+        "Métricas para manager / tech lead",
+        &["metricas manager", "kpis", "reporte equipo", "vista ejecutiva", "tech lead", "gerente", "jefe"],
+        "Para managers y tech leads, GitGov ofrece: (1) /stats — total commits, pushes, blocked pushes, developers activos, repos activos, (2) /compliance/{org} — porcentaje de commits con ticket, señales activas, violaciones pendientes, (3) Tabla de commits con badges CI y tickets, (4) Pipeline Health (7 días), (5) Cobertura de tickets Jira. Todo con trazabilidad de auditoría completa.",
+    ),
+    (
+        "Métricas para developer",
+        &["metricas developer", "mis commits", "mi actividad", "como ver mis datos", "developer vista"],
+        "Como developer, puedes ver: (1) tus propios eventos en GET /logs (solo tus datos, scoped por tu API key), (2) el historial de commits, pushes y stages en el dashboard de la Desktop App, (3) estado de los pipelines Jenkins correlacionados con tus commits, (4) badges de tickets Jira en tus commits. Para ver datos de toda la org, necesitas rol admin.",
+    ),
+    (
+        "Cuánto cuesta / pricing",
+        &["precio", "costo", "pricing", "plan", "licencia", "gratis", "enterprise"],
+        "La información de pricing y planes de GitGov está disponible en git-gov.vercel.app. GitGov está orientado a equipos de ingeniería que necesitan gobernanza y compliance. Para preguntas de licenciamiento enterprise, contacta al equipo de GitGov directamente.",
+    ),
+
 ];
 
 #[derive(Debug, serde::Serialize)]
@@ -4552,7 +4930,16 @@ struct GeminiResponse {
 enum ChatQuery {
     PushesNoTicket,
     BlockedPushesMonth,
+    UserCommitsCount {
+        user: String,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+    },
     UserCommitsRange { user: String, start_ms: i64, end_ms: i64 },
+    Greeting,
+    CurrentDateTime,
+    CapabilityOverview,
+    GuidedHelp,
 }
 
 fn detect_query(question: &str) -> Option<ChatQuery> {
@@ -4575,45 +4962,168 @@ fn detect_query(question: &str) -> Option<ChatQuery> {
         return Some(ChatQuery::BlockedPushesMonth);
     }
 
-    // Q3: commits de {usuario} entre {fecha_inicio} y {fecha_fin}
+    // Q3/Q4: commits por usuario (listado o conteo)
     if q.contains("commit") {
-        // Extract user login — look for "de {word}" or "by {word}" or "del usuario {word}"
-        let user_re = Regex::new(r"(?:de |by |del usuario |of user )([a-z0-9_\-\.]+)").ok()?;
+        // Extract user login. Supports:
+        // - "commits de juan"
+        // - "commits by juan"
+        // - "usuario juan" / "el usuario juan"
+        let user_re = Regex::new(
+            r"(?:de |by |del usuario |el usuario |usuario |of user )([a-z0-9_\-\.]+)"
+        ).ok()?;
         let user = user_re
             .captures(&q)
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string())?;
 
-        // Extract date range — look for "entre YYYY-MM-DD y YYYY-MM-DD" or "from ... to ..."
+        // Extract explicit date range — "entre YYYY-MM-DD y YYYY-MM-DD" or dd/mm/yyyy
         let date_re = Regex::new(
             r"(?:entre|from|desde)\s+(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\s+(?:y|and|to|hasta)\s+(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})"
         ).ok()?;
+        let parse_date = |s: &str| -> Option<i64> {
+            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .or_else(|_| chrono::NaiveDate::parse_from_str(s, "%d/%m/%Y"))
+                .ok()
+                .map(|d| {
+                    d.and_hms_opt(0, 0, 0)
+                        .map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc).timestamp_millis())
+                        .unwrap_or(0)
+                })
+        };
 
-        let (start_ms, end_ms) = if let Some(caps) = date_re.captures(&q) {
-            let parse_date = |s: &str| -> Option<i64> {
-                chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                    .or_else(|_| chrono::NaiveDate::parse_from_str(s, "%d/%m/%Y"))
-                    .ok()
-                    .map(|d| {
-                        d.and_hms_opt(0, 0, 0)
-                            .map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc).timestamp_millis())
-                            .unwrap_or(0)
-                    })
-            };
+        let explicit_range = date_re.captures(&q).and_then(|caps| {
             let s = parse_date(caps.get(1)?.as_str())?;
             let e = parse_date(caps.get(2)?.as_str())?;
-            (s, e)
-        } else {
-            // Default to last 30 days if no dates found
-            let now = chrono::Utc::now().timestamp_millis();
-            let thirty_days_ago = now - 30 * 24 * 60 * 60 * 1000;
-            (thirty_days_ago, now)
+            Some((s, e))
+        });
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let this_month_start_ms = {
+            let dt = chrono::Utc::now();
+            let date = chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1)?;
+            date.and_hms_opt(0, 0, 0)
+                .map(|x| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(x, chrono::Utc).timestamp_millis())
+                .unwrap_or(0)
         };
+        let week_start_ms = now - 7 * 24 * 60 * 60 * 1000;
+
+        let window_from_keywords: Option<(i64, i64)> = if q.contains("esta semana") || q.contains("this week") {
+            Some((week_start_ms, now))
+        } else if q.contains("este mes") || q.contains("this month") {
+            Some((this_month_start_ms, now))
+        } else {
+            None
+        };
+
+        let is_count_intent = q.contains("cuanto")
+            || q.contains("cuánto")
+            || q.contains("cuantos")
+            || q.contains("cuántos")
+            || q.contains("how many")
+            || q.contains("cantidad")
+            || q.contains("total")
+            || q.contains("numero")
+            || q.contains("número");
+
+        if is_count_intent {
+            let (start_ms, end_ms) = explicit_range
+                .or(window_from_keywords)
+                .map(|(s, e)| (Some(s), Some(e)))
+                .unwrap_or((None, None)); // all-time by default for count intent
+            return Some(ChatQuery::UserCommitsCount { user, start_ms, end_ms });
+        }
+
+        let (start_ms, end_ms) = explicit_range
+            .or(window_from_keywords)
+            .unwrap_or_else(|| {
+                // Default to last 30 days for listing intent
+                let thirty_days_ago = now - 30 * 24 * 60 * 60 * 1000;
+                (thirty_days_ago, now)
+            });
 
         return Some(ChatQuery::UserCommitsRange { user, start_ms, end_ms });
     }
 
+    // Conversational intents (no SQL required)
+    if q.contains("hola")
+        || q.contains("hello")
+        || q.contains("hi ")
+        || q.contains("hey")
+        || q.contains("buenos dias")
+        || q.contains("buenas tardes")
+        || q.contains("buenas noches")
+    {
+        return Some(ChatQuery::Greeting);
+    }
+
+    if q.contains("fecha")
+        || q.contains("hora")
+        || q.contains("que dia")
+        || q.contains("qué día")
+        || q.contains("que día")
+        || q.contains("hoy")
+        || q.contains("today")
+        || q.contains("date")
+        || q.contains("time")
+    {
+        return Some(ChatQuery::CurrentDateTime);
+    }
+
+    if (q.contains("control plane") || q.contains("datos"))
+        && (q.contains("puedes ver")
+            || q.contains("puede ver")
+            || q.contains("puedes consultar")
+            || q.contains("puedes leer"))
+    {
+        return Some(ChatQuery::CapabilityOverview);
+    }
+
+    if q.contains("ayuda")
+        || q.contains("help")
+        || q.contains("guiame")
+        || q.contains("guíame")
+        || q.contains("paso a paso")
+        || q.contains("como")
+        || q.contains("cómo")
+        || q.contains("configurar")
+        || q.contains("setup")
+        || q.contains("conectar")
+    {
+        return Some(ChatQuery::GuidedHelp);
+    }
+
     None
+}
+
+fn weekday_es(w: chrono::Weekday) -> &'static str {
+    match w {
+        chrono::Weekday::Mon => "lunes",
+        chrono::Weekday::Tue => "martes",
+        chrono::Weekday::Wed => "miércoles",
+        chrono::Weekday::Thu => "jueves",
+        chrono::Weekday::Fri => "viernes",
+        chrono::Weekday::Sat => "sábado",
+        chrono::Weekday::Sun => "domingo",
+    }
+}
+
+fn build_guided_help_answer(question: &str) -> String {
+    let q = question.to_lowercase();
+
+    if q.contains("jira") {
+        return "Pasos para conectar Jira con GitGov: 1) Configura `JIRA_WEBHOOK_SECRET` en el server. 2) Crea webhook de Jira a `POST /integrations/jira`. 3) Envía `Authorization: Bearer <admin_key>` y, si aplica, `x-gitgov-jira-secret`. 4) Verifica estado con `GET /integrations/jira/status`. 5) Ejecuta `POST /integrations/jira/correlate` y valida cobertura en `GET /integrations/jira/ticket-coverage`.".to_string();
+    }
+    if q.contains("jenkins") {
+        return "Pasos para conectar Jenkins con GitGov: 1) Configura `JENKINS_WEBHOOK_SECRET` (opcional). 2) Desde pipeline envía POST a `/integrations/jenkins` con `Authorization: Bearer <admin_key>`. 3) Si usas secreto, añade `x-gitgov-jenkins-secret`. 4) Revisa `GET /integrations/jenkins/status`. 5) Valida correlaciones en `GET /integrations/jenkins/correlations`.".to_string();
+    }
+    if q.contains("github") {
+        return "Pasos para conectar GitHub: 1) Define `GITHUB_WEBHOOK_SECRET` en el server. 2) En GitHub crea webhook a `/webhooks/github` con JSON. 3) Usa el mismo secret para firma HMAC. 4) Activa eventos push/create. 5) Verifica `GET /health` y revisa eventos en `/logs`.".to_string();
+    }
+    if q.contains("settings") || q.contains("onboarding") || q.contains("organizacion") || q.contains("organización") {
+        return "Pasos de onboarding admin en Settings: 1) Crear/Upsert organización. 2) Definir org activa. 3) Provisionar miembros o generar invitaciones por rol. 4) Emitir API keys por usuario. 5) Revisar actividad en Gestión de Equipo (developers/repos/eventos).".to_string();
+    }
+
+    "Puedo guiarte paso a paso. Opciones frecuentes: 1) Conectar GitHub webhooks. 2) Conectar Jenkins. 3) Conectar Jira y correlación de tickets. 4) Onboarding admin en Settings (org, roles, invitaciones, API keys). 5) Troubleshooting de 401/404/429 y despliegue.".to_string()
 }
 
 fn build_project_knowledge_payload(question: &str) -> serde_json::Value {
@@ -4621,6 +5131,9 @@ fn build_project_knowledge_payload(question: &str) -> serde_json::Value {
     let mut ranked: Vec<(i32, &str, &str)> = Vec::new();
     for (title, keywords, content) in PROJECT_KNOWLEDGE_BASE {
         let mut score = 0;
+        if q.contains(&title.to_lowercase()) {
+            score += 3;
+        }
         for kw in *keywords {
             if q.contains(kw) {
                 score += 2;
@@ -4635,7 +5148,7 @@ fn build_project_knowledge_payload(question: &str) -> serde_json::Value {
     let selected: Vec<serde_json::Value> = if ranked.is_empty() {
         PROJECT_KNOWLEDGE_BASE
             .iter()
-            .take(4)
+            .take(8)
             .map(|(title, _keywords, content)| {
                 serde_json::json!({ "title": title, "content": content })
             })
@@ -4643,13 +5156,42 @@ fn build_project_knowledge_payload(question: &str) -> serde_json::Value {
     } else {
         ranked
             .into_iter()
-            .take(8)
-            .map(|(_score, title, content)| serde_json::json!({ "title": title, "content": content }))
+            .take(14)
+            .map(|(score, title, content)| serde_json::json!({ "title": title, "score": score, "content": content }))
             .collect()
     };
 
+    let now_utc = chrono::Utc::now();
+    let lima_tz = chrono::FixedOffset::west_opt(5 * 3600)
+        .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("valid offset"));
+    let now_lima = now_utc.with_timezone(&lima_tz);
+
     serde_json::json!({
         "mode": "project_knowledge",
+        "runtime": {
+            "now_utc_iso": now_utc.to_rfc3339(),
+            "now_lima_iso": now_lima.to_rfc3339(),
+            "weekday_lima_es": weekday_es(now_lima.weekday()),
+            "timezone_hint": "America/Lima"
+        },
+        "capabilities": {
+            "query_engine": [
+                "pushes_no_ticket_main_7d",
+                "blocked_pushes_this_month",
+                "user_commits_range",
+                "user_commits_count"
+            ],
+            "integrations": [
+                "github_webhooks",
+                "jenkins_ingest",
+                "jira_ingest",
+                "jira_correlation",
+                "github_actions_via_bridge"
+            ],
+            "auth": "authorization_bearer_required",
+            "scoping": "api_key_role_and_org_scope_applies",
+            "limits": "no_data_or_out_of_scope_must_not_invent"
+        },
         "snippets": selected
     })
 }
@@ -4809,6 +5351,52 @@ pub async fn chat_ask(
     let query = detect_query(&question);
 
     let (data, data_refs) = match query {
+        Some(ChatQuery::Greeting) => {
+            return (StatusCode::OK, Json(ChatAskResponse {
+                status: "ok".to_string(),
+                answer: "Hola. Soy GitGov Assistant. Puedo ayudarte con analítica real del Control Plane, onboarding admin en Settings, roles/scope, integraciones (GitHub/Jenkins/Jira), PR/merges y troubleshooting. Si quieres, te guío paso a paso.".to_string(),
+                missing_capability: None,
+                can_report_feature: false,
+                data_refs: vec!["assistant_runtime".to_string(), "project_docs_kb".to_string()],
+            }));
+        }
+        Some(ChatQuery::CurrentDateTime) => {
+            let now_utc = chrono::Utc::now();
+            let lima_tz = chrono::FixedOffset::west_opt(5 * 3600)
+                .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("valid offset"));
+            let now_lima = now_utc.with_timezone(&lima_tz);
+            let answer = format!(
+                "Fecha y hora actuales: {} (America/Lima, {}) | UTC: {}.",
+                now_lima.format("%Y-%m-%d %H:%M:%S"),
+                weekday_es(now_lima.weekday()),
+                now_utc.format("%Y-%m-%d %H:%M:%S")
+            );
+            return (StatusCode::OK, Json(ChatAskResponse {
+                status: "ok".to_string(),
+                answer,
+                missing_capability: None,
+                can_report_feature: false,
+                data_refs: vec!["assistant_runtime".to_string()],
+            }));
+        }
+        Some(ChatQuery::CapabilityOverview) => {
+            return (StatusCode::OK, Json(ChatAskResponse {
+                status: "ok".to_string(),
+                answer: "Sí. Puedo consultar datos reales del Control Plane con el scope de tu API key. Hoy tengo consultas en tiempo real para pushes sin ticket a main (7d), pushes bloqueados del mes, commits por usuario en rango y conteo de commits por usuario. Además, te puedo guiar en settings/onboarding, roles, integraciones, PR/merges y troubleshooting.".to_string(),
+                missing_capability: None,
+                can_report_feature: false,
+                data_refs: vec!["client_events".to_string(), "github_events".to_string(), "project_docs_kb".to_string()],
+            }));
+        }
+        Some(ChatQuery::GuidedHelp) => {
+            return (StatusCode::OK, Json(ChatAskResponse {
+                status: "ok".to_string(),
+                answer: build_guided_help_answer(&question),
+                missing_capability: None,
+                can_report_feature: false,
+                data_refs: vec!["project_docs_kb".to_string()],
+            }));
+        }
         Some(ChatQuery::PushesNoTicket) => {
             match state.db.chat_query_pushes_no_ticket(scoped_org_id.as_deref()).await {
                 Ok(rows) => {
@@ -4835,6 +5423,33 @@ pub async fn chat_ask(
                 }
                 Err(e) => {
                     tracing::error!("chat_query_blocked_pushes_month error: {}", e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(ChatAskResponse {
+                        status: "error".to_string(),
+                        answer: "Error consultando la base de datos".to_string(),
+                        missing_capability: None,
+                        can_report_feature: false,
+                        data_refs: vec![],
+                    }));
+                }
+            }
+        }
+        Some(ChatQuery::UserCommitsCount { ref user, start_ms, end_ms }) => {
+            match state
+                .db
+                .chat_query_user_commits_count(user, start_ms, end_ms, scoped_org_id.as_deref())
+                .await
+            {
+                Ok(count) => {
+                    let refs = vec!["client_events".to_string()];
+                    (serde_json::json!({
+                        "user": user,
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                        "commit_count": count
+                    }), refs)
+                }
+                Err(e) => {
+                    tracing::error!("chat_query_user_commits_count error: {}", e);
                     return (StatusCode::INTERNAL_SERVER_ERROR, Json(ChatAskResponse {
                         status: "error".to_string(),
                         answer: "Error consultando la base de datos".to_string(),

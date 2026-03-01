@@ -48,11 +48,11 @@ Los registros de eventos se almacenan en una **base de datos PostgreSQL** (aloja
 
 ### Cliente Desktop
 
-La aplicación de escritorio almacena un **outbox local SQLite** para resiliencia offline. Los eventos se encolan localmente y se sincronizan con el servidor cuando se restablece la conectividad.
+La aplicación de escritorio almacena un **outbox local en formato JSONL** para resiliencia offline. Los eventos se encolan localmente y se sincronizan con el servidor cuando se restablece la conectividad.
 
 | Almacenamiento Local | Propósito | Protección |
 |---------------------|-----------|------------|
-| Outbox (SQLite) | Eventos pendientes de sincronizar | Sistema de archivos local, limpiado tras entrega exitosa |
+| Outbox (JSONL) | Eventos pendientes de sincronizar | Sistema de archivos local, limpiado tras entrega exitosa |
 | API key | Autenticación con el servidor | Almacenada en keyring del SO (nunca en archivos de texto plano) |
 | `gitgov.toml` | Configuración de políticas | Commiteado en el repositorio — sin secretos |
 
@@ -75,7 +75,7 @@ Toda comunicación entre GitGov Desktop y el Control Plane está protegida por *
 | PostgreSQL (Supabase) | Cifrado de disco AES-256 (por defecto en Supabase) |
 | Backups de base de datos | Cifrados en reposo según política de Supabase/proveedor |
 | API keys en base de datos | Almacenadas como **hashes SHA-256** — texto plano nunca se persiste tras emisión inicial |
-| Outbox local (SQLite) | Protegido por permisos del sistema de archivos del SO |
+| Outbox local (JSONL) | Protegido por permisos del sistema de archivos del SO |
 | Keyring del SO (API key) | Protegido por almacenamiento de credenciales del SO (Windows DPAPI, macOS Keychain, Linux Secret Service) |
 
 ---

@@ -9,11 +9,7 @@ import { DailyActivityWidget } from './DailyActivityWidget'
 import { TicketCoverageWidget } from './TicketCoverageWidget'
 import { EventBreakdownGrid } from './EventBreakdownGrid'
 import { RecentCommitsTable } from './RecentCommitsTable'
-import { ApiKeyManagerWidget } from './ApiKeyManagerWidget'
-import { ExportPanel } from './ExportPanel'
-import { AdminOnboardingPanel } from './AdminOnboardingPanel'
 import { DeveloperAccessPanel } from './DeveloperAccessPanel'
-import { TeamManagementPanel } from './TeamManagementPanel'
 import { ConversationalChatPanel } from './ConversationalChatPanel'
 import { Modal } from '@/components/shared/Modal'
 import { Badge } from '@/components/shared/Badge'
@@ -133,11 +129,6 @@ export function ServerDashboard() {
           <RecentCommitsTable />
 
           <ConversationalChatPanel />
-
-          <AdminOnboardingPanel />
-          <TeamManagementPanel />
-          {isAdmin && <ApiKeyManagerWidget />}
-          {isAdmin && <ExportPanel />}
 
           <Modal
             isOpen={showActiveDevsModal}

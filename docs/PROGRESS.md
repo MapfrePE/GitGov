@@ -1574,3 +1574,90 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
 - Las 3 queries SQL originales se mantienen intactas.
 - Validación ejecutada:
   - `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`
+
+## 2026-03-01 - Settings: mover onboarding admin y gestión de equipo
+
+- Se movieron los paneles de administración desde `Control Plane > Dashboard` hacia `Settings`:
+  - `AdminOnboardingPanel`
+  - `TeamManagementPanel`
+  - `ApiKeyManagerWidget`
+- `ExportPanel` **no** se movió (se mantiene fuera de Settings) según requerimiento.
+- `ServerDashboard` quedó enfocado en métricas, actividad y chatbot.
+- `SettingsPage` ahora muestra un bloque "Administración de Organización" solo para rol admin del Control Plane.
+- Si no hay conexión activa al Control Plane, Settings muestra CTA para abrir `/control-plane` y conectar.
+- Ajuste de layout en Settings para soportar tablas/paneles amplios (`max-w-6xl`).
+- Validación ejecutada:
+  - `cd gitgov && npm run typecheck` -> sin errores
+  - `cd gitgov && npx eslint src/pages/SettingsPage.tsx src/components/control_plane/ServerDashboard.tsx` -> sin errores
+  - `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`
+
+## 2026-03-01 - Chatbot Gemini: modelo configurable
+
+- Se eliminó hardcode de modelo Gemini en backend.
+- Nuevo env `GEMINI_MODEL` con default `gemini-2.5-flash`.
+- Motivo: `gemini-2.0-flash` devuelve `404 NOT_FOUND` para proyectos nuevos.
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> sin errores
+
+## 2026-03-01 - Chatbot: conteo de commits por usuario (Control Plane real)
+
+- Se corrigió el query engine del chatbot para soportar preguntas de conteo tipo:
+  - "¿Cuántos commits ha hecho el usuario X?"
+  - "How many commits did user X make this week/month?"
+- Cambios backend:
+  - Nuevo `ChatQuery::UserCommitsCount` en `handlers.rs`.
+  - Parser de intención mejorado para extraer login con patrones `usuario X`, `el usuario X`, `commits de X`, `commits by X`.
+  - Soporte de ventana temporal en conteo:
+    - `esta semana` / `this week`
+    - `este mes` / `this month`
+    - rango explícito `entre <fecha> y <fecha>`
+    - default de conteo sin ventana -> all-time.
+  - Nueva query DB `chat_query_user_commits_count(...)` en `db.rs` sobre `client_events` con scope por `org_id`.
+- Mejora de conocimiento contextual:
+  - Se añadió snippet "Control Plane datos" para evitar respuestas ambiguas de capacidad.
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> sin errores
+
+## 2026-03-01 - Chatbot: ampliacion fuerte de contexto de proyecto
+
+- Se amplió significativamente `PROJECT_KNOWLEDGE_BASE` del chatbot (backend) para cubrir más contexto operativo y funcional:
+  - arquitectura general
+  - endpoints clave de Control Plane
+  - auth/scope/roles
+  - onboarding admin y gestión de equipo
+  - API keys
+  - GitHub/Jenkins/Jira/GitHub Actions
+  - OAuth Device Flow
+  - outbox/reintentos
+  - Golden Path y eventos
+  - branch protection, signals/violations
+  - deploy EC2 + CI/CD Jenkins
+  - rate limits
+  - timezone/retención/compliance
+  - higiene de datos sintéticos
+  - troubleshooting de chatbot (404/401/429/modelo Gemini)
+  - feature requests desde chat
+- Mejora en payload de conocimiento (`build_project_knowledge_payload`):
+  - mayor cobertura de snippets seleccionados (fallback y top-ranked)
+  - scoring incluye coincidencia por título + keywords
+  - se añade bloque `capabilities` (query engine, integraciones, auth/scope, limits)
+- Se mantiene regla de no inventar: si no hay datos suficientes o capacidad no implementada, sigue devolviendo `insufficient_data` / `feature_not_available`.
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> sin errores
+
+## 2026-03-01 - Chatbot v2: contexto ampliado + respuestas directas (saludos/fecha/hora/guía)
+
+- Se llevó el chatbot a un nivel más completo en backend:
+  - Base de conocimiento ampliada con más contexto de producto (Settings admin, roles/scope, PR/merges, docs/FAQ, onboarding, integraciones, troubleshooting, compliance, deploy).
+  - Nuevas intenciones conversacionales directas (sin depender del LLM para todo):
+    - `Greeting`
+    - `CurrentDateTime`
+    - `CapabilityOverview` (capacidad real del Control Plane)
+    - `GuidedHelp` (respuestas paso a paso según tema: GitHub/Jenkins/Jira/Settings)
+  - Se añadió metadata runtime al payload de conocimiento (`now_utc_iso`, `now_lima_iso`, `weekday_lima_es`, `timezone_hint`) para respuestas de día/hora.
+- Objetivo: evitar respuestas pobres tipo `insufficient_data` en saludos o preguntas generales y mejorar guidance accionable.
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> sin errores

@@ -4725,6 +4725,36 @@ impl Database {
             .collect())
     }
 
+    /// Q4: Count commits by a specific user, optionally scoped to a time window.
+    pub async fn chat_query_user_commits_count(
+        &self,
+        user_login: &str,
+        start_ms: Option<i64>,
+        end_ms: Option<i64>,
+        org_id: Option<&str>,
+    ) -> Result<i64, DbError> {
+        let row = sqlx::query(
+            r#"
+            SELECT COUNT(*)::bigint AS cnt
+            FROM client_events
+            WHERE event_type = 'commit'
+              AND user_login ILIKE $1
+              AND ($2::bigint IS NULL OR created_at >= to_timestamp($2::bigint / 1000.0))
+              AND ($3::bigint IS NULL OR created_at <= to_timestamp($3::bigint / 1000.0))
+              AND ($4::uuid IS NULL OR org_id = $4::uuid)
+            "#,
+        )
+        .bind(user_login)
+        .bind(start_ms)
+        .bind(end_ms)
+        .bind(org_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(row.get("cnt"))
+    }
+
     /// Insert a feature request record. Returns the new UUID as String.
     pub async fn create_feature_request(
         &self,

@@ -6,13 +6,17 @@ import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Header } from '@/components/layout/Header'
 import { Button } from '@/components/shared/Button'
 import { Modal } from '@/components/shared/Modal'
+import { Link } from 'react-router-dom'
 import { User, FolderOpen, FileCode, LogOut, Shield, Users, Download, RefreshCw, Sparkles, ExternalLink, Globe } from 'lucide-react'
 import { TIMEZONES, detectBrowserTimezone, formatTs } from '@/lib/timezone'
+import { AdminOnboardingPanel } from '@/components/control_plane/AdminOnboardingPanel'
+import { TeamManagementPanel } from '@/components/control_plane/TeamManagementPanel'
+import { ApiKeyManagerWidget } from '@/components/control_plane/ApiKeyManagerWidget'
 
 export function SettingsPage() {
   const { user, logout, isPinEnabled, setLocalPin, clearLocalPin, lockSession, pinError } = useAuthStore()
   const { repoPath, config } = useRepoStore()
-  const { displayTimezone, setDisplayTimezone } = useControlPlaneStore()
+  const { displayTimezone, setDisplayTimezone, isConnected, userRole } = useControlPlaneStore()
   const {
     status: updaterStatus,
     isChecking,
@@ -35,13 +39,15 @@ export function SettingsPage() {
   } = useUpdateStore()
   const [showRepoSelector, setShowRepoSelector] = useState(false)
   const [pinInput, setPinInput] = useState('')
+  const isControlPlaneAdmin = userRole === 'Admin'
+  const canManageOrgSettings = Boolean(user?.is_admin) || isControlPlaneAdmin
 
   return (
     <div className="h-full flex flex-col bg-surface-950">
       <Header />
 
       <div className="flex-1 overflow-auto p-6">
-        <div className="max-w-2xl mx-auto space-y-5 animate-fade-in">
+        <div className="max-w-6xl mx-auto space-y-5 animate-fade-in">
           <section className="rounded-2xl border border-surface-700/30 bg-surface-800/40 p-6">
             <div className="card-header mb-2">
               <Globe size={12} strokeWidth={1.5} />
@@ -80,6 +86,33 @@ export function SettingsPage() {
               </div>
             </div>
           </section>
+
+          {canManageOrgSettings && (
+            <section className="rounded-2xl border border-surface-700/30 bg-surface-800/40 p-6">
+              <div className="card-header mb-2">Administración de Organización</div>
+              <p className="text-xs text-surface-400 mb-4">
+                Onboarding admin, gestión de equipo y API keys se gestionan desde Settings.
+                Export JSON se mantiene fuera de esta vista.
+              </p>
+
+              {!isConnected ? (
+                <div className="rounded-lg border border-white/8 bg-surface-900/50 p-4 text-xs text-surface-300">
+                  Conecta primero al Control Plane para administrar organización y acceso por rol.
+                  <div className="mt-3">
+                    <Link to="/control-plane">
+                      <Button size="sm" variant="secondary">Abrir Control Plane</Button>
+                    </Link>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <AdminOnboardingPanel />
+                  <TeamManagementPanel />
+                  <ApiKeyManagerWidget />
+                </div>
+              )}
+            </section>
+          )}
 
           <section className="rounded-2xl border border-surface-700/30 bg-surface-800/40 p-6">
             <div className="card-header mb-5">
