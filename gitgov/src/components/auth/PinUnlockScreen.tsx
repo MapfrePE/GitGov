@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import { useAuthStore } from '@/store/useAuthStore'
+import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Button } from '@/components/shared/Button'
 import { Lock } from 'lucide-react'
 
 export function PinUnlockScreen() {
   const { user, pinError, unlockWithPin, logout } = useAuthStore()
+  const disconnect = useControlPlaneStore((s) => s.disconnect)
   const [pin, setPin] = useState('')
 
   const handleUnlock = () => {
@@ -47,7 +49,13 @@ export function PinUnlockScreen() {
             <Button className="flex-1" onClick={handleUnlock}>
               Desbloquear
             </Button>
-            <Button variant="secondary" onClick={() => void logout()}>
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                disconnect()
+                await logout()
+              }}
+            >
               Cambiar usuario
             </Button>
           </div>

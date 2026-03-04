@@ -1562,15 +1562,26 @@ impl ControlPlaneClient {
         let response = req
             .send()
             .map_err(|e| ServerError::NetworkError(e.to_string()))?;
-        if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|e| ServerError::NetworkError(e.to_string()))?;
+
+        if let Ok(parsed) = serde_json::from_str::<ChatAskResponse>(&body) {
+            return Ok(parsed);
+        }
+
+        if !status.is_success() {
+            let snippet = body.chars().take(180).collect::<String>();
             return Err(ServerError::ServerError(format!(
-                "Server returned status: {}",
-                response.status()
+                "Server returned status: {} ({})",
+                status, snippet
             )));
         }
-        response
-            .json()
-            .map_err(|e| ServerError::SerializationError(e.to_string()))
+
+        Err(ServerError::SerializationError(
+            "Invalid chat response payload".to_string(),
+        ))
     }
 
     pub fn create_feature_request(

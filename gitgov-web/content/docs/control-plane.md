@@ -86,7 +86,7 @@ GitGov only syncs metadata: event type, commit SHA, branch name, author login, t
 ## Network Requirements
 
 - **Protocol**: HTTP/1.1 or HTTP/2.
-- **Port**: Default `3000` (configurable via `GITGOV_SERVER_ADDR` on the server side).
+- **Port**: Configurable via `GITGOV_SERVER_ADDR` on the server side.
 - **Firewall**: Allow outbound traffic from developer workstations to the Control Plane host on the configured port.
 - **Production**: TLS (HTTPS) is strongly recommended. HTTP is supported for local evaluation only.
 

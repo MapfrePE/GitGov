@@ -86,7 +86,7 @@ GitGov solo sincroniza metadatos: tipo de evento, commit SHA, nombre de rama, lo
 ## Requisitos de Red
 
 - **Protocolo**: HTTP/1.1 o HTTP/2.
-- **Puerto**: Por defecto `3000` (configurable mediante `GITGOV_SERVER_ADDR` en el lado del servidor).
+- **Puerto**: Configurable mediante `GITGOV_SERVER_ADDR` en el lado del servidor.
 - **Firewall**: Permite el tráfico saliente desde las estaciones de trabajo al host del Control Plane en el puerto configurado.
 - **Producción**: Se recomienda encarecidamente TLS (HTTPS). HTTP solo se admite para evaluación local.
 

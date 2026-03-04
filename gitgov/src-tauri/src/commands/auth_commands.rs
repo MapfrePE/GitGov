@@ -188,6 +188,56 @@ pub fn cmd_validate_token(token: String) -> Result<AuthenticatedUser, String> {
     })
 }
 
+#[tauri::command]
+pub fn cmd_open_external_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(to_command_error("URL vacía", "INVALID_URL"));
+    }
+    let parsed =
+        reqwest::Url::parse(trimmed).map_err(|e| to_command_error(e, "INVALID_URL"))?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(to_command_error(
+            "Solo se permiten URLs http/https",
+            "INVALID_URL",
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", parsed.as_str()])
+            .spawn()
+            .map_err(|e| to_command_error(e, "OPEN_URL_ERROR"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(parsed.as_str())
+            .spawn()
+            .map_err(|e| to_command_error(e, "OPEN_URL_ERROR"))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(parsed.as_str())
+            .spawn()
+            .map_err(|e| to_command_error(e, "OPEN_URL_ERROR"))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(to_command_error(
+        "Plataforma no soportada para abrir enlaces externos",
+        "OPEN_URL_ERROR",
+    ))
+}
+
 pub fn get_token_for_user(username: &str) -> Option<String> {
     tracing::debug!(username = %username, "Attempting to load token from keyring");
     match load_token(username) {

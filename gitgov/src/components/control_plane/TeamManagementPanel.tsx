@@ -4,19 +4,17 @@ import { Badge } from '@/components/shared/Badge'
 import { formatTs } from '@/lib/timezone'
 
 export function TeamManagementPanel() {
-  const {
-    selectedOrgName,
-    teamOverview,
-    teamOverviewTotal,
-    teamRepos,
-    teamReposTotal,
-    teamWindowDays,
-    teamStatusFilter,
-    setTeamFilters,
-    loadTeamOverview,
-    loadTeamRepos,
-    displayTimezone,
-  } = useControlPlaneStore()
+  const selectedOrgName = useControlPlaneStore((s) => s.selectedOrgName)
+  const teamOverview = useControlPlaneStore((s) => s.teamOverview)
+  const teamOverviewTotal = useControlPlaneStore((s) => s.teamOverviewTotal)
+  const teamRepos = useControlPlaneStore((s) => s.teamRepos)
+  const teamReposTotal = useControlPlaneStore((s) => s.teamReposTotal)
+  const teamWindowDays = useControlPlaneStore((s) => s.teamWindowDays)
+  const teamStatusFilter = useControlPlaneStore((s) => s.teamStatusFilter)
+  const setTeamFilters = useControlPlaneStore((s) => s.setTeamFilters)
+  const loadTeamOverview = useControlPlaneStore((s) => s.loadTeamOverview)
+  const loadTeamRepos = useControlPlaneStore((s) => s.loadTeamRepos)
+  const displayTimezone = useControlPlaneStore((s) => s.displayTimezone)
 
   const [daysInput, setDaysInput] = useState(String(teamWindowDays))
   const [activeTab, setActiveTab] = useState<'devs' | 'repos'>('devs')

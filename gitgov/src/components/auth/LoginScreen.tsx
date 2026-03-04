@@ -3,10 +3,12 @@ import { useAuthStore } from '@/store/useAuthStore'
 import { Button } from '@/components/shared/Button'
 import { Spinner } from '@/components/shared/Spinner'
 import { Github, ExternalLink, Download, Copy, Check } from 'lucide-react'
-import { isTauriDesktop } from '@/lib/tauri'
+import { isTauriDesktop, tauriInvoke } from '@/lib/tauri'
+
+const GITHUB_DEVICE_URL = 'https://github.com/login/device'
 
 export function LoginScreen() {
-  const { authStep, deviceFlowInfo, error, startAuth, pollAuth, clearError } = useAuthStore()
+  const { authStep, deviceFlowInfo, error, startAuth, pollAuth, cancelAuth, clearError } = useAuthStore()
   const [copied, setCopied] = useState(false)
   const isDesktop = isTauriDesktop()
 
@@ -18,10 +20,21 @@ export function LoginScreen() {
     }
   }
 
-  const handleOpenGitHub = () => {
-    if (deviceFlowInfo) {
-      window.open(deviceFlowInfo.verification_uri, '_blank')
+  const handleOpenGitHub = async () => {
+    const deviceUrl =
+      deviceFlowInfo?.verification_uri?.includes('github.com/login/device')
+        ? deviceFlowInfo.verification_uri
+        : GITHUB_DEVICE_URL
+
+    if (isDesktop) {
+      try {
+        await tauriInvoke('cmd_open_external_url', { url: deviceUrl })
+        return
+      } catch {
+        // Fallback to browser open if native command fails.
+      }
     }
+    window.open(deviceUrl, '_blank', 'noopener,noreferrer')
   }
 
   if (!isDesktop) {
@@ -140,16 +153,22 @@ export function LoginScreen() {
                 Continuar
               </Button>
             </div>
+            <Button onClick={cancelAuth} variant="ghost" className="w-full mt-3">
+              Cancelar
+            </Button>
           </div>
         )}
 
         {authStep === 'polling' && (
           <div className="glass-card p-6 text-center animate-slide-up">
             <Spinner size="lg" className="mx-auto mb-4" />
-            <p className="text-white font-medium mb-1 text-sm">Esperando autorización...</p>
+            <p className="text-white font-medium mb-1 text-sm">Conectando con GitHub...</p>
             <p className="text-surface-500 text-xs">
-              Completa la autorización en GitHub
+              Validando autorización del Device Flow
             </p>
+            <Button onClick={cancelAuth} variant="ghost" className="w-full mt-4">
+              Cancelar
+            </Button>
           </div>
         )}
       </div>

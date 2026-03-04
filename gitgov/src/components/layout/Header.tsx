@@ -22,10 +22,14 @@ export function Header({ children }: HeaderProps) {
     refreshBranchSync,
     isLoadingStatus,
   } = useRepoStore()
-  const { isConnected, checkConnection } = useControlPlaneStore()
+  const isConnected = useControlPlaneStore((s) => s.isConnected)
+  const connectionStatus = useControlPlaneStore((s) => s.connectionStatus)
+  const checkConnection = useControlPlaneStore((s) => s.checkConnection)
 
   useEffect(() => {
-    const interval = setInterval(checkConnection, 30000)
+    const interval = setInterval(() => {
+      void checkConnection({ background: true })
+    }, 30000)
     return () => clearInterval(interval)
   }, [checkConnection])
 
@@ -42,10 +46,20 @@ export function Header({ children }: HeaderProps) {
             {repoPath?.split('/').pop() || 'Repositorio'}
           </span>
           <span
-            title={isConnected ? 'Servidor conectado' : 'Sin conexión al servidor'}
+            title={
+              connectionStatus === 'maintenance'
+                ? 'Servidor en mantenimiento'
+                : isConnected
+                  ? 'Servidor conectado'
+                  : 'Sin conexión al servidor'
+            }
             className={clsx(
               'w-2 h-2 rounded-full shrink-0',
-              isConnected ? 'bg-success-500' : 'bg-danger-500 animate-pulse'
+              connectionStatus === 'maintenance'
+                ? 'bg-warning-500 animate-pulse'
+                : isConnected
+                  ? 'bg-success-500'
+                  : 'bg-danger-500 animate-pulse'
             )}
           />
         </div>

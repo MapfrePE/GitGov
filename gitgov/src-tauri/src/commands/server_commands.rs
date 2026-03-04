@@ -65,144 +65,176 @@ fn to_command_error(e: impl std::fmt::Display, code: &str) -> String {
     .unwrap_or_else(|_| format!("{{\"code\":\"{}\",\"message\":\"{}\"}}", code, e))
 }
 
+async fn run_blocking_command<T, F>(task_name: &'static str, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| {
+            to_command_error(
+                format!("{}_THREAD_JOIN_ERROR: {}", task_name, e),
+                "SERVER_ERROR",
+            )
+        })?
+}
+
 #[tauri::command]
-pub fn cmd_server_sync_outbox(
+pub async fn cmd_server_sync_outbox(
     config: Option<ServerConnectionConfig>,
     outbox: State<'_, Arc<Outbox>>,
 ) -> Result<OutboxSyncResult, String> {
-    let pending_before = outbox.get_pending_count();
+    let outbox = outbox.inner().clone();
+    run_blocking_command("OUTBOX_SYNC", move || {
+        let pending_before = outbox.get_pending_count();
 
-    let normalized_config = config.and_then(|cfg| {
-        let url = normalize_loopback_url(&cfg.url);
-        if url.trim().is_empty() {
-            None
-        } else {
-            Some(ServerConnectionConfig {
-                url,
-                api_key: cfg
-                    .api_key
-                    .and_then(|k| {
+        let normalized_config = config.and_then(|cfg| {
+            let url = normalize_loopback_url(&cfg.url);
+            if url.trim().is_empty() {
+                None
+            } else {
+                Some(ServerConnectionConfig {
+                    url,
+                    api_key: cfg.api_key.and_then(|k| {
                         let trimmed = k.trim().to_string();
-                        if trimmed.is_empty() { None } else { Some(trimmed) }
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed)
+                        }
                     }),
-            })
-        }
-    });
-
-    outbox.set_server_config(
-        normalized_config.as_ref().map(|c| c.url.clone()),
-        normalized_config.as_ref().and_then(|c| c.api_key.clone()),
-    );
-
-    let mut flushed_sent = 0;
-    let mut flushed_duplicates = 0;
-    let mut flushed_failed = 0;
-
-    if normalized_config.is_some() && pending_before > 0 {
-        match outbox.flush() {
-            Ok(result) => {
-                flushed_sent = result.sent;
-                flushed_duplicates = result.duplicates;
-                flushed_failed = result.failed;
+                })
             }
-            Err(e) => {
-                return Err(to_command_error(e, "OUTBOX_SYNC_ERROR"));
+        });
+
+        outbox.set_server_config(
+            normalized_config.as_ref().map(|c| c.url.clone()),
+            normalized_config.as_ref().and_then(|c| c.api_key.clone()),
+        );
+
+        let mut flushed_sent = 0;
+        let mut flushed_duplicates = 0;
+        let mut flushed_failed = 0;
+
+        if normalized_config.is_some() && pending_before > 0 {
+            match outbox.flush() {
+                Ok(result) => {
+                    flushed_sent = result.sent;
+                    flushed_duplicates = result.duplicates;
+                    flushed_failed = result.failed;
+                }
+                Err(e) => {
+                    return Err(to_command_error(e, "OUTBOX_SYNC_ERROR"));
+                }
             }
         }
-    }
 
-    Ok(OutboxSyncResult {
-        pending_before,
-        pending_after: outbox.get_pending_count(),
-        flushed_sent,
-        flushed_duplicates,
-        flushed_failed,
+        Ok(OutboxSyncResult {
+            pending_before,
+            pending_after: outbox.get_pending_count(),
+            flushed_sent,
+            flushed_duplicates,
+            flushed_failed,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_health(config: ServerConnectionConfig) -> Result<bool, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .health_check()
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+pub async fn cmd_server_health(config: ServerConnectionConfig) -> Result<bool, String> {
+    run_blocking_command("HEALTH_CHECK", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .health_check()
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_send_event(
+pub async fn cmd_server_send_event(
     config: ServerConnectionConfig,
     payload: EventPayload,
 ) -> Result<String, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("SEND_EVENT", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    match client.send_event(&payload) {
-        Ok(response) => {
-            if response.received {
-                Ok(response.id)
-            } else {
-                Err(to_command_error(
-                    response
-                        .error
-                        .unwrap_or_else(|| "Unknown error".to_string()),
-                    "EVENT_ERROR",
-                ))
+        match client.send_event(&payload) {
+            Ok(response) => {
+                if response.received {
+                    Ok(response.id)
+                } else {
+                    Err(to_command_error(
+                        response
+                            .error
+                            .unwrap_or_else(|| "Unknown error".to_string()),
+                        "EVENT_ERROR",
+                    ))
+                }
             }
+            Err(e) => Err(to_command_error(e, "SERVER_ERROR")),
         }
-        Err(e) => Err(to_command_error(e, "SERVER_ERROR")),
-    }
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_get_logs(
+pub async fn cmd_server_get_logs(
     config: ServerConnectionConfig,
     filter: AuditFilter,
 ) -> Result<Vec<CombinedEvent>, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .get_logs(&filter)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    run_blocking_command("GET_LOGS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_logs(&filter)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_get_stats(config: ServerConnectionConfig) -> Result<ServerStats, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .get_stats()
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+pub async fn cmd_server_get_stats(config: ServerConnectionConfig) -> Result<ServerStats, String> {
+    run_blocking_command("GET_STATS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_stats()
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_get_daily_activity(
+pub async fn cmd_server_get_daily_activity(
     config: ServerConnectionConfig,
     filter: DailyActivityFilter,
 ) -> Result<Vec<DailyActivityPoint>, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .get_daily_activity(&filter)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    run_blocking_command("GET_DAILY_ACTIVITY", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_daily_activity(&filter)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_get_team_overview(
+pub async fn cmd_server_get_team_overview(
     config: ServerConnectionConfig,
     org_name: Option<String>,
     status: Option<String>,
@@ -210,402 +242,473 @@ pub fn cmd_server_get_team_overview(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<TeamOverviewResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .get_team_overview(
-            org_name.as_deref(),
-            status.as_deref(),
-            days.unwrap_or(30),
-            limit.unwrap_or(50),
-            offset.unwrap_or(0),
-        )
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    run_blocking_command("GET_TEAM_OVERVIEW", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_team_overview(
+                org_name.as_deref(),
+                status.as_deref(),
+                days.unwrap_or(30),
+                limit.unwrap_or(50),
+                offset.unwrap_or(0),
+            )
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_get_team_repos(
+pub async fn cmd_server_get_team_repos(
     config: ServerConnectionConfig,
     org_name: Option<String>,
     days: Option<i64>,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<TeamReposResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .get_team_repos(
-            org_name.as_deref(),
-            days.unwrap_or(30),
-            limit.unwrap_or(50),
-            offset.unwrap_or(0),
-        )
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    run_blocking_command("GET_TEAM_REPOS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_team_repos(
+                org_name.as_deref(),
+                days.unwrap_or(30),
+                limit.unwrap_or(50),
+                offset.unwrap_or(0),
+            )
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_get_jenkins_correlations(
+pub async fn cmd_server_get_jenkins_correlations(
     config: ServerConnectionConfig,
     filter: JenkinsCorrelationFilter,
 ) -> Result<Vec<CommitPipelineCorrelation>, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .get_jenkins_correlations(&filter)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    run_blocking_command("GET_JENKINS_CORRELATIONS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_jenkins_correlations(&filter)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_get_pr_merges(
+pub async fn cmd_server_get_pr_merges(
     config: ServerConnectionConfig,
     filter: PrMergeEvidenceFilter,
 ) -> Result<Vec<PrMergeEvidenceEntry>, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .get_pr_merges(&filter)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    run_blocking_command("GET_PR_MERGES", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_pr_merges(&filter)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_get_jira_ticket_coverage(
+pub async fn cmd_server_get_jira_ticket_coverage(
     config: ServerConnectionConfig,
     query: TicketCoverageQuery,
 ) -> Result<TicketCoverageResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .get_jira_ticket_coverage(&query)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    run_blocking_command("GET_JIRA_TICKET_COVERAGE", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_jira_ticket_coverage(&query)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_correlate_jira_tickets(
+pub async fn cmd_server_correlate_jira_tickets(
     config: ServerConnectionConfig,
     request: JiraCorrelateRequest,
 ) -> Result<JiraCorrelateResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .correlate_jira_tickets(&request)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    run_blocking_command("CORRELATE_JIRA_TICKETS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .correlate_jira_tickets(&request)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_get_jira_ticket_detail(
+pub async fn cmd_server_get_jira_ticket_detail(
     config: ServerConnectionConfig,
     ticket_id: String,
 ) -> Result<JiraTicketDetailResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .get_jira_ticket_detail(&ticket_id)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    run_blocking_command("GET_JIRA_TICKET_DETAIL", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_jira_ticket_detail(&ticket_id)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_get_me(config: ServerConnectionConfig) -> Result<MeResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-
-    client
-        .get_me()
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+pub async fn cmd_server_get_me(config: ServerConnectionConfig) -> Result<MeResponse, String> {
+    run_blocking_command("GET_ME", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_me()
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_create_org(
+pub async fn cmd_server_create_org(
     config: ServerConnectionConfig,
     payload: CreateOrgRequest,
 ) -> Result<CreateOrgResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("CREATE_ORG", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .create_org(&payload)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .create_org(&payload)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_create_org_user(
+pub async fn cmd_server_create_org_user(
     config: ServerConnectionConfig,
     payload: CreateOrgUserRequest,
 ) -> Result<CreateOrgUserResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("CREATE_ORG_USER", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .create_org_user(&payload)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .create_org_user(&payload)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_list_org_users(
+pub async fn cmd_server_list_org_users(
     config: ServerConnectionConfig,
     org_name: Option<String>,
     status: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<OrgUsersResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("LIST_ORG_USERS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .list_org_users(
-            org_name.as_deref(),
-            status.as_deref(),
-            limit.unwrap_or(50),
-            offset.unwrap_or(0),
-        )
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .list_org_users(
+                org_name.as_deref(),
+                status.as_deref(),
+                limit.unwrap_or(50),
+                offset.unwrap_or(0),
+            )
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_update_org_user_status(
+pub async fn cmd_server_update_org_user_status(
     config: ServerConnectionConfig,
     user_id: String,
     status: String,
 ) -> Result<OrgUser, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("UPDATE_ORG_USER_STATUS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .update_org_user_status(&user_id, &status)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .update_org_user_status(&user_id, &status)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_create_api_key_for_org_user(
+pub async fn cmd_server_create_api_key_for_org_user(
     config: ServerConnectionConfig,
     user_id: String,
 ) -> Result<ApiKeyResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("CREATE_ORG_USER_API_KEY", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .create_api_key_for_org_user(&user_id)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .create_api_key_for_org_user(&user_id)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_create_org_invitation(
+pub async fn cmd_server_create_org_invitation(
     config: ServerConnectionConfig,
     payload: CreateOrgInvitationRequest,
 ) -> Result<CreateOrgInvitationResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("CREATE_ORG_INVITATION", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .create_org_invitation(&payload)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .create_org_invitation(&payload)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_list_org_invitations(
+pub async fn cmd_server_list_org_invitations(
     config: ServerConnectionConfig,
     org_name: Option<String>,
     status: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<OrgInvitationsResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("LIST_ORG_INVITATIONS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .list_org_invitations(
-            org_name.as_deref(),
-            status.as_deref(),
-            limit.unwrap_or(50),
-            offset.unwrap_or(0),
-        )
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .list_org_invitations(
+                org_name.as_deref(),
+                status.as_deref(),
+                limit.unwrap_or(50),
+                offset.unwrap_or(0),
+            )
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_resend_org_invitation(
+pub async fn cmd_server_resend_org_invitation(
     config: ServerConnectionConfig,
     invitation_id: String,
     expires_in_days: Option<i64>,
 ) -> Result<CreateOrgInvitationResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("RESEND_ORG_INVITATION", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .resend_org_invitation(
-            &invitation_id,
-            &ResendOrgInvitationRequest { expires_in_days },
-        )
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .resend_org_invitation(
+                &invitation_id,
+                &ResendOrgInvitationRequest { expires_in_days },
+            )
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_revoke_org_invitation(
+pub async fn cmd_server_revoke_org_invitation(
     config: ServerConnectionConfig,
     invitation_id: String,
 ) -> Result<OrgInvitation, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("REVOKE_ORG_INVITATION", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .revoke_org_invitation(&invitation_id)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .revoke_org_invitation(&invitation_id)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_preview_org_invitation(
+pub async fn cmd_server_preview_org_invitation(
     config: ServerConnectionConfig,
     token: String,
 ) -> Result<OrgInvitation, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("PREVIEW_ORG_INVITATION", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .preview_org_invitation(&token)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .preview_org_invitation(&token)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_accept_org_invitation(
+pub async fn cmd_server_accept_org_invitation(
     config: ServerConnectionConfig,
     token: String,
     login: Option<String>,
 ) -> Result<AcceptOrgInvitationResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("ACCEPT_ORG_INVITATION", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .accept_org_invitation(&AcceptOrgInvitationRequest { token, login })
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .accept_org_invitation(&AcceptOrgInvitationRequest { token, login })
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_list_api_keys(config: ServerConnectionConfig) -> Result<Vec<ApiKeyInfo>, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+pub async fn cmd_server_list_api_keys(
+    config: ServerConnectionConfig,
+) -> Result<Vec<ApiKeyInfo>, String> {
+    run_blocking_command("LIST_API_KEYS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .list_api_keys()
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .list_api_keys()
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_revoke_api_key(
+pub async fn cmd_server_revoke_api_key(
     config: ServerConnectionConfig,
     key_id: String,
 ) -> Result<RevokeApiKeyResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("REVOKE_API_KEY", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .revoke_api_key(&key_id)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .revoke_api_key(&key_id)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_export(
+pub async fn cmd_server_export(
     config: ServerConnectionConfig,
     export_type: String,
     start_date: Option<i64>,
     end_date: Option<i64>,
     org_name: Option<String>,
 ) -> Result<ExportResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+    run_blocking_command("EXPORT_EVENTS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .export_events(&export_type, start_date, end_date, org_name.as_deref())
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .export_events(&export_type, start_date, end_date, org_name.as_deref())
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_server_list_exports(config: ServerConnectionConfig) -> Result<Vec<ExportLogEntry>, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
+pub async fn cmd_server_list_exports(
+    config: ServerConnectionConfig,
+) -> Result<Vec<ExportLogEntry>, String> {
+    run_blocking_command("LIST_EXPORTS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
 
-    client
-        .list_exports()
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+        client
+            .list_exports()
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
 }
 
 // ── Conversational Chat ──────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn cmd_server_chat_ask(
+pub async fn cmd_server_chat_ask(
     config: ServerConnectionConfig,
     request: ChatAskRequest,
 ) -> Result<ChatAskResponse, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-    client
-        .chat_ask(&request)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    tauri::async_runtime::spawn_blocking(move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client.chat_ask(&request)
+    })
+    .await
+    .map_err(|e| to_command_error(format!("CHAT_THREAD_JOIN_ERROR: {}", e), "SERVER_ERROR"))?
+    .map_err(|e| to_command_error(e, "SERVER_ERROR"))
 }
 
 #[tauri::command]
-pub fn cmd_server_create_feature_request(
+pub async fn cmd_server_create_feature_request(
     config: ServerConnectionConfig,
     input: FeatureRequestInput,
 ) -> Result<FeatureRequestCreated, String> {
-    let client = ControlPlaneClient::new(ServerConfig {
-        url: config.url,
-        api_key: config.api_key,
-    });
-    client
-        .create_feature_request(&input)
-        .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    tauri::async_runtime::spawn_blocking(move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client.create_feature_request(&input)
+    })
+    .await
+    .map_err(|e| to_command_error(format!("FEATURE_REQUEST_THREAD_JOIN_ERROR: {}", e), "SERVER_ERROR"))?
+    .map_err(|e| to_command_error(e, "SERVER_ERROR"))
 }

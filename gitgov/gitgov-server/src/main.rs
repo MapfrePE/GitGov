@@ -21,12 +21,12 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::handlers::AppState;
-use crate::models::UserRole;
 
 #[derive(Parser, Debug)]
 #[command(name = "gitgov-server", about = "GitGov Control Plane")]
@@ -258,35 +258,23 @@ async fn main() {
     // Or use the key from GITGOV_API_KEY env if configured
     let should_print_key = args.print_bootstrap_key || atty::is(atty::Stream::Stderr);
     
-    // Check if GITGOV_API_KEY is configured and insert it if not exists
+    // Check if GITGOV_API_KEY is configured and keep it active as global founder admin key
     if let Ok(env_api_key) = std::env::var("GITGOV_API_KEY") {
         let key_hash = format!("{:x}", sha2::Sha256::digest(env_api_key.as_bytes()));
-        
-        // Check if this key already exists
-        match db.validate_api_key(&key_hash).await {
-            Ok(Some(_)) => {
-                tracing::info!("GITGOV_API_KEY already exists in database");
-            }
-            Ok(None) => {
-                // Key doesn't exist, insert it
-                match db.create_api_key(&key_hash, "gitgov-desktop", None, &UserRole::Admin).await {
-                    Ok(_) => {
-                        tracing::info!("GITGOV_API_KEY inserted into database");
-                        if should_print_key {
-                            eprintln!();
-                            eprintln!("╔════════════════════════════════════════════════════════════════╗");
-                            eprintln!("║  GITGOV_API_KEY configured and ready                            ║");
-                            eprintln!("╚════════════════════════════════════════════════════════════════╝");
-                            eprintln!();
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to insert GITGOV_API_KEY: {}", e);
-                    }
+
+        match db.ensure_admin_api_key(&key_hash, "bootstrap-admin").await {
+            Ok(_) => {
+                tracing::info!("GITGOV_API_KEY ensured as active global Admin key");
+                if should_print_key {
+                    eprintln!();
+                    eprintln!("╔════════════════════════════════════════════════════════════════╗");
+                    eprintln!("║  GITGOV_API_KEY configured and ready                            ║");
+                    eprintln!("╚════════════════════════════════════════════════════════════════╝");
+                    eprintln!();
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to check GITGOV_API_KEY: {}", e);
+                tracing::error!("Failed to ensure GITGOV_API_KEY: {}", e);
             }
         }
     } else {
@@ -440,6 +428,9 @@ async fn main() {
     let llm_api_key = std::env::var("GEMINI_API_KEY").ok();
     let llm_model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string());
     let feature_request_webhook_url = std::env::var("FEATURE_REQUEST_WEBHOOK_URL").ok();
+    let chat_llm_max_concurrency = parse_usize_env("GITGOV_CHAT_LLM_MAX_CONCURRENCY", 4);
+    let chat_llm_queue_timeout_ms = parse_usize_env("GITGOV_CHAT_LLM_QUEUE_TIMEOUT_MS", 500) as u64;
+    let chat_llm_timeout_ms = parse_usize_env("GITGOV_CHAT_LLM_TIMEOUT_MS", 9000) as u64;
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -460,6 +451,10 @@ async fn main() {
         llm_api_key,
         llm_model,
         feature_request_webhook_url,
+        conversational_runtime: Arc::new(std::sync::Mutex::new(handlers::ConversationalRuntime::default())),
+        chat_llm_semaphore: Arc::new(Semaphore::new(chat_llm_max_concurrency)),
+        chat_llm_queue_timeout_ms,
+        chat_llm_timeout_ms,
     });
 
     // Keep utility APIs exercised in non-test builds so strict linting does not
@@ -545,6 +540,11 @@ async fn main() {
         parse_u32_env("GITGOV_RATE_LIMIT_ADMIN_PER_MIN", 60),
         Duration::from_secs(60),
     ));
+    let chat_rate_limit = Arc::new(InMemoryRateLimiter::new(
+        "chat_endpoints",
+        parse_u32_env("GITGOV_RATE_LIMIT_CHAT_PER_MIN", 40),
+        Duration::from_secs(60),
+    ));
     let jenkins_body_limit_bytes = parse_usize_env(
         "GITGOV_JENKINS_MAX_BODY_BYTES",
         256 * 1024,
@@ -562,6 +562,10 @@ async fn main() {
         jenkins_body_limit_bytes,
         jira_body_limit_bytes,
         admin_per_min = admin_rate_limit.limit,
+        chat_per_min = chat_rate_limit.limit,
+        chat_llm_max_concurrency,
+        chat_llm_queue_timeout_ms,
+        chat_llm_timeout_ms,
         "Rate limiting enabled for ingestion and admin endpoints"
     );
 
@@ -668,7 +672,10 @@ async fn main() {
         // Identity aliases — T3.B
         .route("/identities/aliases", post(handlers::create_identity_alias).get(handlers::list_identity_aliases))
         // Conversational Chat (MVP)
-        .route("/chat/ask", post(handlers::chat_ask))
+        .route("/chat/ask", post(handlers::chat_ask).layer(middleware::from_fn_with_state(
+            Arc::clone(&chat_rate_limit),
+            rate_limit_middleware,
+        )))
         .route("/feature-requests", post(handlers::create_feature_request_handler))
         .layer(middleware::from_fn_with_state(Arc::clone(&db), auth::auth_middleware));
 

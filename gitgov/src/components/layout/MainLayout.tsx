@@ -1,9 +1,11 @@
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import { useAuthStore } from '@/store/useAuthStore'
 import { useRepoStore } from '@/store/useRepoStore'
+import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Sidebar } from './Sidebar'
 import { LoginScreen } from '@/components/auth/LoginScreen'
 import { PinUnlockScreen } from '@/components/auth/PinUnlockScreen'
+import { ControlPlaneAuthScreen } from '@/components/auth/ControlPlaneAuthScreen'
 import { RepoSelector } from '@/components/repo/RepoSelector'
 import { Skeleton, SkeletonFileRow } from '@/components/shared/Skeleton'
 
@@ -14,6 +16,27 @@ interface MainLayoutProps {
 export function MainLayout({ children }: MainLayoutProps) {
   const { user, authStep, isLoading, isPinEnabled, pinUnlocked } = useAuthStore()
   const { repoPath } = useRepoStore()
+  const serverConfig = useControlPlaneStore((s) => s.serverConfig)
+  const isConnected = useControlPlaneStore((s) => s.isConnected)
+  const userRole = useControlPlaneStore((s) => s.userRole)
+  const userOrgId = useControlPlaneStore((s) => s.userOrgId)
+  const selectedOrgName = useControlPlaneStore((s) => s.selectedOrgName)
+  const disconnect = useControlPlaneStore((s) => s.disconnect)
+  const resetControlPlaneAuthGate = useControlPlaneStore((s) => s.resetControlPlaneAuthGate)
+  const refreshChatMessagesForActiveUser = useControlPlaneStore((s) => s.refreshChatMessagesForActiveUser)
+
+  useEffect(() => {
+    if (!user || authStep !== 'authenticated') {
+      resetControlPlaneAuthGate()
+      if (serverConfig || isConnected || userRole) {
+        disconnect()
+      }
+    }
+  }, [user, authStep, serverConfig, isConnected, userRole, disconnect, resetControlPlaneAuthGate])
+
+  useEffect(() => {
+    refreshChatMessagesForActiveUser()
+  }, [user?.login, refreshChatMessagesForActiveUser])
 
   if (isLoading) {
     return (
@@ -57,6 +80,17 @@ export function MainLayout({ children }: MainLayoutProps) {
 
   if (isPinEnabled && !pinUnlocked) {
     return <PinUnlockScreen />
+  }
+
+  const requiresOrgNameForAdminScope = userRole === 'Admin' && Boolean(userOrgId) && !selectedOrgName.trim()
+  const requiresControlPlaneAuth = Boolean(
+    user &&
+    authStep === 'authenticated' &&
+    (!isConnected || !userRole || requiresOrgNameForAdminScope),
+  )
+
+  if (requiresControlPlaneAuth) {
+    return <ControlPlaneAuthScreen />
   }
 
   if (!repoPath) {

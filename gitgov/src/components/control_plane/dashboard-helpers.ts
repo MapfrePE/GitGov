@@ -57,25 +57,47 @@ export function readDetailFiles(log: CombinedEvent): string[] {
 export interface DashboardRow { log: CombinedEvent; attachedFiles: string[] }
 
 export function buildDashboardRows(logs: CombinedEvent[]): DashboardRow[] {
-  const rows: DashboardRow[] = []
-  const consumedStageFileIds = new Set<string>()
-  for (let i = 0; i < logs.length; i++) {
-    const log = logs[i]
-    if (log.event_type === 'stage_files' || log.event_type !== 'commit') continue
-    let attachedFiles: string[] = []
-    for (let j = i + 1; j < logs.length; j++) {
-      const candidate = logs[j]
-      if (candidate.event_type !== 'stage_files') continue
-      if (consumedStageFileIds.has(candidate.id)) continue
-      if ((candidate.user_login ?? '') !== (log.user_login ?? '')) continue
-      const deltaMs = log.created_at - candidate.created_at
-      if (deltaMs < 0) continue
-      if (deltaMs > 10 * 60 * 1000) break
-      const files = readDetailFiles(candidate)
-      if (files.length > 0) { attachedFiles = files; consumedStageFileIds.add(candidate.id) }
-      break
+  const WINDOW_MS = 10 * 60 * 1000
+  const rowsAscending: DashboardRow[] = []
+  const pendingStageByUser = new Map<string, Array<{ created_at: number; files: string[] }>>()
+
+  // Process oldest -> newest so each commit can consume the closest prior stage_files.
+  for (let idx = logs.length - 1; idx >= 0; idx--) {
+    const log = logs[idx]
+    const login = (log.user_login ?? '').trim()
+
+    if (log.event_type === 'stage_files') {
+      if (!login) continue
+      const files = readDetailFiles(log)
+      if (!files.length) continue
+      const queue = pendingStageByUser.get(login) ?? []
+      queue.push({ created_at: log.created_at, files })
+      pendingStageByUser.set(login, queue)
+      continue
     }
-    rows.push({ log, attachedFiles })
+
+    if (log.event_type !== 'commit') continue
+
+    let attachedFiles: string[] = []
+    if (login) {
+      const queue = pendingStageByUser.get(login)
+      if (queue && queue.length > 0) {
+        // Drop stale candidates that are too old for this commit.
+        while (queue.length > 0 && (log.created_at - queue[0].created_at) > WINDOW_MS) {
+          queue.shift()
+        }
+        if (queue.length > 0) {
+          const candidate = queue.pop()
+          if (candidate && log.created_at >= candidate.created_at && (log.created_at - candidate.created_at) <= WINDOW_MS) {
+            attachedFiles = candidate.files
+          }
+        }
+        if (!queue.length) pendingStageByUser.delete(login)
+      }
+    }
+
+    rowsAscending.push({ log, attachedFiles })
   }
-  return rows
+
+  return rowsAscending.reverse()
 }

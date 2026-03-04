@@ -1,0 +1,276 @@
+{
+  "config": {
+    "server_url": "http://127.0.0.1:3000",
+    "requests": 30,
+    "concurrency": 4,
+    "timeout_sec": 25.0,
+    "scenario": "mixed"
+  },
+  "summary": {
+    "total_requests": 30,
+    "duration_sec": 1.8628037000307813,
+    "throughput_rps": 16.10475650198906,
+    "http_counts": {
+      "429": 30
+    },
+    "chat_status_counts": {
+      "http_error": 30
+    },
+    "error_counts": {
+      "http_error": 30
+    },
+    "latency_ms": {
+      "min": 177.42510000243783,
+      "max": 542.7458999911323,
+      "avg": 235.13705000126114,
+      "p50": 193.5339999909047,
+      "p95": 532.7557849814184,
+      "p99": 542.0295129885199,
+      "ok_p50": 0.0,
+      "ok_p95": 0.0,
+      "ok_p99": 0.0
+    }
+  },
+  "samples": [
+    {
+      "idx": 0,
+      "question": "¿cómo se conecta jenkins?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 542.75,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 1,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 523.56,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 2,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 540.28,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 3,
+      "question": "¿como conecto github a webhooks?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 522.9,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 4,
+      "question": "¿cómo actualizo la app desktop?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 186.1,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 5,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 177.43,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 6,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 180.81,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 7,
+      "question": "¿GitGov es open source?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 179.2,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 8,
+      "question": "¿como conecto github a webhooks?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 181.94,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 9,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 180.34,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 10,
+      "question": "¿cómo se conecta jenkins?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 179.53,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 11,
+      "question": "¿como conecto github a webhooks?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 190.42,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 12,
+      "question": "¿qué pasa si el servidor se cae?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 181.19,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 13,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 180.28,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 14,
+      "question": "¿cómo se conecta jira?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 196.45,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 15,
+      "question": "dame una guía para onboarding de org",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 199.1,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 16,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 200.31,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 17,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 195.24,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 18,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 197.28,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 19,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 197.54,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 20,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 193.79,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 21,
+      "question": "¿qué pasa si el servidor se cae?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 193.28,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 22,
+      "question": "¿cómo se conecta jira?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 181.0,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 23,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 180.77,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 24,
+      "question": "¿qué pasa si el servidor se cae?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 177.97,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 25,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 200.92,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 26,
+      "question": "¿como conecto github a webhooks?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 199.4,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 27,
+      "question": "¿cómo se conecta jenkins?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 204.15,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 28,
+      "question": "¿como conecto github a webhooks?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 191.35,
+      "error_kind": "http_error"
+    },
+    {
+      "idx": 29,
+      "question": "¿qué pasa si el servidor se cae?",
+      "http_code": 429,
+      "chat_status": "http_error",
+      "latency_ms": 198.83,
+      "error_kind": "http_error"
+    }
+  ]
+}

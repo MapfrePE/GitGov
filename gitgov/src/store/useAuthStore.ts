@@ -4,6 +4,10 @@ import type { AuthenticatedUser, DeviceFlowInfo } from '@/lib/types'
 
 type AuthStep = 'idle' | 'waiting_device' | 'polling' | 'authenticated'
 const LOCAL_PIN_KEY = 'gitgov.local_pin_v1'
+let authPollTimer: ReturnType<typeof setTimeout> | null = null
+const REQUIRE_DEVICE_FLOW_ON_START =
+  String(import.meta.env.VITE_REQUIRE_DEVICE_FLOW_ON_START ?? 'true').toLowerCase() !== 'false'
+const MIN_POLLING_VISUAL_MS = 900
 
 interface AuthState {
   user: AuthenticatedUser | null
@@ -19,6 +23,7 @@ interface AuthState {
 interface AuthActions {
   startAuth: () => Promise<void>
   pollAuth: () => Promise<void>
+  cancelAuth: () => void
   checkExistingSession: () => Promise<void>
   logout: () => Promise<void>
   setUser: (user: AuthenticatedUser) => void
@@ -52,6 +57,10 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
   pinError: null,
 
   startAuth: async () => {
+    if (authPollTimer) {
+      clearTimeout(authPollTimer)
+      authPollTimer = null
+    }
     set({ isLoading: true, error: null })
     try {
       const info = await tauriInvoke<DeviceFlowInfo>('cmd_start_auth')
@@ -65,14 +74,23 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
   pollAuth: async () => {
     const { deviceFlowInfo } = get()
     if (!deviceFlowInfo) return
+    if (authPollTimer) {
+      clearTimeout(authPollTimer)
+      authPollTimer = null
+    }
 
     set({ authStep: 'polling' })
 
     try {
+      const startedAt = Date.now()
       const user = await tauriInvoke<AuthenticatedUser>('cmd_poll_auth', {
         deviceCode: deviceFlowInfo.device_code,
         interval: deviceFlowInfo.interval,
       })
+      const elapsed = Date.now() - startedAt
+      if (elapsed < MIN_POLLING_VISUAL_MS) {
+        await new Promise((resolve) => setTimeout(resolve, MIN_POLLING_VISUAL_MS - elapsed))
+      }
       const hasPin = getStoredPin() !== null
       set({
         user,
@@ -86,17 +104,54 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
     } catch (e) {
       const error = parseCommandError(String(e))
       if (error.code === 'PENDING') {
-        setTimeout(() => get().pollAuth(), deviceFlowInfo.interval * 1000)
+        if (authPollTimer) {
+          clearTimeout(authPollTimer)
+        }
+        authPollTimer = setTimeout(() => {
+          authPollTimer = null
+          void get().pollAuth()
+        }, deviceFlowInfo.interval * 1000)
       } else if (error.code === 'SLOW_DOWN') {
-        setTimeout(() => get().pollAuth(), (deviceFlowInfo.interval + 5) * 1000)
+        if (authPollTimer) {
+          clearTimeout(authPollTimer)
+        }
+        authPollTimer = setTimeout(() => {
+          authPollTimer = null
+          void get().pollAuth()
+        }, (deviceFlowInfo.interval + 5) * 1000)
       } else {
+        if (authPollTimer) {
+          clearTimeout(authPollTimer)
+          authPollTimer = null
+        }
         set({ error: error.message, authStep: 'idle', isLoading: false })
       }
     }
   },
 
+  cancelAuth: () => {
+    if (authPollTimer) {
+      clearTimeout(authPollTimer)
+      authPollTimer = null
+    }
+    set({ authStep: 'idle', deviceFlowInfo: null, isLoading: false, error: null })
+  },
+
   checkExistingSession: async () => {
     set({ isLoading: true })
+    if (REQUIRE_DEVICE_FLOW_ON_START) {
+      // Product decision: every desktop restart must pass through GitHub Device Flow.
+      set({
+        user: null,
+        authStep: 'idle',
+        deviceFlowInfo: null,
+        isLoading: false,
+        error: null,
+        pinUnlocked: true,
+        pinError: null,
+      })
+      return
+    }
     try {
       const user = await tauriInvoke<AuthenticatedUser | null>('cmd_get_current_user')
       if (user) {
@@ -118,6 +173,10 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
   },
 
   logout: async () => {
+    if (authPollTimer) {
+      clearTimeout(authPollTimer)
+      authPollTimer = null
+    }
     const { user } = get()
     if (user) {
       try {

@@ -2,6 +2,512 @@
 
 ---
 
+## Actualización (2026-03-04) — Documentación: Golden Path incluye chatbot
+
+### Qué se actualizó (solo docs)
+- `docs/GOLDEN_PATH_CHECKLIST.md`
+  - Se añadió el chatbot como parte explícita del flujo crítico del Golden Path.
+  - Se agregó sección de validación de chatbot para Admin:
+    - `POST /chat/ask` operativo sin crash
+    - respuestas con datos verificables (sin inventar)
+    - comportamiento correcto cuando faltan datos (`insufficient_data`)
+    - contraste manual con `GET /admin-audit-log` para logs/acciones ("tags") de admin
+
+### Sin cambios de código
+- No se modificó lógica de backend/frontend en esta actualización.
+
+---
+
+## Actualización (2026-03-04) — Hotfix de rendimiento: comandos Tauri no bloquean UI
+
+### Causa raíz identificada
+- El cliente de Control Plane en Tauri usa `reqwest::blocking` (`gitgov/src-tauri/src/control_plane/server.rs`), pero varios `#[tauri::command]` seguían en modo síncrono.
+- Bajo carga (orgs grandes + consultas concurrentes), esos comandos podían bloquear el runtime de comandos y provocar congelamientos visibles (`No responde`).
+
+### Qué se implementó
+- `gitgov/src-tauri/src/commands/server_commands.rs`
+  - Se completó migración de comandos `cmd_server_*` restantes a `pub async fn` usando `run_blocking_command(...)` (wrapper sobre `tauri::async_runtime::spawn_blocking`).
+  - Comandos migrados en este bloque:
+    - `cmd_server_send_event`
+    - `cmd_server_create_org`
+    - `cmd_server_create_org_user`
+    - `cmd_server_list_org_users`
+    - `cmd_server_update_org_user_status`
+    - `cmd_server_create_api_key_for_org_user`
+    - `cmd_server_create_org_invitation`
+    - `cmd_server_list_org_invitations`
+    - `cmd_server_resend_org_invitation`
+    - `cmd_server_revoke_org_invitation`
+    - `cmd_server_preview_org_invitation`
+    - `cmd_server_accept_org_invitation`
+    - `cmd_server_list_api_keys`
+    - `cmd_server_revoke_api_key`
+    - `cmd_server_export`
+    - `cmd_server_list_exports`
+
+### Validación ejecutada
+- `cd gitgov/src-tauri && cargo check` → sin errores
+- `cd gitgov/src-tauri && cargo test` → `0 passed; 0 failed`
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/layout/Header.tsx src/components/control_plane/ServerDashboard.tsx src/components/control_plane/ServerConfigPanel.tsx` → 0 errores
+- `cd gitgov/gitgov-server && cargo test` → `79 passed; 0 failed`
+
+### Validación Golden Path (runtime local 127.0.0.1:3000)
+- `POST /events` con `Authorization: Bearer`:
+  - `accepted=1`, `duplicates=0`, `errors=0`
+- `GET /stats` con `Authorization: Bearer`:
+  - respuesta JSON válida (`github_total=0`, `client_total=334`, `active_repos=0`)
+- `GET /logs?limit=5&offset=0` con `Authorization: Bearer`:
+  - `events_count=5`
+
+### Impacto
+- Se elimina bloqueo sincrónico en capa de comandos Tauri para operaciones de Control Plane.
+- Se mantiene comportamiento funcional (mismos endpoints, mismo payload, auth `Bearer`, sin recortar features).
+
+---
+
+## Actualización (2026-03-04) — Hotfix de rendimiento: refresh pesado desacoplado + heartbeat liviano
+
+### Causa raíz identificada
+- El auto-refresh del dashboard (`cada 30s`) estaba ejecutando en paralelo consultas pesadas (`jenkins correlations`, `PR merge evidence`, `ticket coverage`) junto con el refresh base.
+- El heartbeat de conexión del header también corría cada 30s con estado de carga visible, aumentando renders globales innecesarios.
+- En orgs grandes, este patrón produce picos de CPU/red y congelamientos intermitentes de UI.
+
+### Qué se implementó
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - `refreshDashboardData(...)` ahora separa:
+    - **Core refresh** (siempre): `stats`, `daily activity`, `logs`.
+    - **Heavy refresh** (throttled): `jenkins correlations`, `pr merges`, `ticket coverage`.
+  - Se añadió TTL para refresh pesado: `HEAVY_DASHBOARD_REFRESH_MS = 5 min`.
+  - Se añadió `forceHeavy` para refresco manual explícito desde UI.
+  - `checkConnection(...)` acepta `{ background?: boolean }`:
+    - en background evita “loading churn” innecesario en heartbeat.
+  - `refreshForCurrentRole(...)` acepta `{ forceHeavy?: boolean }` y lo propaga.
+- `gitgov/src/components/control_plane/ServerDashboard.tsx`
+  - El botón manual de refresh ahora fuerza refresh pesado (`forceHeavy: true`).
+  - Auto-refresh mantiene solo path normal (rápido).
+- `gitgov/src/components/layout/Header.tsx`
+  - Heartbeat de conexión cada 30s en modo background (`checkConnection({ background: true })`).
+- `gitgov/src/components/control_plane/ServerConfigPanel.tsx`
+  - Ajuste de handlers (`onClick`) para nueva firma de `checkConnection`.
+
+### Validación ejecutada
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/layout/Header.tsx src/components/control_plane/ServerDashboard.tsx src/components/control_plane/ServerConfigPanel.tsx` → 0 errores
+- `cd gitgov/gitgov-server && cargo test` → `79 passed; 0 failed`
+
+### Validación Golden Path (runtime local 127.0.0.1:3000)
+- `POST /events` con `Authorization: Bearer`:
+  - `accepted=1`, `duplicates=0`, `errors=0`
+- `GET /stats` con `Authorization: Bearer`:
+  - `stats_ok=true`
+- `GET /logs?limit=5&offset=0` con `Authorization: Bearer`:
+  - `logs_count=5`
+
+### Impacto
+- Se reduce carga periódica de frontend/backend sin romper contratos ni auth.
+- Escala mejor para orgs con más repos/devs/eventos al evitar consultas pesadas en cada tick.
+
+---
+
+## Actualización (2026-03-03) — Chat con múltiples conversaciones (tabs `+` / `x`)
+
+### Qué se implementó
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - Nuevo modelo de sesiones de chat: `chatSessions` + `activeChatSessionId`.
+  - Persistencia por usuario GitHub con schema v2 por sesiones:
+    - `gitgov.chat_messages.v2.<github_login>`
+    - payload: `{ version: 2, active_session_id, sessions[] }`
+  - Migración compatible desde formato anterior (array simple de mensajes) a sesión única.
+  - Nuevas acciones:
+    - `createChatSession()`
+    - `setActiveChatSession(sessionId)`
+    - `closeChatSession(sessionId)`
+  - `clearChatMessages()` ahora limpia solo la conversación activa.
+  - Límite operativo: hasta 8 conversaciones, 80 mensajes por conversación.
+- `gitgov/src/components/control_plane/ConversationalChatPanel.tsx`
+  - Barra de tabs en el panel del bot:
+    - botón `+` para nueva conversación
+    - botón `x` por tab para cerrar
+    - cambio de conversación manteniendo historial independiente
+  - El título de cada tab se infiere de la primera pregunta del usuario.
+
+### Validación ejecutada
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ConversationalChatPanel.tsx` → 0 errores
+- `cd gitgov/gitgov-server && cargo test` → `79 passed; 0 failed`
+
+### Validación Golden Path (runtime local 127.0.0.1:3000)
+- `POST /events` con `Authorization: Bearer`:
+  - `accepted=1`, `duplicates=0`, `errors=0`
+- `GET /stats` con `Authorization: Bearer`:
+  - `stats_ok=true`
+- `GET /logs?limit=5&offset=0` con `Authorization: Bearer`:
+  - `logs_count=5`
+
+### Impacto
+- El chatbot ahora soporta varias conversaciones en el mismo espacio (tipo tabs), con apertura/cierre individual y estado persistente por usuario.
+- No se modificó auth (`Authorization: Bearer`) ni contratos compartidos (`ServerStats`, `CombinedEvent`).
+
+---
+
+## Actualización (2026-03-03) — Historial de chatbot aislado por usuario GitHub
+
+### Causa raíz identificada
+- Aunque se corrigió la limpieza en `disconnect()`, el historial seguía compartido por una sola key global de `localStorage`.
+- En escenarios de cambio de usuario, la nueva sesión podía heredar conversación de otra cuenta.
+
+### Qué se implementó
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - Se migró el storage a key por usuario: `gitgov.chat_messages.v2.<github_login>`.
+  - Se mantiene migración legacy (`gitgov.chat_messages`) solo cuando aún no existen keys scopeadas, evitando fuga de historial a cuentas adicionales.
+  - Se añadió `refreshChatMessagesForActiveUser()` para recargar historial activo según usuario autenticado.
+- `gitgov/src/components/layout/MainLayout.tsx`
+  - Nuevo efecto que recarga el historial al cambiar `user.login`, garantizando aislamiento entre cuentas.
+
+### Validación ejecutada
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/layout/MainLayout.tsx` → 0 errores
+- `cd gitgov/gitgov-server && cargo test` → `79 passed; 0 failed`
+
+### Validación Golden Path (runtime local 127.0.0.1:3000)
+- `POST /events` con `Authorization: Bearer`:
+  - `accepted=1`, `duplicates=0`, `errors=0`
+- `GET /stats` con `Authorization: Bearer`:
+  - `stats_ok=true`
+- `GET /logs?limit=5&offset=0` con `Authorization: Bearer`:
+  - `logs_count=5`
+
+### Impacto
+- Cada usuario ve y persiste su propio historial de chat.
+- No se alteró auth (`Authorization: Bearer`) ni contratos compartidos (`ServerStats`, `CombinedEvent`).
+
+---
+
+## Actualización (2026-03-03) — Corrección de persistencia del historial del chatbot
+
+### Causa raíz identificada
+- El store sí persistía el chat en `localStorage` (`CHAT_MESSAGES_STORAGE_KEY`), pero `disconnect()` lo borraba en cada desconexión.
+- `disconnect()` también se ejecuta en flujos automáticos de sesión (por ejemplo, cuando `MainLayout` detecta que la sesión GitHub no está autenticada), no solo en “clear chat”.
+- Resultado: al reautenticar/reiniciar, el historial desaparecía aunque el usuario no lo hubiera limpiado manualmente.
+
+### Qué se implementó
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - `disconnect()` ya no ejecuta `persistChatMessages([])`.
+  - `disconnect()` ya no fuerza `chatMessages: []` en el estado.
+  - Se mantiene `clearChatMessages()` como única acción explícita para borrar historial.
+
+### Validación ejecutada
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts` → 0 errores
+- `cd gitgov/gitgov-server && cargo test` → `79 passed; 0 failed`
+
+### Validación Golden Path (runtime local 127.0.0.1:3000)
+- `POST /events` con `Authorization: Bearer`:
+  - `accepted=1`, `duplicates=0`, `errors=0`
+- `GET /stats` con `Authorization: Bearer`:
+  - `stats_ok=true` (JSON válido con `github_events` y `client_events`)
+- `GET /logs?limit=5&offset=0` con `Authorization: Bearer`:
+  - `logs_count=5`
+
+### Impacto
+- El historial del chatbot vuelve a persistir entre reinicios/reautenticación.
+- No se alteró auth (`Authorization: Bearer`) ni contratos compartidos (`ServerStats`, `CombinedEvent`).
+
+---
+
+## Actualización (2026-03-03) — Mitigación de congelamiento “No responde” en Control Plane
+
+### Causa raíz identificada (evidencia técnica)
+- El auto-refresh del dashboard de Control Plane ejecutaba cada 30s, para Admin, un bloque de carga que incluía datos de Settings (`org_users`, `org_invitations`, `team_overview`, `team_repos`) aunque esa vista no estuviera abierta.
+- El efecto de `ServerDashboard` dependía de `isChatLoading`, así que al cerrar una respuesta del bot se disparaba un refresh completo adicional.
+- `/logs` en backend enriquecía eventos cliente con `WHERE id::text = ANY($1::text[])`, patrón que degrada uso de índice sobre UUID y escala mal cuando crece `client_events`.
+- La tabla de commits recalculaba estructuras pesadas por render (`buildDashboardRows` y correlaciones), amplificando el costo cuando había varios updates de estado seguidos.
+
+### Qué se implementó
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - Guardas de concurrencia para evitar corridas solapadas en `checkConnection` y `refreshForCurrentRole`.
+  - `refreshForCurrentRole` para Admin se enfocó en dashboard core (se removió refresh periódico de datos de Settings).
+  - `refreshDashboardData` dejó de hacer una segunda llamada `/logs` para `activeDevs7d`; ahora deriva esa métrica desde `serverLogs` ya cargados.
+  - Se agregó helper `buildActiveDevs7dFromLogs(...)` para cálculo consistente y reutilizable.
+- `gitgov/src/components/control_plane/ServerDashboard.tsx`
+  - El loop de auto-refresh usa `ref` para `isChatLoading`; ya no reconfigura ni dispara refresh inmediato por cada transición del chat.
+- `gitgov/src/components/control_plane/RecentCommitsTable.tsx`
+  - Se añadieron `useMemo`/`useCallback` y `React.memo` para evitar recomputación completa en renders no relacionados.
+- `gitgov/src/components/control_plane/RecentCommitsTable.tsx` (ajuste inmediato)
+  - Se retiró `React.memo` a nivel export para evitar error runtime observado en dev (`TypeError: Component is not a function`) y se mantuvieron optimizaciones internas con `useMemo`/`useCallback`.
+- `gitgov/src/components/control_plane/dashboard-helpers.ts`
+  - `buildDashboardRows` pasó de enfoque de búsqueda doble a procesamiento lineal con cola por usuario para emparejar `stage_files`→`commit`.
+- `gitgov/gitgov-server/src/db.rs`
+  - Optimización de enriquecimiento en `get_combined_events`: `id = ANY($1::uuid[])` en lugar de `id::text = ANY($1::text[])`.
+
+### Archivos
+- `gitgov/src/store/useControlPlaneStore.ts`
+- `gitgov/src/components/control_plane/ServerDashboard.tsx`
+- `gitgov/src/components/control_plane/RecentCommitsTable.tsx`
+- `gitgov/src/components/control_plane/dashboard-helpers.ts`
+- `gitgov/gitgov-server/src/db.rs`
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` → `79 passed; 0 failed`
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ServerDashboard.tsx src/components/control_plane/RecentCommitsTable.tsx src/components/control_plane/dashboard-helpers.ts` → 0 errores
+- `cd gitgov/gitgov-server && npx eslint src/db.rs` → 0 errores (warning esperado: archivo `.rs` ignorado por ESLint config)
+
+### Validación Golden Path (runtime local 127.0.0.1:3000)
+- `POST /events` con `Authorization: Bearer` y evento `commit` de prueba:
+  - `accepted=1`, `duplicates=0`, `errors=0`
+- `GET /stats` con `Authorization: Bearer`:
+  - responde JSON válido (`ServerStats`) sin `401`
+- `GET /logs?limit=5&offset=0` con `Authorization: Bearer`:
+  - responde `events` (conteo observado: 5) sin error de deserialización
+
+### Impacto Golden Path
+- No se modificó auth (`Bearer`) ni contrato compartido (`ServerStats`, `CombinedEvent`).
+- Se redujo carga de refresh en dashboard para evitar bloqueos de UI sin romper ingestión `/events` ni lectura `/stats` y `/logs`.
+
+---
+
+## Actualización (2026-03-03) — Chat Founder/Admin: cobertura integral del Control Plane + validación live
+
+### Qué se implementó
+- Se amplió el query engine conversacional para consultas ejecutivas de Control Plane:
+  - `ControlPlaneExecutiveSummary`
+  - `OnlineDevelopersNow`
+  - `CommitsWithoutTicketWindow`
+- Se conectaron estas consultas al handler del chat con respuesta determinística (sin inventar), usando SQL real y `data_refs`.
+- Se mantuvo la excepción founder global (`bootstrap-admin`, `Admin`, sin `org_id`) para resolver consultas analíticas sin `org_name` explícito.
+
+### Evidencia técnica (código)
+- Detección de nuevas intenciones:
+  - `gitgov/gitgov-server/src/handlers/conversational/core.rs:765-770`
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:221-331`
+- Capacidades expuestas al payload de conocimiento:
+  - `gitgov/gitgov-server/src/handlers/conversational/engine.rs:100-102`
+- Scope y excepción founder:
+  - `gitgov/gitgov-server/src/handlers/chat_handler.rs:1-6`
+  - `gitgov/gitgov-server/src/handlers/chat_handler.rs:22`
+  - `gitgov/gitgov-server/src/handlers/chat_handler.rs:445-448`
+- Respuestas determinísticas nuevas:
+  - `gitgov/gitgov-server/src/handlers/chat_handler.rs:562-767` (resumen ejecutivo)
+  - `gitgov/gitgov-server/src/handlers/chat_handler.rs:769-858` (devs ON, commits sin ticket)
+- SQL de métricas nuevas:
+  - `gitgov/gitgov-server/src/db.rs:4685` (`chat_query_pushes_no_ticket_count`)
+  - `gitgov/gitgov-server/src/db.rs:4715-4739` (`chat_query_commits_without_ticket_count`)
+  - `gitgov/gitgov-server/src/db.rs:4743-4764` (`chat_query_online_developers_count`)
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` → `79 passed; 0 failed`
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov/gitgov-server && npx eslint src/db.rs src/handlers/chat_handler.rs src/handlers/conversational/core.rs src/handlers/conversational/query.rs src/handlers/conversational/engine.rs src/handlers/tests.rs`
+  - Resultado: sin errores (warnings de “File ignored” por configuración ESLint no aplicable a `.rs`)
+
+### Validación live (runtime real en 127.0.0.1:3000)
+- `POST /chat/ask` — `"cuantos devs hay on ahora en control plane?"`
+  - `status=ok`, respuesta con conteo real (`Developers ON detectados: 1`)
+- `POST /chat/ask` — `"cuantos commits sin ticket hubo esta semana?"`
+  - `status=ok`, respuesta con conteo real (`36 en 168 horas`)
+- `POST /chat/ask` — `"dame todo lo que hay en el control plane, resumen ejecutivo"`
+  - `status=ok`, respuesta con bloque ejecutivo y scope `founder/global`
+- `POST /chat/ask` — `"cual fue el ultimo commit del usuario mapfrepe?"`
+  - `status=ok`, devuelve SHA `54cdab4...`, rama `main`, mensaje `feat: XD`, hora Lima+UTC coherente
+
+### Validación de sincronización temporal (/events → /logs → chat)
+- Se inyectó evento `commit` manual con timestamp fijo `2026-03-01T11:35:43Z` (ms: `1772364943000`) vía `POST /events`.
+- `GET /logs?event_type=commit` devolvió el mismo evento con:
+  - `details.event_uuid` exacto
+  - `created_at = 1772364943000` (match exacto con timestamp enviado)
+- `POST /chat/ask` para `sync_probe_user` devolvió:
+  - `Fecha del evento: 2026-03-01 06:35:43 (America/Lima) | 2026-03-01 11:35:43 UTC`
+
+### NO VERIFICADO
+- Restricción runtime para **admin no-founder sin org_name** en este entorno live con una key alterna no founder.
+  - Bloqueador: solo hubo key founder/admin disponible para pruebas live.
+  - Cobertura parcial existente: test unitario de excepción founder en `gitgov/gitgov-server/src/handlers/tests.rs:269-290`.
+
+---
+
+## Actualización (2026-03-03) — Login founder/admin estable + cancelación en Device Flow
+
+### Problema corregido
+- El Control Plane podía quedar en vista `Developer` por fallback erróneo cuando `/me` fallaba.
+- La `GITGOV_API_KEY` podía quedar inválida (`401`) si existía inactiva/revocada: al iniciar el server se intentaba insertar y fallaba por `duplicate key`.
+- El login GitHub Device Flow no tenía acción de cancelación durante espera/polling.
+
+### Qué se implementó
+- **Backend startup (`main.rs` + `db.rs`)**
+  - Nuevo `ensure_admin_api_key(...)` que hace upsert por `key_hash` y fuerza:
+    - `role = Admin`
+    - `org_id = NULL`
+    - `is_active = TRUE`
+    - `client_id = bootstrap-admin`
+  - `GITGOV_API_KEY` ahora se asegura como key founder/admin activa en cada arranque (ya no se rompe por `duplicate key` en keys inactivas).
+- **Frontend Control Plane (`useControlPlaneStore.ts`)**
+  - `loadMe()` deja de degradar a `Developer` cuando falla auth.
+  - Si `/me` falla, solo usa fallback de compatibilidad a `/stats` para servers antiguos; si no, deja rol en `null` con error explícito de API key inválida.
+  - `checkConnection()` ahora valida contexto de rol antes de marcar conexión `connected`.
+  - Si falla auth, intenta auto-recuperar con `VITE_API_KEY` (si es distinta de la key actual) y reintenta `/me`.
+- **Login UX (`useAuthStore.ts`, `LoginScreen.tsx`)**
+  - Se agregó `cancelAuth()` para abortar Device Flow.
+  - Se limpia correctamente el timer de polling para evitar estados colgados.
+  - Botón **Cancelar** visible en estados `waiting_device` y `polling`.
+- **Claridad de identidad Founder/Admin en UI (`ServerConfigPanel.tsx`, `SettingsPage.tsx`, `useControlPlaneStore.ts`)**
+  - Se añadió identidad visible de Control Plane (`role` + `client_id`) para eliminar ambigüedad entre login GitHub y rol API key.
+  - Se añadió acción explícita **`Usar Founder/Admin (.env)`** / **`Forzar Founder/Admin (.env)`** para aplicar `VITE_API_KEY` y reconectar automáticamente.
+  - Se mostró advertencia cuando la sesión está en rol no-admin aunque el usuario espere acceso founder/admin.
+- **Separación explícita GitHub vs Control Plane identity (`LoginScreen.tsx`, `useControlPlaneStore.ts`)**
+  - Se añadió login alternativo desde pantalla de autenticación: **Entrar con API key** (sin depender de Device Flow).
+  - Se implementó validación fuerte de identidad cruzada:
+    - `Device Flow` autentica GitHub usuario.
+    - `/me` autentica API key y devuelve `client_id/role`.
+    - Si `client_id` de API key no coincide con `login` de GitHub, se bloquea el rol Control Plane y se muestra error de identidad (sin fallback silencioso).
+  - Excepción founder controlada: `bootstrap-admin` solo se permite para login founder configurado por `VITE_FOUNDER_GITHUB_LOGIN` (o `VITE_FOUNDER_LOGIN`).
+- **Ajuste de UX por flujo correcto (2026-03-03, iteración)**
+  - Se removió el formulario de API key de la pantalla inicial de login.
+  - Nuevo paso intermedio **post-Device Flow**: `ControlPlaneAuthScreen` (Paso 2 de 2), donde se valida API key de Control Plane después de autenticar GitHub.
+  - Este flujo evita mezclar “iniciar sesión GitHub” con “autenticación de rol/scope Control Plane” en una sola pantalla.
+  - Se volvió **obligatorio** el paso de validación de Control Plane si no hay rol/sesión CP válida.
+  - Se añadió selector de perfil en Paso 2 (`Founder`, `Admin Org`, `Developer`) con copy específico para cada caso.
+  - Reforzado según QA:
+    - El botón de avance ahora exige verificación previa de identidad con `/me`.
+    - Se muestra explícitamente el resultado exacto de `/me` antes de continuar (`client_id`, `role`, `org_id`).
+    - Si perfil es `Admin Org`, se exige `org_name` activo y se muestra junto al resultado.
+    - Se añadió confirmación final previa al repo selector: **"Sesión CP validada como X en Y"** con botón explícito de continuar.
+    - Se cerró fuga de estado: al perder sesión GitHub, se resetea el gate de confirmación para evitar confirmaciones stale.
+  - Log hygiene Tauri dev:
+    - Se ajustó el logger de `src-tauri` para usar `EnvFilter` con default `info` y librerías de red en `warn`.
+    - Objetivo: suprimir ruido de desarrollo tipo `client connection error ... ConnectionReset (10054)` durante HMR de Vite sin ocultar errores reales de aplicación.
+
+### Archivos
+- `gitgov/gitgov-server/src/db.rs`
+- `gitgov/gitgov-server/src/main.rs`
+- `gitgov/src/store/useControlPlaneStore.ts`
+- `gitgov/src/store/useAuthStore.ts`
+- `gitgov/src/components/auth/LoginScreen.tsx`
+
+### Validación ejecutada
+- `cd gitgov && npm run typecheck` -> sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/store/useAuthStore.ts src/components/auth/LoginScreen.tsx` -> 0 errores
+- `cd gitgov/gitgov-server && cargo test` -> `76 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> sin errores
+
+---
+
+## Actualización (2026-03-03) — Excepción founder para chat global sin org_name
+
+### Qué se implementó
+- En `POST /chat/ask`, se añadió excepción de scope **solo** para la key founder global:
+  - `client_id = bootstrap-admin`
+  - `role = Admin`
+  - `org_id = None`
+- Con esa combinación, el chat ya no devuelve `This query needs an organization scope...` y permite consultas analíticas sin `org_name`.
+- La excepción **no aplica** a otros admins globales ni a keys scopeadas por org.
+
+### Archivos
+- `gitgov/gitgov-server/src/handlers/chat_handler.rs`
+- `gitgov/gitgov-server/src/handlers/tests.rs`
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `76 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> sin errores
+
+---
+
+## Actualización (2026-03-03) — Bloqueo anti-AWS en desarrollo
+
+### Qué se implementó
+- Se forzó el Control Plane URL en modo `dev` a `http://127.0.0.1:3000` desde el store, ignorando:
+  - input manual de URL,
+  - `VITE_SERVER_URL`,
+  - URL persistida en localStorage.
+- Se bloqueó el input de URL en el panel de conexión cuando `import.meta.env.DEV === true` y se muestra aviso visual de que la URL está fija en local.
+- Se ajustó `.env` de frontend para desarrollo local por defecto:
+  - `VITE_SERVER_URL=http://127.0.0.1:3000`
+
+### Archivos
+- `gitgov/src/store/useControlPlaneStore.ts`
+- `gitgov/src/components/control_plane/ServerConfigPanel.tsx`
+- `gitgov/.env`
+
+### Validación ejecutada
+- `cd gitgov && npm run typecheck` -> sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ServerConfigPanel.tsx` -> 0 errores
+- `cd gitgov/gitgov-server && cargo test` -> `75 passed; 0 failed`
+
+---
+
+## Actualización (2026-03-03) — Sincronización real de hora de eventos en chat/dashboard
+
+### Problema corregido
+- El Control Plane recibía `timestamp` desde Desktop en `POST /events`, pero los `INSERT` en `client_events` no persistían ese valor en `created_at`.
+- Resultado: el dashboard (`/logs`) y el chat de "último commit" ordenaban por hora de ingesta DB (NOW) en lugar de hora real del evento, generando desfases de día/hora cuando el outbox enviaba con retraso.
+
+### Qué se implementó
+- **`gitgov/gitgov-server/src/db.rs`**
+  - `insert_client_event(...)` y `insert_client_events_batch_tx(...)` ahora insertan `created_at = to_timestamp(event.created_at / 1000.0)`.
+  - `chat_query_user_last_commit(...)` se enriqueció con:
+    - `user_name`
+    - `event_uuid`
+    - `repo_full_name` (join con `repos`)
+    - `commit_message` (desde `metadata`)
+  - `get_combined_events(...)` ahora incluye `event_uuid` en `details` para eventos `client`, facilitando reconciliación exacta entre ingesta y `/logs`.
+  - Orden determinístico reforzado: `ORDER BY c.created_at DESC, c.id DESC`.
+- **`gitgov/gitgov-server/src/handlers/chat_handler.rs`**
+  - Respuesta de "último commit" ahora incluye, cuando existe: usuario (login + nombre), repo y mensaje de commit, además de hora en America/Lima y UTC.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` → `76 passed; 0 failed`
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ConversationalChatPanel.tsx` → 0 errores
+- Validación live local (`cargo run` + API key local):
+  - `POST /events` con `timestamp=1710000000000` y `user_login=tsfix...` → aceptado.
+  - `GET /logs?event_type=commit&user_login=tsfix...` → `created_at=1710000000000` (match exacto; antes quedaba en hora de ingesta).
+  - En esa misma lectura de `/logs`, `details.event_uuid` coincide con el `event_uuid` enviado en `/events`.
+  - `POST /chat/ask` (`"cual fue el ultimo commit del usuario mapfrepe?"`) → respuesta `ok` con SHA + mensaje + fecha Lima/UTC coherente con logs.
+
+### Impacto Golden Path
+- Cambia el path de ingesta `/events` (persistencia de `created_at`) y el flujo conversacional `/chat/ask` para "último commit".
+- No cambia auth (`Authorization: Bearer`) ni contrato de `ServerStats`/`CombinedEvent`.
+
+---
+
+## Actualización (2026-03-03) — Corrección de fechas del chat y “último commit” determinístico
+
+### Problema corregido
+- El chat podía devolver fechas incoherentes en respuestas de “último commit” al depender de salida no determinística del LLM.
+- Preguntas de reclamo de fechas (ej. “¿cómo es posible 04 si hoy es 03?”) estaban mal clasificadas como consulta de hora actual o ayuda genérica.
+
+### Qué se implementó
+- **`gitgov/gitgov-server/src/db.rs`**:
+  - Nueva query `chat_query_user_last_commit(user_login, org_id)` (alias-aware) para obtener el commit más reciente con `commit_sha`, `branch` y `timestamp` en ms.
+- **`gitgov/gitgov-server/src/handlers/chat_handler.rs`**:
+  - Nueva ruta determinística `ChatQuery::UserLastCommit`:
+    - responde con SHA, rama y fecha exacta en **America/Lima** y **UTC**.
+  - Nueva ruta `ChatQuery::DateMismatchClarification` para explicar desfases de fecha por zona horaria/LLM y evitar respuestas irrelevantes.
+- **`gitgov/gitgov-server/src/handlers/conversational/query.rs`**:
+  - Detección explícita de consultas de “último commit”.
+  - Detección explícita de reclamos de inconsistencia de fecha.
+  - Se redujo sobre-clasificación:
+    - “hora/fecha actual” ya no se activa por cualquier aparición de `hoy/date/time`.
+    - `GuidedHelp` ya no se activa por cualquier `como/cómo`.
+- **`gitgov/gitgov-server/src/handlers/conversational/core.rs`**:
+  - Se añadió `ChatQuery::DateMismatchClarification`.
+- **`gitgov/gitgov-server/src/handlers/tests.rs`**:
+  - Nuevos tests para:
+    - `UserLastCommit`
+    - `DateMismatchClarification`
+  - Actualización del test de accuracy para incluir ambas clases.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` → `75 passed; 0 failed`
+- `cd gitgov && npm run typecheck` → OK
+
+### Impacto Golden Path
+- No se modificaron `/events`, `/stats`, `/logs`, auth Bearer ni outbox.
+- Cambio acotado al flujo conversacional (`/chat/ask`) y query engine de chat.
+
+---
+
 ## Actualización (2026-03-01) — Zona Horaria Configurable en Audit Trail
 
 ### Motivación
@@ -1661,3 +2167,490 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
 - Validación ejecutada:
   - `cd gitgov/gitgov-server && cargo test` -> `52 passed; 0 failed`
   - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> sin errores
+
+## 2026-03-01 - Cierre de sesión (deploy real EC2 + validación end-to-end chatbot)
+
+- Deploy manual completado en EC2 del backend actualizado:
+  - build release en host Linux (`cargo build --release`)
+  - instalación del binario en `/opt/gitgov/bin/gitgov-server`
+  - reinicio de servicio `gitgov-server` por systemd
+- Problemas resueltos durante despliegue:
+  - `404 /chat/ask` por binary viejo en runtime (se corrigió tras redeploy)
+  - error Gemini por modelo deprecado (`gemini-2.0-flash`) -> migrado a modelo configurable (`GEMINI_MODEL`) y uso de modelo vigente
+  - cuota/billing Gemini habilitada en proyecto correcto para eliminar `429`.
+- Validación funcional live en EC2 (`http://127.0.0.1:3000/chat/ask`) con Bearer admin:
+  - consulta analítica real: "¿Cuántos commits ha hecho el usuario MapfrePE?" -> `status: ok`, respuesta numérica real, `data_refs: ["client_events"]`
+  - saludo: `status: ok` con respuesta conversacional
+  - fecha/hora: `status: ok` con hora Lima y UTC
+  - guía paso a paso Jira: `status: ok` con instrucciones accionables
+  - capacidad de Control Plane: `status: ok` explicando alcance real del bot
+- Estado final de sesión:
+  - chatbot operativo en producción EC2
+  - consultas SQL + guía conversacional funcionando
+  - contexto de producto ampliado en backend sin romper tests
+
+## 2026-03-01 - Fix parser de commits en chatbot (evitar falsos usuarios)
+
+- Problema detectado:
+  - preguntas como `cuantos commits hay ... de esta sesion` podían interpretar `esta` como si fuera `user_login`, devolviendo conteos incorrectos o respuestas inconsistentes.
+  - follow-ups tipo `y del usuario X` / `todo el historial` podían caer en respuesta KB en vez de respuesta analítica clara.
+- Cambios backend (`gitgov-server/src/handlers.rs`):
+  - nueva función `extract_user_login(...)` con extracción más estricta:
+    - prioriza marcadores explícitos (`usuario X`, `del usuario X`, `user X`)
+    - fallback solo en contexto de commits (`commits de X`, `commit by X`)
+  - `detect_query(...)` ahora usa `trim()` al inicio para robustez en mensajes con espacios iniciales.
+  - se mantiene respuesta determinística para intents SQL (`UserCommitsCount`, `UserCommitsRange`, etc.) sin depender de LLM.
+  - nuevo intent `NeedUserForCommitHistory` para responder `insufficient_data` útil cuando piden historial sin especificar usuario.
+- Resultado esperado:
+  - preguntas de conteo por usuario responden con datos reales de `client_events`.
+  - disminuyen respuestas genéricas de documentación en consultas analíticas.
+  - cobertura de regresión agregada con tests del parser de intención (`detect_query_*`).
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `54 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> sin errores
+  - `cd gitgov && npm run typecheck` -> sin errores
+
+## 2026-03-02 - Chatbot v3 (NLP + contexto dinámico + TODO runtime + aprendizaje)
+
+- Se refactorizó `handlers.rs` para evolucionar el chat desde un flujo estático hacia un módulo conversacional más avanzado:
+  - **NLP/Intent Engine**:
+    - Nuevos tipos `NlpIntent`, `NlpEntities`, `NlpAnalysis`.
+    - Detección de idioma (`detect_language`), extracción de entidades (`user_login`, `repo`, `branch`) y detección de acciones TODO.
+    - Intents soportados: greeting, farewell, gratitude, ask_datetime, ask_capabilities, guided_help, query_analytics, todo_add, todo_list, todo_complete, feedback_positive/negative, unknown.
+  - **Gestión de contexto dinámica**:
+    - Nuevo runtime en memoria `ConversationalRuntime` dentro de `AppState`.
+    - Estado por sesión (`ConversationState`) con historial de turnos, slots semánticos, TODOs, aprendizaje y snapshot de proyecto.
+    - Clave de sesión por `client_id + org_scope`.
+  - **Base de conocimiento estructurada + estado vivo**:
+    - Se conserva KB existente y se envuelve en payload conversacional avanzado.
+    - Nuevo `refresh_project_snapshot_if_stale(...)` para adjuntar estado live (`stats` + `job_metrics`) al contexto conversacional.
+  - **Respuesta contextual con prioridad**:
+    - Motor de decisión prioriza: SQL determinístico, TODO runtime, ayuda guiada, luego LLM.
+    - Respuestas determinísticas para consultas críticas (pushes sin ticket, bloqueados del mes, commits por usuario/rango).
+  - **Integración TODO**:
+    - Crear/listar/completar tareas desde chat.
+    - Sugerencias proactivas automáticas a TODO según snapshot (bloqueos, violaciones, dead jobs).
+  - **Personalidad y consistencia**:
+    - Mensajes consistentes para saludo, despedida, feedback positivo/negativo y errores de LLM.
+  - **Aprendizaje básico por uso**:
+    - Contadores por intent, métricas de éxito/insuficiencia y feedback positivo/negativo por sesión.
+    - Preferencia de idioma mantenida en slots.
+
+- Cambios de wiring:
+  - `main.rs`: `AppState` ahora inicializa `conversational_runtime`.
+  - `handlers.rs`: nueva función `finalize_chat_response(...)` para persistir historial/aprendizaje en todas las salidas del handler.
+
+- Tests añadidos (backend):
+  - detección de idioma español.
+  - detección NLP de TODO + entidad de usuario.
+  - ciclo de vida TODO (add/list/complete).
+  - generación de TODOs proactivos desde snapshot.
+  - se mantienen tests de parser de commits previos.
+
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `58 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> sin errores
+  - `cd gitgov && npm run typecheck` -> sin errores
+
+## 2026-03-02 - Chatbot v3.1 (contexto conversacional más profundo + fallback robusto)
+
+- Mejoras aplicadas en `gitgov/gitgov-server/src/handlers.rs`:
+  - **Nuevas consultas determinísticas**:
+    - `SessionCommitsCount`: responde commits en la sesión conversacional actual, con o sin usuario.
+    - `TotalCommitsCount`: responde total de commits del Control Plane dentro del scope de la API key.
+  - **Seguimiento conversacional mejorado**:
+    - Se agregó `session_started_ms` en `ConversationState`.
+    - Se inicializa estado de sesión al primer turno y se usa para resolver preguntas tipo “esta sesión”.
+    - Follow-up “en todo el historial” ahora reutiliza `last_user_login` cuando existe contexto previo.
+  - **Fallback inteligente sin LLM**:
+    - Nuevo ranking reusable de KB (`rank_project_knowledge`).
+    - Si falla Gemini (cuota/timeout/error), el bot ya no cae a mensaje genérico: responde con contexto local estructurado y accionable.
+  - **Payload de IA más rico**:
+    - Se añadió `project_state_summary` con KPIs clave (blocked pushes, commits, devs/repos activos, violaciones, dead jobs).
+    - Ajuste de estilo por aprendizaje (`high_precision` vs `balanced`) según feedback acumulado de la sesión.
+  - **Cobertura de capacidades declaradas**:
+    - KB ahora anuncia explícitamente `session_commits_count` y `total_commits_count` dentro del bloque `query_engine`.
+
+- Cambios en DB (`gitgov/gitgov-server/src/db.rs`):
+  - Nuevo método `chat_query_commits_count(start_ms, end_ms, org_id)` para contar commits por ventana temporal y scope de organización.
+
+- Testing ampliado:
+  - Nuevos tests para:
+    - detección de queries de sesión con/sin usuario,
+    - total commits,
+    - follow-up corto “en todo el historial”,
+    - fallback de conocimiento,
+    - benchmark de clasificación del query engine con umbral mínimo `>= 90%`.
+
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `63 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> sin errores
+  - `cd gitgov && npm run typecheck` -> sin errores
+
+## 2026-03-02 - Chat UX fix (persistencia + respuestas de producto)
+
+- Se mejoró la experiencia del chat en dos frentes:
+  - gitgov/src/store/useControlPlaneStore.ts:
+    - Persistencia local de historial de chat (chatMessages) usando localStorage.
+    - Restauración automática del historial al iniciar la app.
+    - Persistencia en cada mensaje (usuario, asistente y error) con límite de 100 mensajes.
+    - Limpieza consistente del historial persistido en clearChatMessages y disconnect.
+  - gitgov/gitgov-server/src/handlers.rs:
+    - Nuevas respuestas guiadas determinísticas para preguntas de producto frecuentes: pricing/gratis, descarga desktop, warning de firma en Windows/SmartScreen, disponibilidad por sistema operativo y contacto de soporte.
+    - Enrutamiento de intención para estas preguntas hacia GuidedHelp incluso cuando el usuario no usa palabras como "ayuda" o "configurar".
+
+- Objetivo del cambio:
+  - Evitar respuestas genéricas/repetitivas para preguntas comerciales y de distribución.
+  - Mantener contexto de conversación del lado frontend tras reiniciar la app.
+## 2026-03-03 - Chat hardening (menos respuestas genéricas + KB web)
+
+- Se reforzó el comportamiento del asistente en gitgov/gitgov-server/src/handlers.rs para producción:
+  - Se añadió una nueva base WEB_FAQ_KNOWLEDGE_BASE con conocimiento de gitgov-web (FAQ/docs públicos) para temas de producto: plataformas soportadas, open source, privacidad del chat, offline/outbox, actualizaciones, integraciones, self-host, pricing/contacto, SmartScreen.
+  - ank_project_knowledge(...) ahora rankea de dos fuentes (project_docs_kb + web_docs_faq) y adjunta source por snippet.
+  - Se agregó uild_grounded_knowledge_answer(...): respuesta directa basada en KB cuando hay match confiable y la pregunta no requiere datos analíticos en vivo.
+  - Se agregó should_override_llm_answer_with_kb(...): si el LLM responde genérico o insufficient_data pero existe KB relevante, se reemplaza por respuesta grounded.
+  - Se integró el grounding en dos puntos del flujo:
+    - antes de llamar al LLM (respuesta local inmediata para preguntas de producto/documentación),
+    - después de la respuesta del LLM (override anti-respuesta-genérica).
+  - uild_guided_help_answer(...) ahora intenta grounding KB antes de caer al mensaje genérico "opciones frecuentes".
+  - Se amplió el enrutamiento de detect_query(...) para preguntas de producto comunes (open source, código fuente, plataformas, integraciones, soporte, pricing, etc.).
+  - uild_project_knowledge_payload(...) ahora incluye snippets con source y mezcla semilla de ambas bases para contexto de modelo más robusto.
+
+- Tests backend agregados:
+  - grounded_knowledge_answer_uses_web_faq_for_platform_questions
+  - insufficient_llm_answer_is_overridden_when_kb_has_confident_match
+
+- Validación ejecutada:
+  - cd gitgov/gitgov-server && cargo test -> 65 passed; 0 failed
+  - cd gitgov && npm run typecheck -> sin errores
+## 2026-03-03 - UI performance hardening para chat (eliminar micro-freezes)
+
+- Se aplicó optimización de render en frontend para evitar bloqueos breves al responder el chat:
+  - Se eliminaron suscripciones globales (useControlPlaneStore()) en vistas/paneles críticos y se reemplazaron por selectores granulares por campo.
+  - Archivos optimizados: ControlPlanePage, Header, ServerDashboard, ConversationalChatPanel, RecentCommitsTable, TicketCoverageWidget, ServerConfigPanel, MaintenanceOverlay, DeveloperAccessPanel, ExportPanel, TeamManagementPanel, AdminOnboardingPanel, ApiKeyManagerWidget, SettingsPage, App.
+  - Efecto esperado: updates de chatMessages/isChatLoading ya no fuerzan re-render completo del dashboard y widgets pesados.
+
+- Se redujo costo de persistencia de chat (useControlPlaneStore.ts):
+  - Persistencia desacoplada del mismo turno de render (escritura diferida con setTimeout(0)).
+  - Límite de historial persistido: 80 mensajes.
+  - Recorte de payload para storage en mensajes/respuestas extensas (tope ~4000 chars por campo) y data_refs truncado.
+  - Limpieza de storage optimizada cuando el historial queda vacío.
+
+- Ajuste de UX técnico:
+  - scrollIntoView del chat pasó de smooth a uto para reducir costo de layout/paint en actualizaciones frecuentes.
+
+- Validación ejecutada:
+  - cd gitgov && npm run typecheck -> sin errores
+  - cd gitgov && npx eslint <archivos tocados> -> 0 errores
+- Ajuste de colaboración: se removió del AGENTS.md la sección obligatoria de formato de respuesta "Modo Auditor" para evitar respuestas rígidas y mejorar UX en iteraciones de producto.
+## 2026-03-03 - Chat stability + seguridad + consultas determinísticas por usuario
+
+- Se corrigió una causa estructural del freeze de UI en chat desktop:
+  - gitgov/src-tauri/src/commands/server_commands.rs:
+    - cmd_server_chat_ask migrado a comando async con 	auri::async_runtime::spawn_blocking.
+    - cmd_server_create_feature_request también migrado a spawn_blocking para evitar bloqueo del hilo UI.
+  - Resultado esperado: durante llamadas de red/LLM, la ventana ya no debería entrar en estado "No responde" por bloqueo directo del comando síncrono.
+
+- Se reforzó seguridad del chatbot para evitar exposición de secretos:
+  - gitgov/gitgov-server/src/handlers.rs:
+    - Nueva detección is_secret_exfiltration_request(...) para rechazar solicitudes de extracción de API keys/tokens.
+    - Sanitización central de respuestas sanitize_chat_answer_text(...) para redacción de patrones sensibles (UUID/tokens Bearer) antes de persistir/devolver.
+    - Prompt del sistema endurecido: prohibición explícita de revelar/reconstruir secretos.
+
+- Se corrigieron respuestas incoherentes de follow-up y se ampliaron consultas determinísticas por usuario:
+  - Nuevas rutas de consulta en handlers.rs:
+    - UserAccessProfile (rol/estado + existencia de key activa, sin exponer valores)
+    - UserBlockedPushesMonth
+    - UserPushesNoTicketWeek
+    - UserScopeClarification para evitar asumir incorrectamente "commits" ante follow-ups ambiguos tipo "y del usuario X?".
+  - Se añadieron heurísticas de continuidad conversacional usando last_user_login para preguntas de perfil/blocked/sin-ticket sin repetir usuario.
+
+- Se corrigió mismatch entre UI (alias canónico) y consultas chat en DB:
+  - gitgov/gitgov-server/src/db.rs:
+    - chat_query_user_commits_count y chat_query_user_commits_range ahora son alias-aware vía identity_aliases.
+    - Nuevos métodos alias-aware:
+      - chat_query_user_blocked_pushes_month
+      - chat_query_user_pushes_no_ticket_week
+      - chat_query_user_access_profile
+  - Resultado esperado: preguntas sobre usuarios visibles en dashboard/logs canónicos (ej. MapfrePE) ahora resuelven mejor en chat.
+
+- Validación ejecutada:
+  - cd gitgov/gitgov-server && cargo test -> 70 passed; 0 failed
+  - cd gitgov/src-tauri && cargo check -> sin errores
+  - cd gitgov && npm run typecheck -> sin errores
+  - cd gitgov && npx eslint <archivos frontend tocados> -> 0 errores
+## 2026-03-03 - Benchmark de capacidad del chat (p50/p95/p99 + throughput)
+
+- Se añadió benchmark reproducible específico para chat (no solo webhooks/jobs):
+  - Nuevo script: `gitgov/gitgov-server/tests/chat_capacity_test.py`
+  - Métricas: distribución HTTP/status del chat, p50/p95/p99, throughput (RPS), errores de red/timeouts.
+  - Escenarios incluidos: `deterministic`, `mixed`, `llm_forced`.
+  - Soporta `--out-json` para artefactos en CI o comparación histórica.
+
+- Se añadió target de Makefile:
+  - `make chat-bench` con variables:
+    - `SERVER_URL` (default `http://127.0.0.1:3000`)
+    - `API_KEY`
+    - `CHAT_REQUESTS`
+    - `CHAT_CONCURRENCY`
+    - `CHAT_SCENARIO`
+
+- Corridas ejecutadas (local):
+  1. `python tests/chat_capacity_test.py --server-url http://127.0.0.1:3000 --requests 60 --concurrency 6 --scenario deterministic --out-json tests/artifacts/chat_capacity_deterministic.json`
+     - throughput: **3.09 rps**
+     - latency: **p50 488 ms / p95 5757 ms / p99 6484 ms**
+     - HTTP: `200=60/60`
+  2. `python tests/chat_capacity_test.py --server-url http://127.0.0.1:3000 --requests 60 --concurrency 6 --scenario mixed --out-json tests/artifacts/chat_capacity_mixed.json`
+     - throughput: **2.35 rps**
+     - latency: **p50 2682 ms / p95 5856 ms / p99 6182 ms**
+     - HTTP: `200=59/60`, `network_error=1`
+  3. `python tests/chat_capacity_test.py --server-url http://127.0.0.1:3000 --requests 30 --concurrency 4 --scenario llm_forced --out-json tests/artifacts/chat_capacity_llm_forced.json`
+     - throughput: **0.76 rps**
+     - latency: **p50 5827 ms / p95 6744 ms / p99 6870 ms**
+     - HTTP: `200=29/30`, `network_error=1`
+
+- Artefactos generados:
+  - `gitgov/gitgov-server/tests/artifacts/chat_capacity_deterministic.json`
+  - `gitgov/gitgov-server/tests/artifacts/chat_capacity_mixed.json`
+  - `gitgov/gitgov-server/tests/artifacts/chat_capacity_llm_forced.json`
+
+## 2026-03-03 - Control de capacidad activo para /chat/ask
+
+- Se implementó control de capacidad en backend para chat (además del benchmark):
+  - `gitgov/gitgov-server/src/main.rs`:
+    - Nuevo rate limit dedicado para chat: `GITGOV_RATE_LIMIT_CHAT_PER_MIN` (default 40/min), aplicado a `POST /chat/ask`.
+    - Nuevas variables de runtime para LLM:
+      - `GITGOV_CHAT_LLM_MAX_CONCURRENCY` (default 4)
+      - `GITGOV_CHAT_LLM_QUEUE_TIMEOUT_MS` (default 500 ms)
+      - `GITGOV_CHAT_LLM_TIMEOUT_MS` (default 9000 ms)
+  - `gitgov/gitgov-server/src/handlers.rs`:
+    - Cola/concurrencia con semáforo (`chat_llm_semaphore`) para evitar saturación de llamadas simultáneas al proveedor LLM.
+    - Timeout de cola: si no se obtiene slot a tiempo, responde rápido con estado ocupado (429) en lugar de bloquear.
+    - Timeout de llamada LLM: si excede el umbral, devuelve fallback/timeout controlado (504) manteniendo contexto conversacional.
+
+- Objetivo del cambio:
+  - Evitar acumulación de requests lentos en chat.
+  - Proteger estabilidad para múltiples usuarios/teams y reducir la sensación de freeze.
+  - Hacer degradación controlada bajo carga (busy/timeout) en vez de bloqueo.
+
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> 70 passed; 0 failed
+  - `cd gitgov && npm run typecheck` -> sin errores
+
+## 2026-03-03 - Refactor estructural de handlers.rs a layout multiarchivo
+
+- Se particionó `gitgov/gitgov-server/src/handlers.rs` en un layout mantenible de 16 archivos bajo `gitgov/gitgov-server/src/handlers/`, manteniendo el módulo público `handlers` intacto para no romper imports externos.
+- Estrategia aplicada:
+  - `handlers.rs` quedó como orquestador mínimo con `include!(...)` en orden estable.
+  - El contenido existente se movió en bloques funcionales a:
+    - `prelude_health.rs`
+    - `integrations.rs`
+    - `compliance_signals.rs`
+    - `violations_policy_export.rs`
+    - `github_webhook.rs`
+    - `client_ingest_dashboard.rs`
+    - `policy_admin.rs`
+    - `org_core.rs`
+    - `org_users_api_keys.rs`
+    - `audit_stream_governance.rs`
+    - `jobs_merges_admin_audit.rs`
+    - `gdpr_clients_identities_scope.rs`
+    - `conversational_runtime.rs`
+    - `chat_handler.rs`
+    - `feature_requests.rs`
+    - `tests.rs`
+- Objetivo:
+  - Reducir riesgo de mantenimiento en un archivo monolítico.
+  - Mejorar navegabilidad por dominio sin cambiar contratos ni rutas HTTP.
+
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> 70 passed; 0 failed
+  - `cd gitgov && npm run typecheck` -> sin errores
+
+## 2026-03-03 - Split adicional de conversational_runtime.rs (3 archivos)
+
+- Se particionó `gitgov/gitgov-server/src/handlers/conversational_runtime.rs` en 3 unidades para mejorar mantenibilidad:
+  - `gitgov/gitgov-server/src/handlers/conversational/core.rs`
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs`
+  - `gitgov/gitgov-server/src/handlers/conversational/engine.rs`
+- `conversational_runtime.rs` quedó como orquestador con `include!(...)`, manteniendo comportamiento y API interna sin cambios.
+
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> 70 passed; 0 failed
+  - `cd gitgov && npm run typecheck` -> sin errores
+
+## 2026-03-03 - Hardening integral de chatbot (coherencia + seguridad + scope)
+
+- Se reforzó la lógica de intención y extracción de usuario para reducir respuestas incoherentes:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs`
+    - `extract_user_login(...)` ahora soporta más variantes reales (sin marcador explícito de "usuario") con filtros anti-falsos positivos.
+    - Mejora de clasificación para frases en inglés tipo `how many commits did <user> ...`.
+    - Se evitó capturar tokens ambiguos de contexto (`esta`, `this`, `sesion`, etc.) como si fueran login.
+
+- Se endureció seguridad del chat frente a exfiltración de secretos:
+  - `query.rs`:
+    - `is_secret_exfiltration_request(...)` ahora cubre más patrones (`key`, `password`, `jwt`, `hash`, `credenciales`).
+    - `sanitize_chat_answer_text(...)` amplió redacción para UUID, Bearer, JWT, tokens tipo `ghp_...`, `sk-...` y pares `key=value`.
+  - `chat_handler.rs`:
+    - Normalización de respuestas LLM (`normalize_llm_response`) para forzar estado válido, evitar respuestas genéricas vacías y mantener política de no exposición.
+    - Sanitización de pregunta antes de persistir historial runtime y antes de enviarla al LLM.
+
+- Se mejoró coherencia por organización (multiorg) y explicación cuando faltan datos:
+  - `chat_handler.rs`:
+    - Para keys globales sin org seleccionada, consultas analíticas ahora exigen scope de org explícito (evita ambigüedad entre organizaciones).
+    - En consultas por usuario con resultado cero, se distingue mejor entre “sin actividad” vs “usuario fuera del scope activo”.
+    - Mensajes de `insufficient_data` más explícitos sobre qué falta (usuario/org/rango).
+
+- Se mejoró robustez del cliente Desktop/Tauri:
+  - `gitgov/src-tauri/src/control_plane/server.rs`:
+    - `chat_ask(...)` ahora intenta parsear `ChatAskResponse` incluso cuando el backend devuelve HTTP != 2xx (evita perder mensajes útiles en 429/504/500).
+  - `gitgov/src/store/useControlPlaneStore.ts` + `gitgov/src/components/control_plane/ConversationalChatPanel.tsx`:
+    - `chatAsk` ahora envía por defecto `org_name` usando la org seleccionada en UI (`selectedOrgName`) para evitar consultas sin scope en multiorg.
+
+- Capacidad/runtime:
+  - `gitgov/gitgov-server/src/handlers/conversational/core.rs`:
+    - Se añadió pruning del runtime conversacional in-memory por TTL de inactividad y máximo de sesiones para evitar crecimiento sin límite.
+
+- Corrección de KB interna:
+  - `core.rs` actualizó la referencia de revocación de API key a endpoint real `POST /api-keys/{id}/revoke`.
+
+- Tests y validación:
+  - Nuevos tests de regresión en `gitgov/gitgov-server/src/handlers/tests.rs` para:
+    - detección de usuario sin marcador explícito,
+    - detección en phrasing inglés `did <user>`,
+    - detección/sanitización ampliada de secretos.
+  - Comandos ejecutados:
+    - `cd gitgov/gitgov-server && cargo test` -> 72 passed; 0 failed
+    - `cd gitgov/src-tauri && cargo check` -> sin errores
+    - `cd gitgov && npm run typecheck` -> sin errores
+    - `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ConversationalChatPanel.tsx` -> 0 errores
+
+## 2026-03-03 - Chat UX y observabilidad de historial (ventana de logs + anti-freeze)
+
+- Se corrigio la inconsistencia del historial en Dashboard (tabla de commits) aumentando la ventana operativa de logs para que no quede en muestras demasiado cortas:
+  - `gitgov/src/store/useControlPlaneStore.ts`
+    - `loadLogs` default paso a `limit=500`.
+    - `refreshForCurrentRole` ahora usa `refreshDashboardData({ logLimit: 500 })` para admin.
+    - Vista developer ahora carga `loadLogs(500, 0)`.
+  - `gitgov/src/components/control_plane/ServerDashboard.tsx`
+    - Nuevo `DASHBOARD_LOG_LIMIT = 500`.
+    - Auto-refresh/refresh manual usan 500.
+    - Se pausa el refresh periodico mientras `isChatLoading` para reducir micro-freezes durante respuesta del chatbot.
+  - `gitgov/src/components/control_plane/TicketCoverageWidget.tsx`
+    - Tras correlacion de Jira, se recarga logs con 500 para mantener coherencia de tabla.
+
+- Claridad UX ya aplicada en tabla:
+  - `gitgov/src/components/control_plane/RecentCommitsTable.tsx` muestra explicito que es "ventana reciente (hasta 500 eventos)" y pagination "en esta ventana".
+
+- Validacion ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `73 passed; 0 failed`
+  - `cd gitgov/src-tauri && cargo check` -> OK
+  - `cd gitgov && npm run typecheck` -> OK
+  - `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ServerDashboard.tsx src/components/control_plane/TicketCoverageWidget.tsx src/components/control_plane/RecentCommitsTable.tsx src/components/control_plane/ConversationalChatPanel.tsx` -> `0 errores`
+
+- Stress test real de chat (capacidad):
+  - Comando:
+    - `python tests/chat_capacity_test.py --requests 60 --concurrency 8 --scenario mixed --server-url http://127.0.0.1:3000 --out-json tests/artifacts/chat_capacity_latest.json`
+  - Resultado:
+    - throughput: `2.80 rps`
+    - latencia: `p50 2669.9 ms`, `p95 6094.8 ms`, `p99 6711.8 ms`, `max 7394.3 ms`
+    - HTTP: `200 = 60/60`
+    - status chat: `ok=39`, `insufficient_data=17`, `error=4`
+
+- Verificacion live de Golden Path contractual:
+  - `POST /events` con Bearer -> `accepted=1, duplicates=0, errors=0`
+  - `GET /stats` con Bearer -> respuesta valida con `client_events` y `github_events`
+  - `GET /logs?limit=5&offset=0` con Bearer -> `5` eventos
+
+## 2026-03-03 - Hotfix LLM JSON roto sin crash + degradacion sin badge ERROR
+
+- Se atendio el problema reportado en logs (`Failed to parse LLM JSON: EOF...`) y los panics historicos por cortes inseguros de string UTF-8:
+  - El parser de respuesta de LLM ya opera con recorte seguro por caracteres en `conversational/engine.rs` (`safe_prefix`) para evitar `byte index is not a char boundary`.
+  - `chat_handler.rs` ahora degrada respuestas de fallo de LLM a respuesta util `status=ok` usando contexto local (`llm_degraded_answer(...)`) en vez de devolver `status=error` al usuario final.
+  - `normalize_llm_response(...)` convierte respuestas `status=error` emitidas por el modelo a `insufficient_data` con mensaje accionable.
+
+- Validacion de carga tras reinicio real del backend local (sin binario stale):
+  - `python tests/chat_capacity_test.py --requests 20 --concurrency 4 --scenario llm_forced --server-url http://127.0.0.1:3000 --out-json tests/artifacts/chat_capacity_llm_forced_after_restart.json`
+  - Resultado: `HTTP 200=20/20`, `chat status ok=20` (sin `error`), `p95=7981.4ms`, `p99=8777.1ms`.
+
+- Validacion funcional adicional de historial:
+  - `GET /logs?limit=50` devuelve ventana corta (ej. solo 5 commits en ventana).
+  - `GET /logs?limit=500&event_type=commit&user_login=MapfrePE` devuelve 53 commits (47 feb + 6 mar), confirmando que no hay perdida de historial; era ventana de visualizacion.
+
+## 2026-03-03 - Simplificacion de Paso 2 (Device obligatorio + login CP normal)
+
+- Se simplifico la UX de autenticacion de Control Plane en desktop:
+  - `gitgov/src/components/auth/ControlPlaneAuthScreen.tsx`
+    - Se eliminó el flujo confuso de doble verificación (`Verificar identidad (/me)` + `Validar identidad y continuar`).
+    - Ahora el Paso 2 usa un único flujo y un único botón:
+      - `Usuario GitHub`
+      - `URL Control Plane`
+      - `API key GitGov`
+      - `org_name` (solo cuando aplique por scope Admin Org)
+      - Botón único `Entrar al Control Plane`
+    - Se mantiene `Device Flow` como paso obligatorio previo (GitHub).
+  - `gitgov/src/components/layout/MainLayout.tsx`
+    - Se ajustó el gate para evitar estados inconsistentes del paso intermedio anterior.
+    - Para `Admin` scopeado por org (`userOrgId != null`), ahora se exige `selectedOrgName` para continuar (evita ambigüedad multiorg).
+
+- Validacion ejecutada:
+  - `cd gitgov && npm run typecheck` -> OK
+  - `cd gitgov && npx eslint src/components/auth/ControlPlaneAuthScreen.tsx src/components/layout/MainLayout.tsx` -> 0 errores
+
+## 2026-03-03 - Hardening de inicio de sesión (Device siempre al arrancar)
+
+- Se forzó el comportamiento de producto para desktop:
+  - `gitgov/src/store/useAuthStore.ts`
+    - `checkExistingSession()` ahora arranca en `authStep=idle` por defecto y exige pasar por GitHub Device Flow en cada reinicio de la app.
+    - Se agregó flag `VITE_REQUIRE_DEVICE_FLOW_ON_START` (default `true`); solo si se define explícitamente `false` vuelve el comportamiento legacy de reutilizar sesión.
+
+- Ajuste de compatibilidad de identidad CP:
+  - `gitgov/src/store/useControlPlaneStore.ts`
+    - `bootstrap-admin` ya no bloquea por falta de `VITE_FOUNDER_GITHUB_LOGIN`; si esa variable no existe, permite login founder con la key.
+    - Para `Developer` sí se mantiene validación estricta `client_id == github_login`.
+    - Para `Admin/Architect/PM` se permite identidad no 1:1 (caso org-admin/service users).
+
+- Validación ejecutada:
+  - `cd gitgov && npm run typecheck` -> OK
+  - `cd gitgov && npx eslint src/store/useAuthStore.ts src/store/useControlPlaneStore.ts src/components/auth/ControlPlaneAuthScreen.tsx src/components/layout/MainLayout.tsx` -> 0 errores
+
+## 2026-03-03 - Flujo login/logout corregido + limpieza de UI no deseada
+
+- Se corrigió el flujo para que **Paso 2 sea exclusivamente posterior a Device Flow** y no se salte por estado viejo:
+  - `gitgov/src/components/layout/MainLayout.tsx`
+    - El gate de `ControlPlaneAuthScreen` ya no depende de que exista `serverConfig`; exige revalidación CP cuando no hay conexión/rol.
+    - Cuando no hay sesión GitHub autenticada, se limpia estado de Control Plane para evitar arrastre entre usuarios.
+
+- Se eliminó la acción no solicitada `Forzar/Usar Founder/Admin (.env)`:
+  - `gitgov/src/pages/SettingsPage.tsx`
+  - `gitgov/src/components/control_plane/ServerConfigPanel.tsx`
+
+- Se reforzó cierre/cambio de usuario para limpiar también sesión de Control Plane:
+  - `gitgov/src/pages/SettingsPage.tsx`
+  - `gitgov/src/components/layout/Sidebar.tsx`
+  - `gitgov/src/components/auth/PinUnlockScreen.tsx`
+  - `gitgov/src/components/auth/ControlPlaneAuthScreen.tsx`
+
+- Corrección de precisión temporal en chat (desfase de 1 segundo):
+  - `gitgov/gitgov-server/src/db.rs`
+    - `event_ts` en queries de commits cambió a `(EXTRACT(EPOCH FROM c.created_at) * 1000)::bigint` para conservar milisegundos y evitar redondeo previo.
+
+- Validación ejecutada:
+  - `cd gitgov && npm run typecheck` -> OK
+  - `cd gitgov && npx eslint src/components/layout/MainLayout.tsx src/pages/SettingsPage.tsx src/components/control_plane/ServerConfigPanel.tsx src/components/layout/Sidebar.tsx src/components/auth/ControlPlaneAuthScreen.tsx src/components/auth/PinUnlockScreen.tsx src/store/useAuthStore.ts src/store/useControlPlaneStore.ts` -> 0 errores
+  - `cd gitgov/gitgov-server && cargo test --quiet` -> `76 passed; 0 failed`
+
+## 2026-03-03 - UX Device Flow: feedback visual de conexión garantizado
+
+- Se ajustó el flujo de login GitHub para evitar percepción de salto instantáneo:
+  - `gitgov/src/store/useAuthStore.ts`
+    - `pollAuth()` ahora asegura una ventana visual mínima en estado `polling` (`MIN_POLLING_VISUAL_MS = 900`) incluso si GitHub responde muy rápido.
+  - `gitgov/src/components/auth/LoginScreen.tsx`
+    - Mensaje de `polling` actualizado a `Conectando con GitHub...` + `Validando autorización del Device Flow`.
+
+- Objetivo:
+  - Mantener confirmación visual explícita de que la app sí está validando contra GitHub antes de pasar a Paso 2.
+
+- Validación ejecutada:
+  - `cd gitgov && npm run typecheck` -> OK
+  - `cd gitgov && npx eslint src/store/useAuthStore.ts src/components/auth/LoginScreen.tsx` -> 0 errores

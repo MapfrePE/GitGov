@@ -1,7 +1,7 @@
 # Guía para Agentes de IA - GitGov
 
 > Este archivo proporciona contexto esencial para agentes de IA. Léelo completo antes de hacer cambios.
-> Nota de alcance: los bloques de "Modo Auditor" y checklist estricto están redactados principalmente para sesiones con Claude Code.
+> Nota de alcance: el checklist estricto está redactado principalmente para sesiones con Claude Code.
 
 ## Guardrail Ejecutivo (leer primero)
 
@@ -282,24 +282,6 @@ Campos: id, source ("github" | "client"), event_type, created_at (timestamp ms),
 8. **Documentar cambios** — Actualizar `docs/PROGRESS.md` con cambios significativos
 9. **No inventar** — Si no se pudo verificar, responder `NO VERIFICADO` y listar exactamente qué falta para verificar
 10. **Anti split-brain local** — Usar canónico `127.0.0.1:3000` para server local; Docker server en `127.0.0.1:3001`
-
----
-
-## Modo Auditor — Obligatorio para respuestas técnicas
-
-Toda afirmación técnica sobre el codebase DEBE seguir este formato antes de ser aceptada:
-
-```
-Respuesta: <afirmación concreta>
-Evidencia en código: <archivo>:<línea>, <archivo>:<línea>
-Nivel de certeza: Alto (leído en esta sesión) | Medio (leído en sesión anterior) | Bajo (inferencia)
-Supuestos: <qué se asume si los hay>
-Riesgo si estoy equivocado: <consecuencia del error>
-```
-
-**Regla absoluta:** Si no hay `archivo:línea`, la afirmación no se hace.  
-**Regla absoluta:** Si es inferencia, debe decir `INFERENCIA:` explícitamente antes de la afirmación.  
-**Regla absoluta:** Si no se pudo validar, usar `NO VERIFICADO:` y detallar bloqueadores.
 
 ---
 

@@ -4,23 +4,21 @@ import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { formatTs } from '@/lib/timezone'
 
 export function AdminOnboardingPanel() {
-  const {
-    selectedOrgName,
-    setSelectedOrgName,
-    createOrg,
-    orgUsers,
-    orgInvitations,
-    lastGeneratedInviteToken,
-    loadOrgUsers,
-    loadOrgInvitations,
-    createOrgInvitation,
-    resendOrgInvitation,
-    revokeOrgInvitation,
-    issueApiKeyForOrgUser,
-    updateOrgUserStatus,
-    upsertOrgUser,
-    displayTimezone,
-  } = useControlPlaneStore()
+  const selectedOrgName = useControlPlaneStore((s) => s.selectedOrgName)
+  const setSelectedOrgName = useControlPlaneStore((s) => s.setSelectedOrgName)
+  const createOrg = useControlPlaneStore((s) => s.createOrg)
+  const orgUsers = useControlPlaneStore((s) => s.orgUsers)
+  const orgInvitations = useControlPlaneStore((s) => s.orgInvitations)
+  const lastGeneratedInviteToken = useControlPlaneStore((s) => s.lastGeneratedInviteToken)
+  const loadOrgUsers = useControlPlaneStore((s) => s.loadOrgUsers)
+  const loadOrgInvitations = useControlPlaneStore((s) => s.loadOrgInvitations)
+  const createOrgInvitation = useControlPlaneStore((s) => s.createOrgInvitation)
+  const resendOrgInvitation = useControlPlaneStore((s) => s.resendOrgInvitation)
+  const revokeOrgInvitation = useControlPlaneStore((s) => s.revokeOrgInvitation)
+  const issueApiKeyForOrgUser = useControlPlaneStore((s) => s.issueApiKeyForOrgUser)
+  const updateOrgUserStatus = useControlPlaneStore((s) => s.updateOrgUserStatus)
+  const upsertOrgUser = useControlPlaneStore((s) => s.upsertOrgUser)
+  const displayTimezone = useControlPlaneStore((s) => s.displayTimezone)
 
   const [orgLogin, setOrgLogin] = useState(selectedOrgName)
   const [orgName, setOrgName] = useState('')

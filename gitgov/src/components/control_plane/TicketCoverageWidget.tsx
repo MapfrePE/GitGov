@@ -5,10 +5,11 @@ import { Bar } from './Bar'
 import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 
 export function TicketCoverageWidget() {
-  const {
-    ticketCoverage, jiraCoverageFilters,
-    applyTicketCoverageFilters, correlateJiraTickets, loadLogs,
-  } = useControlPlaneStore()
+  const ticketCoverage = useControlPlaneStore((s) => s.ticketCoverage)
+  const jiraCoverageFilters = useControlPlaneStore((s) => s.jiraCoverageFilters)
+  const applyTicketCoverageFilters = useControlPlaneStore((s) => s.applyTicketCoverageFilters)
+  const correlateJiraTickets = useControlPlaneStore((s) => s.correlateJiraTickets)
+  const loadLogs = useControlPlaneStore((s) => s.loadLogs)
 
   const [isCorrelatingJira, setIsCorrelatingJira] = useState(false)
   const [ticketHours, setTicketHours] = useState(jiraCoverageFilters.hours)
@@ -25,7 +26,7 @@ export function TicketCoverageWidget() {
     setIsCorrelatingJira(true)
     try {
       await correlateJiraTickets({ hours: jiraCoverageFilters.hours, limit: 500, repo_full_name: jiraCoverageFilters.repo_full_name.trim() || undefined })
-      await loadLogs(50)
+      await loadLogs(500)
     } finally {
       setIsCorrelatingJira(false)
     }

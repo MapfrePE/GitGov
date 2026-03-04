@@ -11,6 +11,7 @@
 3. Desktop permite `push`
 4. Control Plane recibe eventos (`stage_files`, `commit`, `attempt_push`, `successful_push`)
 5. Dashboard muestra `Commits Recientes` sin `401`
+6. Chatbot del Control Plane responde sin crash y con datos verificables del backend (sin inventar)
 
 ---
 
@@ -42,6 +43,14 @@
 - [ ] `GET /integrations/jenkins/correlations` responde `200`
 - [ ] Widget `Pipeline Health (7 días)` carga (aunque muestre vacío si no hay datos)
 
+## E. Chatbot Control Plane (admin)
+- [ ] `POST /chat/ask` responde `200` (sin freeze en UI)
+- [ ] Respuestas analíticas usan datos reales (`/stats`, `/logs`, queries DB), no texto genérico inventado
+- [ ] Si faltan datos, devuelve `insufficient_data` con motivo explícito (no números ficticios)
+- [ ] Para consultas sobre actividad admin, validar contra `GET /admin-audit-log`:
+  - [ ] La respuesta del bot coincide con los campos reales (`actor_client_id`, `action`, `target_type`, `target_id`, `created_at`)
+  - [ ] Si se pide “todas las tags/acciones”, la validación manual compara contra acciones reales del log admin
+
 ---
 
 ## Comandos útiles
@@ -65,7 +74,7 @@ API_KEY="TU_API_KEY_ADMIN" JENKINS_SECRET="tu_secreto" ./jenkins_integration_tes
 
 ---
 
-## E. Diagnóstico de Topología Local (anti split-brain)
+## F. Diagnóstico de Topología Local (anti split-brain)
 
 Antes de cualquier sesión de desarrollo, verifica que no haya dos servidores
 compitiendo en los puertos 3000/3001:
@@ -110,4 +119,3 @@ make smoke  # contrato live — requiere servidor corriendo (cargo run)
 
 > Nota: `make test` valida el contrato de payload/respuesta (structs serde, Golden Path shapes).
 > `make smoke` valida el flujo real contra server+DB (no corre en CI).
-

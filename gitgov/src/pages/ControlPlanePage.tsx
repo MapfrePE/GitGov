@@ -7,7 +7,8 @@ import { Link2, Settings, Server, Wifi, WifiOff } from 'lucide-react'
 import { Modal } from '@/components/shared/Modal'
 
 export function ControlPlanePage() {
-  const { isConnected, serverConfig } = useControlPlaneStore()
+  const isConnected = useControlPlaneStore((s) => s.isConnected)
+  const serverConfig = useControlPlaneStore((s) => s.serverConfig)
   const [showConnectionModal, setShowConnectionModal] = useState(false)
 
   return (

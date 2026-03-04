@@ -10,7 +10,10 @@ function fromDateInputValue(s: string): number | undefined {
 }
 
 export function ExportPanel() {
-  const { exportLogs, exportAuditData, loadExportLogs, displayTimezone } = useControlPlaneStore()
+  const exportLogs = useControlPlaneStore((s) => s.exportLogs)
+  const exportAuditData = useControlPlaneStore((s) => s.exportAuditData)
+  const loadExportLogs = useControlPlaneStore((s) => s.loadExportLogs)
+  const displayTimezone = useControlPlaneStore((s) => s.displayTimezone)
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [isExporting, setIsExporting] = useState(false)

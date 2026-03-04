@@ -42,9 +42,16 @@ pub fn run() {
     // Load .env file if present
     dotenvy::dotenv().ok();
 
-    // Initialize logging with debug level to see all messages
+    // Keep logs actionable in dev: avoid noisy HMR socket resets from hyper at DEBUG.
+    // Override with RUST_LOG when deeper diagnostics are needed.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(
+            "info,hyper=warn,h2=warn,reqwest=warn,tungstenite=warn,tokio_tungstenite=warn",
+        )
+    });
+
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_env_filter(env_filter)
         .with_target(false)
         .with_thread_ids(false)
         .init();
@@ -175,6 +182,7 @@ pub fn run() {
             commands::cmd_set_current_user,
             commands::cmd_logout,
             commands::cmd_validate_token,
+            commands::cmd_open_external_url,
             commands::cmd_get_status,
             commands::cmd_get_file_diff,
             commands::cmd_apply_ignore_rules,

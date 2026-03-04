@@ -3,7 +3,8 @@ import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Badge } from '@/components/shared/Badge'
 
 export function DeveloperAccessPanel() {
-  const { previewOrgInvitation, acceptOrgInvitation } = useControlPlaneStore()
+  const previewOrgInvitation = useControlPlaneStore((s) => s.previewOrgInvitation)
+  const acceptOrgInvitation = useControlPlaneStore((s) => s.acceptOrgInvitation)
   const [token, setToken] = useState('')
   const [login, setLogin] = useState('')
   const [previewStatus, setPreviewStatus] = useState<string | null>(null)

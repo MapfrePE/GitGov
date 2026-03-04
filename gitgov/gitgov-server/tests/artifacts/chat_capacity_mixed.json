@@ -1,0 +1,441 @@
+{
+  "config": {
+    "server_url": "http://127.0.0.1:3000",
+    "requests": 60,
+    "concurrency": 6,
+    "timeout_sec": 25.0,
+    "scenario": "mixed"
+  },
+  "summary": {
+    "total_requests": 60,
+    "duration_sec": 25.563257700006943,
+    "throughput_rps": 2.347118692934966,
+    "http_counts": {
+      "200": 59,
+      "0": 1
+    },
+    "chat_status_counts": {
+      "ok": 43,
+      "feature_not_available": 2,
+      "insufficient_data": 9,
+      "error": 5,
+      "network_error": 1
+    },
+    "error_counts": {
+      "network_error": 1
+    },
+    "latency_ms": {
+      "min": 194.73220000509173,
+      "max": 6199.106999963988,
+      "avg": 2331.237861667372,
+      "p50": 2681.8229000200517,
+      "p95": 5856.271534980623,
+      "p99": 6182.281085009454,
+      "ok_p50": 2633.709000016097,
+      "ok_p95": 5584.205989952896,
+      "ok_p99": 6078.61929200124
+    }
+  },
+  "samples": [
+    {
+      "idx": 0,
+      "question": "¿cómo se conecta jenkins?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 629.99,
+      "error_kind": null
+    },
+    {
+      "idx": 1,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 200,
+      "chat_status": "feature_not_available",
+      "latency_ms": 4236.6,
+      "error_kind": null
+    },
+    {
+      "idx": 2,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 928.89,
+      "error_kind": null
+    },
+    {
+      "idx": 3,
+      "question": "¿como conecto github a webhooks?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 645.54,
+      "error_kind": null
+    },
+    {
+      "idx": 4,
+      "question": "¿cómo actualizo la app desktop?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 643.19,
+      "error_kind": null
+    },
+    {
+      "idx": 5,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 200,
+      "chat_status": "insufficient_data",
+      "latency_ms": 3203.89,
+      "error_kind": null
+    },
+    {
+      "idx": 6,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 5848.07,
+      "error_kind": null
+    },
+    {
+      "idx": 7,
+      "question": "¿GitGov es open source?",
+      "http_code": 200,
+      "chat_status": "insufficient_data",
+      "latency_ms": 1859.91,
+      "error_kind": null
+    },
+    {
+      "idx": 8,
+      "question": "¿como conecto github a webhooks?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 204.95,
+      "error_kind": null
+    },
+    {
+      "idx": 9,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 200,
+      "chat_status": "feature_not_available",
+      "latency_ms": 5143.44,
+      "error_kind": null
+    },
+    {
+      "idx": 10,
+      "question": "¿cómo se conecta jenkins?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 221.06,
+      "error_kind": null
+    },
+    {
+      "idx": 11,
+      "question": "¿como conecto github a webhooks?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 204.83,
+      "error_kind": null
+    },
+    {
+      "idx": 12,
+      "question": "¿qué pasa si el servidor se cae?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 4371.07,
+      "error_kind": null
+    },
+    {
+      "idx": 13,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 5068.91,
+      "error_kind": null
+    },
+    {
+      "idx": 14,
+      "question": "¿cómo se conecta jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 662.85,
+      "error_kind": null
+    },
+    {
+      "idx": 15,
+      "question": "dame una guía para onboarding de org",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 3580.07,
+      "error_kind": null
+    },
+    {
+      "idx": 16,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 760.37,
+      "error_kind": null
+    },
+    {
+      "idx": 17,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 388.47,
+      "error_kind": null
+    },
+    {
+      "idx": 18,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 5083.07,
+      "error_kind": null
+    },
+    {
+      "idx": 19,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 2799.84,
+      "error_kind": null
+    },
+    {
+      "idx": 20,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 2825.27,
+      "error_kind": null
+    },
+    {
+      "idx": 21,
+      "question": "¿qué pasa si el servidor se cae?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 3029.8,
+      "error_kind": null
+    },
+    {
+      "idx": 22,
+      "question": "¿cómo se conecta jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 566.1,
+      "error_kind": null
+    },
+    {
+      "idx": 23,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 831.03,
+      "error_kind": null
+    },
+    {
+      "idx": 24,
+      "question": "¿qué pasa si el servidor se cae?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 2759.18,
+      "error_kind": null
+    },
+    {
+      "idx": 25,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 2988.61,
+      "error_kind": null
+    },
+    {
+      "idx": 26,
+      "question": "¿como conecto github a webhooks?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 208.28,
+      "error_kind": null
+    },
+    {
+      "idx": 27,
+      "question": "¿cómo se conecta jenkins?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 212.55,
+      "error_kind": null
+    },
+    {
+      "idx": 28,
+      "question": "¿como conecto github a webhooks?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 205.03,
+      "error_kind": null
+    },
+    {
+      "idx": 29,
+      "question": "¿qué pasa si el servidor se cae?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 5081.31,
+      "error_kind": null
+    },
+    {
+      "idx": 30,
+      "question": "dame una guía para onboarding de org",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 4094.65,
+      "error_kind": null
+    },
+    {
+      "idx": 31,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 3559.75,
+      "error_kind": null
+    },
+    {
+      "idx": 32,
+      "question": "¿cómo funciona outbox offline?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 217.34,
+      "error_kind": null
+    },
+    {
+      "idx": 33,
+      "question": "¿cómo se conecta jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 215.42,
+      "error_kind": null
+    },
+    {
+      "idx": 34,
+      "question": "¿cómo actualizo la app desktop?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 204.45,
+      "error_kind": null
+    },
+    {
+      "idx": 35,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 394.45,
+      "error_kind": null
+    },
+    {
+      "idx": 36,
+      "question": "¿GitGov es open source?",
+      "http_code": 200,
+      "chat_status": "insufficient_data",
+      "latency_ms": 2729.94,
+      "error_kind": null
+    },
+    {
+      "idx": 37,
+      "question": "¿como conecto github a webhooks?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 205.7,
+      "error_kind": null
+    },
+    {
+      "idx": 38,
+      "question": "dame una guía para onboarding de org",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 2834.25,
+      "error_kind": null
+    },
+    {
+      "idx": 39,
+      "question": "explica la diferencia entre auditoría y observabilidad en GitGov",
+      "http_code": 0,
+      "chat_status": "network_error",
+      "latency_ms": 6199.11,
+      "error_kind": "network_error"
+    },
+    {
+      "idx": 40,
+      "question": "¿cómo actualizo la app desktop?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 217.53,
+      "error_kind": null
+    },
+    {
+      "idx": 41,
+      "question": "¿GitGov es open source?",
+      "http_code": 200,
+      "chat_status": "insufficient_data",
+      "latency_ms": 2311.47,
+      "error_kind": null
+    },
+    {
+      "idx": 42,
+      "question": "¿Qué plataformas soporta GitGov Desktop?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 2112.57,
+      "error_kind": null
+    },
+    {
+      "idx": 43,
+      "question": "explica la diferencia entre auditoría y observabilidad en GitGov",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 6012.02,
+      "error_kind": null
+    },
+    {
+      "idx": 44,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 200,
+      "chat_status": "insufficient_data",
+      "latency_ms": 4303.71,
+      "error_kind": null
+    },
+    {
+      "idx": 45,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 200,
+      "chat_status": "insufficient_data",
+      "latency_ms": 2633.71,
+      "error_kind": null
+    },
+    {
+      "idx": 46,
+      "question": "dame una guía para onboarding de org",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 3142.66,
+      "error_kind": null
+    },
+    {
+      "idx": 47,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 200,
+      "chat_status": "insufficient_data",
+      "latency_ms": 3690.28,
+      "error_kind": null
+    },
+    {
+      "idx": 48,
+      "question": "explica la diferencia entre auditoría y observabilidad en GitGov",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 5554.89,
+      "error_kind": null
+    },
+    {
+      "idx": 49,
+      "question": "explica la diferencia entre auditoría y observabilidad en GitGov",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 6170.59,
+      "error_kind": null
+    }
+  ]
+}

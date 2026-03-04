@@ -16,7 +16,12 @@ import { ApiKeyManagerWidget } from '@/components/control_plane/ApiKeyManagerWid
 export function SettingsPage() {
   const { user, logout, isPinEnabled, setLocalPin, clearLocalPin, lockSession, pinError } = useAuthStore()
   const { repoPath, config } = useRepoStore()
-  const { displayTimezone, setDisplayTimezone, isConnected, userRole } = useControlPlaneStore()
+  const displayTimezone = useControlPlaneStore((s) => s.displayTimezone)
+  const setDisplayTimezone = useControlPlaneStore((s) => s.setDisplayTimezone)
+  const isConnected = useControlPlaneStore((s) => s.isConnected)
+  const userRole = useControlPlaneStore((s) => s.userRole)
+  const userClientId = useControlPlaneStore((s) => s.userClientId)
+  const disconnect = useControlPlaneStore((s) => s.disconnect)
   const {
     status: updaterStatus,
     isChecking,
@@ -322,11 +327,37 @@ export function SettingsPage() {
                     </span>
                   )}
                 </div>
-                <Button variant="danger" size="sm" onClick={logout}>
+
+                <div className="rounded-lg border border-surface-700/30 bg-surface-900/50 p-3">
+                  <p className="text-[10px] text-surface-500 uppercase tracking-widest mb-1 font-medium">Control Plane</p>
+                  <p className="text-xs text-surface-300">
+                    Login GitHub y rol Control Plane son independientes.
+                  </p>
+                  <p className="text-xs text-surface-200 mt-1">
+                    Rol actual: <span className="font-medium">{userRole || 'sin rol'}</span>
+                    {userClientId ? <span className="text-surface-500"> · {userClientId}</span> : null}
+                  </p>
+                </div>
+
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={async () => {
+                    disconnect()
+                    await logout()
+                  }}
+                >
                   <LogOut size={13} strokeWidth={1.5} />
                   Cerrar sesión
                 </Button>
-                <Button variant="secondary" size="sm" onClick={logout}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={async () => {
+                    disconnect()
+                    await logout()
+                  }}
+                >
                   Cambiar usuario
                 </Button>
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Server } from 'lucide-react'
 import { formatTs } from '@/lib/timezone'
@@ -11,40 +11,63 @@ import { EventBreakdownGrid } from './EventBreakdownGrid'
 import { RecentCommitsTable } from './RecentCommitsTable'
 import { DeveloperAccessPanel } from './DeveloperAccessPanel'
 import { ConversationalChatPanel } from './ConversationalChatPanel'
+import { MaintenanceOverlay } from './MaintenanceOverlay'
 import { Modal } from '@/components/shared/Modal'
 import { Badge } from '@/components/shared/Badge'
 
+const DASHBOARD_LOG_LIMIT = 500
+
 export function ServerDashboard() {
-  const {
-    serverStats, dailyActivity, ticketCoverage, userRole,
-    isConnected, isRefreshingDashboard, refreshDashboardData, refreshForCurrentRole,
-    loadLogs,
-    activeDevs7d, activeDevs7dUpdatedAt, loadActiveDevs7d,
-    displayTimezone,
-  } = useControlPlaneStore()
+  const serverStats = useControlPlaneStore((s) => s.serverStats)
+  const dailyActivity = useControlPlaneStore((s) => s.dailyActivity)
+  const ticketCoverage = useControlPlaneStore((s) => s.ticketCoverage)
+  const userRole = useControlPlaneStore((s) => s.userRole)
+  const isConnected = useControlPlaneStore((s) => s.isConnected)
+  const connectionStatus = useControlPlaneStore((s) => s.connectionStatus)
+  const isRefreshingDashboard = useControlPlaneStore((s) => s.isRefreshingDashboard)
+  const refreshForCurrentRole = useControlPlaneStore((s) => s.refreshForCurrentRole)
+  const loadLogs = useControlPlaneStore((s) => s.loadLogs)
+  const activeDevs7d = useControlPlaneStore((s) => s.activeDevs7d)
+  const activeDevs7dUpdatedAt = useControlPlaneStore((s) => s.activeDevs7dUpdatedAt)
+  const loadActiveDevs7d = useControlPlaneStore((s) => s.loadActiveDevs7d)
+  const displayTimezone = useControlPlaneStore((s) => s.displayTimezone)
+  const isChatLoading = useControlPlaneStore((s) => s.isChatLoading)
 
   const isAdmin = userRole === 'Admin'
 
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [showActiveDevsModal, setShowActiveDevsModal] = useState(false)
+  const isChatLoadingRef = useRef(isChatLoading)
+
+  useEffect(() => {
+    isChatLoadingRef.current = isChatLoading
+  }, [isChatLoading])
 
   useEffect(() => {
     if (!isConnected) return
-    if (userRole === 'Admin') {
-      void refreshForCurrentRole()
-    } else {
-      void loadLogs(50, 0)
-    }
-    if (!autoRefresh) return
-    const interval = setInterval(() => {
+
+    const runRefresh = () => {
+      if (isChatLoadingRef.current) return
       if (userRole === 'Admin') {
         void refreshForCurrentRole()
       } else {
-        void loadLogs(50, 0)
+        void loadLogs(DASHBOARD_LOG_LIMIT, 0)
       }
+    }
+
+    runRefresh()
+    if (!autoRefresh) return
+
+    const interval = setInterval(() => {
+      runRefresh()
     }, 30000)
     return () => clearInterval(interval)
-  }, [isConnected, autoRefresh, refreshDashboardData, refreshForCurrentRole, loadLogs, userRole])
+  }, [isConnected, autoRefresh, refreshForCurrentRole, loadLogs, userRole])
+
+  /* ── maintenance mode ── */
+  if (connectionStatus === 'maintenance') {
+    return <MaintenanceOverlay />
+  }
 
   /* ── not connected ── */
   if (!isConnected) {
@@ -79,10 +102,11 @@ export function ServerDashboard() {
         autoRefresh={autoRefresh}
         onAutoRefreshChange={setAutoRefresh}
         onRefresh={() => {
+          if (isChatLoading) return
           if (userRole === 'Admin') {
-            void refreshForCurrentRole()
+            void refreshForCurrentRole({ forceHeavy: true })
           } else {
-            void loadLogs(50, 0)
+            void loadLogs(DASHBOARD_LOG_LIMIT, 0)
           }
         }}
         isRefreshing={isRefreshingDashboard}

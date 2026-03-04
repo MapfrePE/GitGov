@@ -167,8 +167,20 @@ function SuggestionChip({ text, onClick }: { text: string; onClick: () => void }
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function ConversationalChatPanel() {
-  const { chatMessages, isChatLoading, chatAsk, reportFeature, clearChatMessages, isConnected, userRole, displayTimezone } =
-    useControlPlaneStore()
+  const chatSessions = useControlPlaneStore((s) => s.chatSessions)
+  const activeChatSessionId = useControlPlaneStore((s) => s.activeChatSessionId)
+  const chatMessages = useControlPlaneStore((s) => s.chatMessages)
+  const isChatLoading = useControlPlaneStore((s) => s.isChatLoading)
+  const chatAsk = useControlPlaneStore((s) => s.chatAsk)
+  const reportFeature = useControlPlaneStore((s) => s.reportFeature)
+  const clearChatMessages = useControlPlaneStore((s) => s.clearChatMessages)
+  const createChatSession = useControlPlaneStore((s) => s.createChatSession)
+  const setActiveChatSession = useControlPlaneStore((s) => s.setActiveChatSession)
+  const closeChatSession = useControlPlaneStore((s) => s.closeChatSession)
+  const isConnected = useControlPlaneStore((s) => s.isConnected)
+  const userRole = useControlPlaneStore((s) => s.userRole)
+  const selectedOrgName = useControlPlaneStore((s) => s.selectedOrgName)
+  const displayTimezone = useControlPlaneStore((s) => s.displayTimezone)
 
   const [input, setInput] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -176,14 +188,14 @@ export function ConversationalChatPanel() {
   const isAdmin = userRole === 'Admin'
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    bottomRef.current?.scrollIntoView({ behavior: 'auto' })
   }, [chatMessages, isChatLoading])
 
   const handleSubmit = async () => {
     const q = input.trim()
     if (!q || isChatLoading) return
     setInput('')
-    await chatAsk(q)
+    await chatAsk(q, selectedOrgName)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -231,6 +243,57 @@ export function ConversationalChatPanel() {
             clear
           </button>
         )}
+      </div>
+
+      {/* Sessions tabs */}
+      <div className="px-3 py-2 border-b border-white/6 bg-surface-900/40">
+        <div className="flex items-center gap-1.5 overflow-x-auto">
+          {chatSessions.map((session, idx) => {
+            const isActive = session.id === activeChatSessionId
+            return (
+              <div
+                key={session.id}
+                className={`group flex items-center gap-1 rounded border px-2 py-1 shrink-0 ${
+                  isActive
+                    ? 'border-brand-500/40 bg-brand-500/10'
+                    : 'border-white/10 bg-white/3'
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => setActiveChatSession(session.id)}
+                  disabled={isChatLoading}
+                  className={`max-w-[180px] truncate text-[10px] font-mono transition-colors ${
+                    isActive ? 'text-brand-300' : 'text-surface-400 hover:text-surface-200'
+                  } disabled:opacity-50`}
+                  title={session.title || `Chat ${idx + 1}`}
+                >
+                  {session.title || `Chat ${idx + 1}`}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => closeChatSession(session.id)}
+                  disabled={isChatLoading}
+                  className="text-[10px] text-surface-600 hover:text-rose-300 transition-colors disabled:opacity-40"
+                  title="Cerrar conversación"
+                  aria-label={`Cerrar conversación ${idx + 1}`}
+                >
+                  x
+                </button>
+              </div>
+            )
+          })}
+          <button
+            type="button"
+            onClick={createChatSession}
+            disabled={isChatLoading}
+            className="shrink-0 rounded border border-white/12 bg-white/4 px-2 py-1 text-[11px] font-mono text-surface-400 hover:text-surface-200 hover:border-white/20 transition-colors disabled:opacity-50"
+            title="Nueva conversación"
+            aria-label="Nueva conversación"
+          >
+            +
+          </button>
+        </div>
       </div>
 
       {/* Body */}

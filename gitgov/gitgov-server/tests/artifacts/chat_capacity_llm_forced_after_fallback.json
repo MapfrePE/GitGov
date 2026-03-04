@@ -1,0 +1,195 @@
+{
+  "config": {
+    "server_url": "http://127.0.0.1:3000",
+    "requests": 20,
+    "concurrency": 4,
+    "timeout_sec": 25.0,
+    "scenario": "llm_forced"
+  },
+  "summary": {
+    "total_requests": 20,
+    "duration_sec": 21.092734300007578,
+    "throughput_rps": 0.9481938052949738,
+    "http_counts": {
+      "200": 20
+    },
+    "chat_status_counts": {
+      "ok": 13,
+      "error": 7
+    },
+    "error_counts": {},
+    "latency_ms": {
+      "min": 208.91260000644252,
+      "max": 7256.548500037752,
+      "avg": 3736.3056650181534,
+      "p50": 4557.761250005569,
+      "p95": 6421.580960042776,
+      "p99": 7089.554992038756,
+      "ok_p50": 4557.761250005569,
+      "ok_p95": 6421.580960042776,
+      "ok_p99": 7089.554992038756
+    }
+  },
+  "samples": [
+    {
+      "idx": 0,
+      "question": "Escribe una metáfora original sobre gobernanza git y océanos.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 4904.04,
+      "error_kind": null
+    },
+    {
+      "idx": 1,
+      "question": "Escribe una metáfora original sobre gobernanza git y océanos.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 4107.82,
+      "error_kind": null
+    },
+    {
+      "idx": 2,
+      "question": "Redacta una explicación breve de políticas de repos con tono didáctico.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 1007.0,
+      "error_kind": null
+    },
+    {
+      "idx": 3,
+      "question": "Compara GitGov con un aeropuerto usando analogías técnicas.",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 7256.55,
+      "error_kind": null
+    },
+    {
+      "idx": 4,
+      "question": "Compara GitGov con un aeropuerto usando analogías técnicas.",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 6269.11,
+      "error_kind": null
+    },
+    {
+      "idx": 5,
+      "question": "Compara GitGov con un aeropuerto usando analogías técnicas.",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 5983.92,
+      "error_kind": null
+    },
+    {
+      "idx": 6,
+      "question": "Escribe una metáfora original sobre gobernanza git y océanos.",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 6325.21,
+      "error_kind": null
+    },
+    {
+      "idx": 7,
+      "question": "Explica por qué observabilidad y compliance no son lo mismo en 5 líneas.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 220.34,
+      "error_kind": null
+    },
+    {
+      "idx": 8,
+      "question": "Escribe una metáfora original sobre gobernanza git y océanos.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 4180.45,
+      "error_kind": null
+    },
+    {
+      "idx": 9,
+      "question": "Explica por qué observabilidad y compliance no son lo mismo en 5 líneas.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 239.4,
+      "error_kind": null
+    },
+    {
+      "idx": 10,
+      "question": "Dame 3 ejemplos creativos para explicar branch protection a juniors.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 208.91,
+      "error_kind": null
+    },
+    {
+      "idx": 11,
+      "question": "Escribe una metáfora original sobre gobernanza git y océanos.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 5014.96,
+      "error_kind": null
+    },
+    {
+      "idx": 12,
+      "question": "Escribe una metáfora original sobre gobernanza git y océanos.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 4211.49,
+      "error_kind": null
+    },
+    {
+      "idx": 13,
+      "question": "Escribe una metáfora original sobre gobernanza git y océanos.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 5503.75,
+      "error_kind": null
+    },
+    {
+      "idx": 14,
+      "question": "Compara GitGov con un aeropuerto usando analogías técnicas.",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 5908.33,
+      "error_kind": null
+    },
+    {
+      "idx": 15,
+      "question": "Compara GitGov con un aeropuerto usando analogías técnicas.",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 6377.64,
+      "error_kind": null
+    },
+    {
+      "idx": 16,
+      "question": "Explica por qué observabilidad y compliance no son lo mismo en 5 líneas.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 228.24,
+      "error_kind": null
+    },
+    {
+      "idx": 17,
+      "question": "Explica por qué observabilidad y compliance no son lo mismo en 5 líneas.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 209.06,
+      "error_kind": null
+    },
+    {
+      "idx": 18,
+      "question": "Escribe una metáfora original sobre gobernanza git y océanos.",
+      "http_code": 200,
+      "chat_status": "error",
+      "latency_ms": 6349.87,
+      "error_kind": null
+    },
+    {
+      "idx": 19,
+      "question": "Explica por qué observabilidad y compliance no son lo mismo en 5 líneas.",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 220.02,
+      "error_kind": null
+    }
+  ]
+}

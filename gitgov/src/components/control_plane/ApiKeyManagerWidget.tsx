@@ -10,7 +10,11 @@ function roleBadgeClass(role: string): string {
 }
 
 export function ApiKeyManagerWidget() {
-  const { apiKeys, isLoadingApiKeys, loadApiKeys, revokeApiKey, displayTimezone } = useControlPlaneStore()
+  const apiKeys = useControlPlaneStore((s) => s.apiKeys)
+  const isLoadingApiKeys = useControlPlaneStore((s) => s.isLoadingApiKeys)
+  const loadApiKeys = useControlPlaneStore((s) => s.loadApiKeys)
+  const revokeApiKey = useControlPlaneStore((s) => s.revokeApiKey)
+  const displayTimezone = useControlPlaneStore((s) => s.displayTimezone)
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [revokingId, setRevokingId] = useState<string | null>(null)
 

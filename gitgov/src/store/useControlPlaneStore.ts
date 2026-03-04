@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { tauriInvoke, parseCommandError } from '@/lib/tauri'
 import type { CombinedEvent } from '@/lib/types'
 import { detectBrowserTimezone, persistTimezone, readStoredTimezone } from '@/lib/timezone'
+import { useAuthStore } from '@/store/useAuthStore'
 
 interface ServerConfig {
   url: string
@@ -166,6 +167,13 @@ interface MeResponse {
   org_id: string | null
 }
 
+interface PendingControlPlaneSession {
+  client_id: string
+  role: string
+  org_id: string | null
+  org_name: string | null
+}
+
 interface RevokeApiKeyResponse {
   success: boolean
   message: string
@@ -327,6 +335,14 @@ export interface ChatMessage {
   timestamp: number
 }
 
+export interface ChatSession {
+  id: string
+  title: string
+  created_at: number
+  updated_at: number
+  messages: ChatMessage[]
+}
+
 interface ControlPlaneState {
   serverConfig: ServerConfig | null
   serverStats: ServerStats | null
@@ -344,7 +360,10 @@ interface ControlPlaneState {
   jiraTicketDetailFetchedAt: Record<string, number>
   jiraTicketDetailLoading: Record<string, boolean>
   userRole: string | null
+  userClientId: string | null
   userOrgId: string | null
+  controlPlaneAuthConfirmed: boolean
+  pendingControlPlaneSession: PendingControlPlaneSession | null
   selectedOrgName: string
   orgUsers: OrgUser[]
   orgUsersTotal: number
@@ -360,10 +379,14 @@ interface ControlPlaneState {
   apiKeys: ApiKeyInfo[]
   isLoadingApiKeys: boolean
   exportLogs: ExportLogEntry[]
+  connectionStatus: 'connected' | 'disconnected' | 'maintenance' | 'checking'
+  maintenanceDetectedAt: number | null
   isConnected: boolean
   isLoading: boolean
   isRefreshingDashboard: boolean
   error: string | null
+  chatSessions: ChatSession[]
+  activeChatSessionId: string | null
   chatMessages: ChatMessage[]
   isChatLoading: boolean
   displayTimezone: string
@@ -372,8 +395,13 @@ interface ControlPlaneState {
 interface ControlPlaneActions {
   initFromEnv: () => Promise<void>
   setServerConfig: (config: ServerConfig) => void
-  checkConnection: () => Promise<void>
-  refreshDashboardData: (params?: { logLimit?: number }) => Promise<void>
+  applyEnvApiKey: () => Promise<boolean>
+  applyApiKey: (apiKey: string, url?: string) => Promise<boolean>
+  markControlPlaneSessionValidated: (session: PendingControlPlaneSession) => void
+  confirmControlPlaneSession: () => void
+  resetControlPlaneAuthGate: () => void
+  checkConnection: (options?: { background?: boolean }) => Promise<void>
+  refreshDashboardData: (params?: { logLimit?: number; forceHeavy?: boolean }) => Promise<void>
   loadStats: () => Promise<void>
   loadDailyActivity: (days?: number) => Promise<void>
   loadLogs: (limit?: number, offset?: number) => Promise<void>
@@ -385,7 +413,7 @@ interface ControlPlaneActions {
   applyTicketCoverageFilters: (filters: Partial<JiraCoverageFilters>) => Promise<void>
   correlateJiraTickets: (params?: { hours?: number; limit?: number; repo_full_name?: string; org_name?: string }) => Promise<JiraCorrelateResponse | null>
   loadJiraTicketDetail: (ticketId: string) => Promise<JiraTicketDetail | null>
-  loadMe: () => Promise<void>
+  loadMe: () => Promise<boolean>
   createOrg: (payload: { login: string; name?: string }) => Promise<CreateOrgResponse | null>
   setSelectedOrgName: (orgName: string) => void
   loadOrgUsers: (params?: { orgName?: string; status?: string; limit?: number; offset?: number }) => Promise<void>
@@ -414,7 +442,7 @@ interface ControlPlaneActions {
   setTeamFilters: (filters: { days?: number; status?: '' | 'active' | 'disabled' }) => void
   loadTeamOverview: (params?: { orgName?: string; days?: number; status?: '' | 'active' | 'disabled'; limit?: number; offset?: number }) => Promise<void>
   loadTeamRepos: (params?: { orgName?: string; days?: number; limit?: number; offset?: number }) => Promise<void>
-  refreshForCurrentRole: () => Promise<void>
+  refreshForCurrentRole: (options?: { forceHeavy?: boolean }) => Promise<void>
   loadApiKeys: () => Promise<void>
   revokeApiKey: (keyId: string) => Promise<boolean>
   exportAuditData: (params: { exportType?: string; startDate?: number; endDate?: number; orgName?: string }) => Promise<ExportResponse | null>
@@ -424,20 +452,76 @@ interface ControlPlaneActions {
   chatAsk: (question: string, orgName?: string) => Promise<ChatAskResponse | null>
   reportFeature: (question: string, missingCapability?: string) => Promise<boolean>
   clearChatMessages: () => void
+  createChatSession: () => void
+  setActiveChatSession: (sessionId: string) => void
+  closeChatSession: (sessionId: string) => void
+  refreshChatMessagesForActiveUser: () => void
   setDisplayTimezone: (tz: string) => void
 }
 
 const CONTROL_PLANE_CONFIG_STORAGE_KEY = 'gitgov.control_plane_config'
 const JIRA_COVERAGE_FILTERS_STORAGE_KEY = 'gitgov.jira_coverage_filters'
+const LEGACY_CHAT_MESSAGES_STORAGE_KEY = 'gitgov.chat_messages'
+const CHAT_MESSAGES_STORAGE_KEY_PREFIX = 'gitgov.chat_messages.v2.'
 const JIRA_TICKET_DETAIL_TTL_MS = 2 * 60 * 1000
+const DEV_LOCAL_SERVER_URL = 'http://127.0.0.1:3000'
+const IS_DEV_MODE = Boolean(import.meta.env.DEV)
+const FOUNDER_GITHUB_LOGIN = (
+  import.meta.env.VITE_FOUNDER_GITHUB_LOGIN ||
+  import.meta.env.VITE_FOUNDER_LOGIN ||
+  ''
+).trim()
 
 // Compatibility fallback: existing desktop setups relied on this default key.
 // Keep it as last-resort fallback so the dashboard/logs continue working.
 const LEGACY_DEFAULT_API_KEY = '57f1ed59-371d-46ef-9fdf-508f59bc4963'
 const DEV_ACTIVITY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+const HEAVY_DASHBOARD_REFRESH_MS = 5 * 60 * 1000
+const MAX_CHAT_SESSIONS = 8
+const MAX_CHAT_MESSAGES_PER_SESSION = 80
+const DEFAULT_CHAT_SESSION_TITLE = 'Chat nuevo'
+
+interface StoredChatStateV2 {
+  version: 2
+  active_session_id: string
+  sessions: ChatSession[]
+}
 
 function isLikelySyntheticLogin(login: string): boolean {
   return /^(alias_|erase_ok_|hb_user_|user_[0-9a-f]{6,}|test_?user|golden_?test|smoke|manual-check|victim_)/i.test(login)
+}
+
+function buildActiveDevs7dFromLogs(logs: CombinedEvent[], now: number): ActiveDev7dEntry[] {
+  const start = now - DEV_ACTIVITY_WINDOW_MS
+  const grouped = new Map<string, {
+    events: number
+    last_seen: number
+    sample_repo_empty_count: number
+  }>()
+
+  for (const log of logs) {
+    if (log.created_at < start || log.created_at > now) continue
+    const login = (log.user_login ?? '').trim()
+    if (!login) continue
+    const prev = grouped.get(login) ?? { events: 0, last_seen: 0, sample_repo_empty_count: 0 }
+    prev.events += 1
+    if (log.created_at > prev.last_seen) prev.last_seen = log.created_at
+    if (!log.repo_name && !log.branch) prev.sample_repo_empty_count += 1
+    grouped.set(login, prev)
+  }
+
+  return Array.from(grouped.entries())
+    .map(([user_login, agg]) => {
+      const allEmptyRepoBranch = agg.sample_repo_empty_count === agg.events
+      return {
+        user_login,
+        events: agg.events,
+        last_seen: agg.last_seen,
+        suspicious_test_data: isLikelySyntheticLogin(user_login) || allEmptyRepoBranch,
+        sample_repo_empty_count: agg.sample_repo_empty_count,
+      }
+    })
+    .sort((a, b) => b.events - a.events || b.last_seen - a.last_seen)
 }
 
 function normalizeLoopbackUrl(url: string): string {
@@ -512,16 +596,253 @@ function persistJiraCoverageFilters(filters: JiraCoverageFilters) {
   }
 }
 
+function sanitizeChatMessages(raw: unknown): ChatMessage[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((item): item is ChatMessage => {
+      if (!item || typeof item !== 'object') return false
+      const candidate = item as Partial<ChatMessage>
+      return (
+        typeof candidate.id === 'string' &&
+        (candidate.role === 'user' || candidate.role === 'assistant') &&
+        typeof candidate.content === 'string' &&
+        typeof candidate.timestamp === 'number'
+      )
+    })
+    .slice(-MAX_CHAT_MESSAGES_PER_SESSION)
+}
+
+function parseStoredChatMessages(raw: string | null): ChatMessage[] {
+  if (!raw) return []
+  try {
+    return sanitizeChatMessages(JSON.parse(raw))
+  } catch {
+    return []
+  }
+}
+
+function normalizeChatTitle(input: string): string {
+  const compact = input.replace(/\s+/g, ' ').trim()
+  if (!compact) return DEFAULT_CHAT_SESSION_TITLE
+  if (compact.length <= 36) return compact
+  return `${compact.slice(0, 36)}...`
+}
+
+function deriveSessionTitleFromQuestion(question: string): string {
+  return normalizeChatTitle(question)
+}
+
+function buildChatSession(messages: ChatMessage[] = [], title?: string): ChatSession {
+  const now = Date.now()
+  return {
+    id: crypto.randomUUID(),
+    title: title?.trim() ? normalizeChatTitle(title) : DEFAULT_CHAT_SESSION_TITLE,
+    created_at: now,
+    updated_at: now,
+    messages: messages.slice(-MAX_CHAT_MESSAGES_PER_SESSION),
+  }
+}
+
+function sanitizeChatSession(input: unknown, fallbackIndex: number): ChatSession | null {
+  if (!input || typeof input !== 'object') return null
+  const candidate = input as Partial<ChatSession>
+  if (typeof candidate.id !== 'string') return null
+  const messages = sanitizeChatMessages(candidate.messages)
+  const createdAt = typeof candidate.created_at === 'number' && Number.isFinite(candidate.created_at)
+    ? candidate.created_at
+    : Date.now()
+  const updatedAt = typeof candidate.updated_at === 'number' && Number.isFinite(candidate.updated_at)
+    ? candidate.updated_at
+    : createdAt
+  const inferredTitle =
+    typeof candidate.title === 'string' && candidate.title.trim()
+      ? candidate.title
+      : (messages.find((m) => m.role === 'user')?.content ?? `${DEFAULT_CHAT_SESSION_TITLE} ${fallbackIndex + 1}`)
+  return {
+    id: candidate.id,
+    title: normalizeChatTitle(inferredTitle),
+    created_at: createdAt,
+    updated_at: updatedAt,
+    messages,
+  }
+}
+
+function normalizeChatSessions(input: unknown): ChatSession[] {
+  if (!Array.isArray(input)) return []
+  const sessions: ChatSession[] = []
+  for (let i = 0; i < input.length; i += 1) {
+    const normalized = sanitizeChatSession(input[i], i)
+    if (normalized) sessions.push(normalized)
+  }
+  sessions.sort((a, b) => a.created_at - b.created_at)
+  return sessions.slice(-MAX_CHAT_SESSIONS)
+}
+
+function readStoredChatStateFromRaw(raw: string | null): { sessions: ChatSession[]; activeSessionId: string | null } {
+  if (!raw) return { sessions: [], activeSessionId: null }
+  try {
+    const parsed = JSON.parse(raw) as StoredChatStateV2 | ChatMessage[]
+    if (Array.isArray(parsed)) {
+      const legacyMessages = sanitizeChatMessages(parsed)
+      if (!legacyMessages.length) return { sessions: [], activeSessionId: null }
+      const single = buildChatSession(legacyMessages, legacyMessages.find((m) => m.role === 'user')?.content)
+      return { sessions: [single], activeSessionId: single.id }
+    }
+    if (!parsed || typeof parsed !== 'object') return { sessions: [], activeSessionId: null }
+    const sessions = normalizeChatSessions((parsed as StoredChatStateV2).sessions)
+    if (!sessions.length) return { sessions: [], activeSessionId: null }
+    const requested = (parsed as StoredChatStateV2).active_session_id
+    const activeSessionId = sessions.some((s) => s.id === requested) ? requested : sessions[sessions.length - 1].id
+    return { sessions, activeSessionId }
+  } catch {
+    return { sessions: [], activeSessionId: null }
+  }
+}
+
+function deriveActiveChatMessages(sessions: ChatSession[], activeSessionId: string | null): ChatMessage[] {
+  if (!activeSessionId) return []
+  return sessions.find((session) => session.id === activeSessionId)?.messages ?? []
+}
+
+function ensureAtLeastOneSession(sessions: ChatSession[], activeSessionId: string | null): { sessions: ChatSession[]; activeSessionId: string } {
+  if (sessions.length > 0 && activeSessionId && sessions.some((s) => s.id === activeSessionId)) {
+    return { sessions, activeSessionId }
+  }
+  if (sessions.length > 0) {
+    return { sessions, activeSessionId: sessions[sessions.length - 1].id }
+  }
+  const session = buildChatSession()
+  return { sessions: [session], activeSessionId: session.id }
+}
+
+function getActiveChatStorageKey(): string {
+  const login = (useAuthStore.getState().user?.login ?? '').trim().toLowerCase()
+  const encodedLogin = login ? encodeURIComponent(login) : 'anonymous'
+  return `${CHAT_MESSAGES_STORAGE_KEY_PREFIX}${encodedLogin}`
+}
+
+function hasScopedChatStorageEntries(): boolean {
+  try {
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = window.localStorage.key(i)
+      if (key?.startsWith(CHAT_MESSAGES_STORAGE_KEY_PREFIX)) return true
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return false
+}
+
+function readStoredChatState(): { sessions: ChatSession[]; activeSessionId: string } {
+  try {
+    const userScopedKey = getActiveChatStorageKey()
+    const userScopedRaw = window.localStorage.getItem(userScopedKey)
+    if (userScopedRaw !== null) {
+      const current = readStoredChatStateFromRaw(userScopedRaw)
+      return ensureAtLeastOneSession(current.sessions, current.activeSessionId)
+    }
+    const legacyRaw = window.localStorage.getItem(LEGACY_CHAT_MESSAGES_STORAGE_KEY)
+    if (!legacyRaw) return ensureAtLeastOneSession([], null)
+
+    // Migrate legacy global history only when no scoped histories exist yet.
+    // This prevents old mixed history from leaking to additional users.
+    if (hasScopedChatStorageEntries()) return ensureAtLeastOneSession([], null)
+
+    const legacyMessages = parseStoredChatMessages(legacyRaw)
+    const migrated = ensureAtLeastOneSession(
+      legacyMessages.length
+        ? [buildChatSession(legacyMessages, legacyMessages.find((m) => m.role === 'user')?.content)]
+        : [],
+      null,
+    )
+    try {
+      window.localStorage.setItem(userScopedKey, JSON.stringify({
+        version: 2,
+        active_session_id: migrated.activeSessionId,
+        sessions: migrated.sessions,
+      } satisfies StoredChatStateV2))
+      window.localStorage.removeItem(LEGACY_CHAT_MESSAGES_STORAGE_KEY)
+    } catch {
+      // ignore migration persistence errors
+    }
+    return migrated
+  } catch {
+    return ensureAtLeastOneSession([], null)
+  }
+}
+
+let chatPersistTimeoutId: number | null = null
+let checkConnectionInFlight: Promise<void> | null = null
+let refreshForCurrentRoleInFlight: Promise<void> | null = null
+let lastHeavyDashboardRefreshAt = 0
+const initialChatState = readStoredChatState()
+
+function persistChatState(sessions: ChatSession[], activeSessionId: string) {
+  try {
+    const userScopedKey = getActiveChatStorageKey()
+    if (chatPersistTimeoutId !== null) {
+      window.clearTimeout(chatPersistTimeoutId)
+      chatPersistTimeoutId = null
+    }
+    const compactSessions = sessions.slice(-MAX_CHAT_SESSIONS).map((session) => {
+      const compactMessages = session.messages.slice(-MAX_CHAT_MESSAGES_PER_SESSION).map((msg) => {
+        const trimmedContent = msg.content.length > 4000 ? `${msg.content.slice(0, 4000)}\n...[recortado para rendimiento]` : msg.content
+        if (!msg.response) {
+          return { ...msg, content: trimmedContent }
+        }
+        const trimmedAnswer =
+          msg.response.answer.length > 4000
+            ? `${msg.response.answer.slice(0, 4000)}\n...[recortado para rendimiento]`
+            : msg.response.answer
+        return {
+          ...msg,
+          content: trimmedContent,
+          response: {
+            ...msg.response,
+            answer: trimmedAnswer,
+            data_refs: msg.response.data_refs.slice(0, 12),
+          },
+        }
+      })
+      const fallbackTitle = compactMessages.find((m) => m.role === 'user')?.content ?? session.title
+      return {
+        ...session,
+        title: normalizeChatTitle(session.title || fallbackTitle),
+        messages: compactMessages,
+      }
+    })
+    const payload: StoredChatStateV2 = {
+      version: 2,
+      active_session_id: activeSessionId,
+      sessions: compactSessions,
+    }
+    const serialized = JSON.stringify(payload)
+    // Write storage out of the immediate render turn to reduce UI hitching.
+    chatPersistTimeoutId = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(userScopedKey, serialized)
+      } catch {
+        // ignore
+      } finally {
+        chatPersistTimeoutId = null
+      }
+    }, 0)
+  } catch {
+    // ignore
+  }
+}
+
 function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: ServerConfig | null): ServerConfig {
   const stored = readStoredServerConfig()
   const envUrl = normalizeLoopbackUrl(import.meta.env.VITE_SERVER_URL || '')
   const envApiKey = (import.meta.env.VITE_API_KEY || '').trim()
-  const url =
+  const candidateUrl =
     normalizeLoopbackUrl(input?.url ?? '') ||
     normalizeLoopbackUrl(previous?.url ?? '') ||
     envUrl ||
     normalizeLoopbackUrl(stored?.url ?? '') ||
-    'http://127.0.0.1:3000'
+    DEV_LOCAL_SERVER_URL
+  const url = IS_DEV_MODE ? DEV_LOCAL_SERVER_URL : normalizeLoopbackUrl(candidateUrl)
 
   const apiKey =
     input?.api_key?.trim() ||
@@ -534,6 +855,38 @@ function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: Se
     url: normalizeLoopbackUrl(url),
     api_key: apiKey || undefined,
   }
+}
+
+function isUnauthorizedError(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return normalized.includes('401') || normalized.includes('unauthorized') || normalized.includes('invalid or expired api key')
+}
+
+function isControlPlaneIdentityCompatible(
+  clientId: string,
+  githubLogin: string | null,
+  role: string,
+): boolean {
+  if (!githubLogin) return true
+
+  const cp = clientId.trim().toLowerCase()
+  const gh = githubLogin.trim().toLowerCase()
+  const normalizedRole = role.trim().toLowerCase()
+  if (!cp || !gh) return false
+
+  // Founder global key: if founder login is configured, enforce it; if not configured, allow.
+  if (cp === 'bootstrap-admin') {
+    if (!FOUNDER_GITHUB_LOGIN) return true
+    return gh === FOUNDER_GITHUB_LOGIN.toLowerCase()
+  }
+
+  // Developers must always match GitHub login.
+  if (normalizedRole === 'developer') {
+    return cp === gh
+  }
+
+  // Admin/Architect/PM keys may target service users or scoped org admins.
+  return true
 }
 
 async function syncOutboxServerConfig(config: ServerConfig | null): Promise<void> {
@@ -561,7 +914,10 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   jiraTicketDetailFetchedAt: {},
   jiraTicketDetailLoading: {},
   userRole: null,
+  userClientId: null,
   userOrgId: null,
+  controlPlaneAuthConfirmed: true,
+  pendingControlPlaneSession: null,
   selectedOrgName: '',
   orgUsers: [],
   orgUsersTotal: 0,
@@ -577,11 +933,15 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   apiKeys: [],
   isLoadingApiKeys: false,
   exportLogs: [],
+  connectionStatus: 'disconnected',
+  maintenanceDetectedAt: null,
   isConnected: false,
   isLoading: false,
   isRefreshingDashboard: false,
   error: null,
-  chatMessages: [],
+  chatSessions: initialChatState.sessions,
+  activeChatSessionId: initialChatState.activeSessionId,
+  chatMessages: deriveActiveChatMessages(initialChatState.sessions, initialChatState.activeSessionId),
   isChatLoading: false,
   displayTimezone: readStoredTimezone() || detectBrowserTimezone(),
 
@@ -602,19 +962,161 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     get().checkConnection()
   },
 
-  checkConnection: async () => {
+  applyEnvApiKey: async () => {
     const { serverConfig } = get()
-    if (!serverConfig) return
+    const envApiKey = (import.meta.env.VITE_API_KEY || '').trim()
+    if (!envApiKey) {
+      set({ error: 'No existe VITE_API_KEY en el entorno actual.' })
+      return false
+    }
 
-    set({ isLoading: true, error: null })
-    try {
-      const healthy = await tauriInvoke<boolean>('cmd_server_health', { config: serverConfig })
-      set({ isConnected: healthy, isLoading: false })
-      if (healthy) {
-        void get().loadMe()
+    const next = resolveServerConfig(
+      {
+        url: serverConfig?.url ?? DEV_LOCAL_SERVER_URL,
+        api_key: envApiKey,
+      },
+      serverConfig,
+    )
+    persistServerConfig(next)
+    set({ serverConfig: next, error: null })
+    await syncOutboxServerConfig(next)
+    await get().checkConnection()
+    const state = get()
+    return state.isConnected && state.userRole === 'Admin'
+  },
+
+  applyApiKey: async (apiKey, url) => {
+    const { serverConfig } = get()
+    const normalizedKey = apiKey.trim()
+    if (!normalizedKey) {
+      set({ error: 'Ingresa una API key válida.' })
+      return false
+    }
+    const next = resolveServerConfig(
+      {
+        url: url?.trim() || serverConfig?.url || DEV_LOCAL_SERVER_URL,
+        api_key: normalizedKey,
+      },
+      serverConfig,
+    )
+    persistServerConfig(next)
+    set({ serverConfig: next, error: null })
+    await syncOutboxServerConfig(next)
+    await get().checkConnection()
+    const state = get()
+    return state.isConnected && Boolean(state.userRole)
+  },
+
+  markControlPlaneSessionValidated: (session) => {
+    set({
+      pendingControlPlaneSession: session,
+      controlPlaneAuthConfirmed: false,
+    })
+  },
+
+  confirmControlPlaneSession: () => {
+    set({
+      controlPlaneAuthConfirmed: true,
+      pendingControlPlaneSession: null,
+      error: null,
+    })
+  },
+
+  resetControlPlaneAuthGate: () => {
+    set({
+      controlPlaneAuthConfirmed: true,
+      pendingControlPlaneSession: null,
+    })
+  },
+
+  checkConnection: async (options) => {
+    if (checkConnectionInFlight) {
+      await checkConnectionInFlight
+      return
+    }
+
+    const run = (async () => {
+      const { serverConfig, isConnected: wasConnected } = get()
+      if (!serverConfig) return
+      const isBackground = Boolean(options?.background)
+
+      if (!isBackground) {
+        set({ isLoading: true, error: null, connectionStatus: 'checking' })
       }
-    } catch (e) {
-      set({ error: parseCommandError(String(e)).message, isLoading: false, isConnected: false })
+      try {
+        const healthy = await tauriInvoke<boolean>('cmd_server_health', { config: serverConfig })
+        if (healthy) {
+          let hasRoleContext = await get().loadMe()
+
+          if (!hasRoleContext) {
+            const envApiKey = (import.meta.env.VITE_API_KEY || '').trim()
+            const currentApiKey = serverConfig.api_key?.trim() || ''
+            if (envApiKey && envApiKey !== currentApiKey) {
+              const recoveredConfig: ServerConfig = { ...serverConfig, api_key: envApiKey }
+              persistServerConfig(recoveredConfig)
+              await syncOutboxServerConfig(recoveredConfig)
+              set({ serverConfig: recoveredConfig })
+              hasRoleContext = await get().loadMe()
+            }
+          }
+
+          if (hasRoleContext) {
+            set({
+              isConnected: true,
+              isLoading: false,
+              connectionStatus: 'connected',
+              maintenanceDetectedAt: null,
+              error: isBackground ? get().error : null,
+            })
+          } else {
+            set({
+              isConnected: false,
+              isLoading: false,
+              connectionStatus: 'disconnected',
+              maintenanceDetectedAt: null,
+              userRole: null,
+              userClientId: null,
+              userOrgId: null,
+              controlPlaneAuthConfirmed: true,
+              pendingControlPlaneSession: null,
+              error: get().error ?? (isBackground ? null : 'No se pudo autenticar con el Control Plane. Verifica la API key.'),
+            })
+          }
+        } else {
+          // Health endpoint returned false — treat as maintenance if was previously connected
+          if (wasConnected) {
+            set((s) => ({
+              isConnected: false,
+              isLoading: false,
+              connectionStatus: 'maintenance',
+              maintenanceDetectedAt: s.maintenanceDetectedAt ?? Date.now(),
+            }))
+          } else {
+            set({ isConnected: false, isLoading: false, connectionStatus: 'disconnected' })
+          }
+        }
+      } catch (e) {
+        const errMsg = parseCommandError(String(e)).message
+        // If previously connected and now failing → server is likely restarting (maintenance)
+        if (wasConnected) {
+          set((s) => ({
+            error: errMsg,
+            isLoading: false,
+            isConnected: false,
+            connectionStatus: 'maintenance',
+            maintenanceDetectedAt: s.maintenanceDetectedAt ?? Date.now(),
+          }))
+        } else {
+          set({ error: errMsg, isLoading: false, isConnected: false, connectionStatus: 'disconnected' })
+        }
+      }
+    })()
+
+    checkConnectionInFlight = run
+    try {
+      await run
+    } finally {
+      if (checkConnectionInFlight === run) checkConnectionInFlight = null
     }
   },
 
@@ -624,19 +1126,34 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
 
     set({ isRefreshingDashboard: true })
     try {
+      const runStartedAt = Date.now()
       await Promise.all([
         get().loadStats(),
         get().loadDailyActivity(14),
-        get().loadLogs(params?.logLimit ?? 50),
-        get().loadActiveDevs7d(),
-        get().loadJenkinsCorrelations(50),
-        get().loadPrMergeEvidence(200),
-        get().loadTicketCoverage({
-          hours: jiraCoverageFilters.hours,
-          repo_full_name: jiraCoverageFilters.repo_full_name.trim() || undefined,
-          branch: jiraCoverageFilters.branch.trim() || undefined,
-        }),
+        get().loadLogs(params?.logLimit ?? 500),
       ])
+
+      const shouldRunHeavyRefresh =
+        Boolean(params?.forceHeavy) ||
+        lastHeavyDashboardRefreshAt === 0 ||
+        runStartedAt - lastHeavyDashboardRefreshAt >= HEAVY_DASHBOARD_REFRESH_MS
+
+      if (shouldRunHeavyRefresh) {
+        await Promise.all([
+          get().loadJenkinsCorrelations(50),
+          get().loadPrMergeEvidence(200),
+          get().loadTicketCoverage({
+            hours: jiraCoverageFilters.hours,
+            repo_full_name: jiraCoverageFilters.repo_full_name.trim() || undefined,
+            branch: jiraCoverageFilters.branch.trim() || undefined,
+          }),
+        ])
+        lastHeavyDashboardRefreshAt = Date.now()
+      }
+
+      const now = Date.now()
+      const activeDevs7d = buildActiveDevs7dFromLogs(get().serverLogs, now)
+      set({ activeDevs7d, activeDevs7dUpdatedAt: now })
     } finally {
       set({ isRefreshingDashboard: false })
     }
@@ -670,7 +1187,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     }
   },
 
-  loadLogs: async (limit = 100, offset = 0) => {
+  loadLogs: async (limit = 500, offset = 0) => {
     const { serverConfig } = get()
     if (!serverConfig) return
     try {
@@ -700,35 +1217,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
           end_date: now,
         },
       })
-
-      const grouped = new Map<string, {
-        events: number
-        last_seen: number
-        sample_repo_empty_count: number
-      }>()
-
-      for (const log of logs) {
-        const login = (log.user_login ?? '').trim()
-        if (!login) continue
-        const prev = grouped.get(login) ?? { events: 0, last_seen: 0, sample_repo_empty_count: 0 }
-        prev.events += 1
-        if (log.created_at > prev.last_seen) prev.last_seen = log.created_at
-        if (!log.repo_name && !log.branch) prev.sample_repo_empty_count += 1
-        grouped.set(login, prev)
-      }
-
-      const activeDevs7d: ActiveDev7dEntry[] = Array.from(grouped.entries())
-        .map(([user_login, agg]) => {
-          const allEmptyRepoBranch = agg.sample_repo_empty_count === agg.events
-          return {
-            user_login,
-            events: agg.events,
-            last_seen: agg.last_seen,
-            suspicious_test_data: isLikelySyntheticLogin(user_login) || allEmptyRepoBranch,
-            sample_repo_empty_count: agg.sample_repo_empty_count,
-          }
-        })
-        .sort((a, b) => b.events - a.events || b.last_seen - a.last_seen)
+      const activeDevs7d = buildActiveDevs7dFromLogs(logs, now)
 
       set({ activeDevs7d, activeDevs7dUpdatedAt: now })
     } catch {
@@ -918,19 +1407,44 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
 
   loadMe: async () => {
     const { serverConfig } = get()
-    if (!serverConfig) return
+    if (!serverConfig) return false
     try {
       const me = await tauriInvoke<MeResponse>('cmd_server_get_me', { config: serverConfig })
-      set({ userRole: me.role, userOrgId: me.org_id ?? null })
-    } catch {
+      const githubLogin = useAuthStore.getState().user?.login ?? null
+      if (!isControlPlaneIdentityCompatible(me.client_id, githubLogin, me.role)) {
+        const founderHint = me.client_id === 'bootstrap-admin'
+          ? ' La key founder (bootstrap-admin) requiere sesión GitHub del founder configurado en VITE_FOUNDER_GITHUB_LOGIN.'
+          : ''
+        set({
+          userRole: null,
+          userClientId: null,
+          userOrgId: null,
+          controlPlaneAuthConfirmed: true,
+          pendingControlPlaneSession: null,
+          error: `La API key autenticó como '${me.client_id}', pero tu sesión GitHub es '${githubLogin ?? 'desconocida'}'.${founderHint}`,
+        })
+        return false
+      }
+      set({ userRole: me.role, userClientId: me.client_id, userOrgId: me.org_id ?? null, error: null })
+      return true
+    } catch (e) {
+      const meError = parseCommandError(String(e)).message
       // Backward-compat fallback: older servers may not expose /me.
       // If /stats works, treat current key as admin.
       try {
         await tauriInvoke<ServerStats>('cmd_server_get_stats', { config: serverConfig })
-        set({ userRole: 'Admin', userOrgId: null })
+        set({ userRole: 'Admin', userClientId: null, userOrgId: null, error: null })
+        return true
       } catch {
-        // Last-resort default to developer view.
-        set({ userRole: 'Developer', userOrgId: null })
+        set({
+          userRole: null,
+          userClientId: null,
+          userOrgId: null,
+          error: isUnauthorizedError(meError)
+            ? 'API key inválida o expirada para Control Plane. Usa la key Founder/Admin.'
+            : meError,
+        })
+        return false
       }
     }
   },
@@ -1194,21 +1708,31 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     }
   },
 
-  refreshForCurrentRole: async () => {
-    const { userRole, selectedOrgName, teamWindowDays, teamStatusFilter } = get()
-    if (userRole === 'Admin') {
-      await get().refreshDashboardData({ logLimit: 50 })
-      const scopedOrgName = selectedOrgName.trim() || undefined
-      await Promise.all([
-        get().loadOrgUsers({ orgName: scopedOrgName }),
-        get().loadOrgInvitations({ orgName: scopedOrgName }),
-        get().loadTeamOverview({ orgName: scopedOrgName, days: teamWindowDays, status: teamStatusFilter }),
-        get().loadTeamRepos({ orgName: scopedOrgName, days: teamWindowDays }),
-      ])
+  refreshForCurrentRole: async (options) => {
+    if (refreshForCurrentRoleInFlight) {
+      await refreshForCurrentRoleInFlight
+      if (options?.forceHeavy) {
+        await get().refreshForCurrentRole({ forceHeavy: true })
+      }
       return
     }
 
-    await get().loadLogs(50, 0)
+    const run = (async () => {
+      const { userRole } = get()
+      if (userRole === 'Admin') {
+        await get().refreshDashboardData({ logLimit: 500, forceHeavy: options?.forceHeavy })
+        return
+      }
+
+      await get().loadLogs(500, 0)
+    })()
+
+    refreshForCurrentRoleInFlight = run
+    try {
+      await run
+    } finally {
+      if (refreshForCurrentRoleInFlight === run) refreshForCurrentRoleInFlight = null
+    }
   },
 
   loadApiKeys: async () => {
@@ -1251,6 +1775,8 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     set({
       serverConfig: null,
       isConnected: false,
+      connectionStatus: 'disconnected',
+      maintenanceDetectedAt: null,
       serverStats: null,
       serverLogs: [],
       activeDevs7d: [],
@@ -1265,7 +1791,10 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       jiraTicketDetailFetchedAt: {},
       jiraTicketDetailLoading: {},
       userRole: null,
+      userClientId: null,
       userOrgId: null,
+      controlPlaneAuthConfirmed: true,
+      pendingControlPlaneSession: null,
       selectedOrgName: '',
       orgUsers: [],
       orgUsersTotal: 0,
@@ -1283,7 +1812,6 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       exportLogs: [],
       isRefreshingDashboard: false,
       error: null,
-      chatMessages: [],
       isChatLoading: false,
     })
   },
@@ -1291,21 +1819,55 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   // ── Chat actions ─────────────────────────────────────────────────────────
 
   chatAsk: async (question, orgName) => {
-    const { serverConfig } = get()
+    const { serverConfig, selectedOrgName } = get()
     if (!serverConfig) return null
+    const effectiveOrgName = orgName?.trim() || selectedOrgName.trim() || undefined
+    const questionTrimmed = question.trim()
+    if (!questionTrimmed) return null
+
+    let sessionId = get().activeChatSessionId
+    if (!sessionId) {
+      const seeded = buildChatSession()
+      sessionId = seeded.id
+      set((s) => ({
+        chatSessions: [...s.chatSessions, seeded].slice(-MAX_CHAT_SESSIONS),
+        activeChatSessionId: seeded.id,
+        chatMessages: seeded.messages,
+      }))
+    }
 
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: question,
+      content: questionTrimmed,
       timestamp: Date.now(),
     }
-    set((s) => ({ chatMessages: [...s.chatMessages, userMsg], isChatLoading: true }))
+
+    set((s) => {
+      const idx = s.chatSessions.findIndex((session) => session.id === sessionId)
+      if (idx < 0) return { isChatLoading: true }
+      const target = s.chatSessions[idx]
+      const isFirstUserQuestion = !target.messages.some((m) => m.role === 'user')
+      const nextSession: ChatSession = {
+        ...target,
+        title: isFirstUserQuestion ? deriveSessionTitleFromQuestion(questionTrimmed) : target.title,
+        updated_at: Date.now(),
+        messages: [...target.messages, userMsg].slice(-MAX_CHAT_MESSAGES_PER_SESSION),
+      }
+      const nextSessions = [...s.chatSessions]
+      nextSessions[idx] = nextSession
+      persistChatState(nextSessions, s.activeChatSessionId ?? nextSession.id)
+      return {
+        chatSessions: nextSessions,
+        chatMessages: s.activeChatSessionId === nextSession.id ? nextSession.messages : s.chatMessages,
+        isChatLoading: true,
+      }
+    })
 
     try {
       const response = await tauriInvoke<ChatAskResponse>('cmd_server_chat_ask', {
         config: serverConfig,
-        request: { question, org_name: orgName ?? null },
+        request: { question: questionTrimmed, org_name: effectiveOrgName ?? null },
       })
       const assistantMsg: ChatMessage = {
         id: crypto.randomUUID(),
@@ -1314,7 +1876,24 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
         response,
         timestamp: Date.now(),
       }
-      set((s) => ({ chatMessages: [...s.chatMessages, assistantMsg], isChatLoading: false }))
+      set((s) => {
+        const idx = s.chatSessions.findIndex((session) => session.id === sessionId)
+        if (idx < 0) return { isChatLoading: false }
+        const target = s.chatSessions[idx]
+        const nextSession: ChatSession = {
+          ...target,
+          updated_at: Date.now(),
+          messages: [...target.messages, assistantMsg].slice(-MAX_CHAT_MESSAGES_PER_SESSION),
+        }
+        const nextSessions = [...s.chatSessions]
+        nextSessions[idx] = nextSession
+        persistChatState(nextSessions, s.activeChatSessionId ?? nextSession.id)
+        return {
+          chatSessions: nextSessions,
+          chatMessages: s.activeChatSessionId === nextSession.id ? nextSession.messages : s.chatMessages,
+          isChatLoading: false,
+        }
+      })
       return response
     } catch (e) {
       const errMsg: ChatMessage = {
@@ -1324,7 +1903,24 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
         response: { status: 'error', answer: parseCommandError(String(e)).message, can_report_feature: false, data_refs: [] },
         timestamp: Date.now(),
       }
-      set((s) => ({ chatMessages: [...s.chatMessages, errMsg], isChatLoading: false }))
+      set((s) => {
+        const idx = s.chatSessions.findIndex((session) => session.id === sessionId)
+        if (idx < 0) return { isChatLoading: false }
+        const target = s.chatSessions[idx]
+        const nextSession: ChatSession = {
+          ...target,
+          updated_at: Date.now(),
+          messages: [...target.messages, errMsg].slice(-MAX_CHAT_MESSAGES_PER_SESSION),
+        }
+        const nextSessions = [...s.chatSessions]
+        nextSessions[idx] = nextSession
+        persistChatState(nextSessions, s.activeChatSessionId ?? nextSession.id)
+        return {
+          chatSessions: nextSessions,
+          chatMessages: s.activeChatSessionId === nextSession.id ? nextSession.messages : s.chatMessages,
+          isChatLoading: false,
+        }
+      })
       return null
     }
   },
@@ -1349,7 +1945,91 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     }
   },
 
-  clearChatMessages: () => set({ chatMessages: [] }),
+  clearChatMessages: () => {
+    set((s) => {
+      const activeId = s.activeChatSessionId
+      if (!activeId) return {}
+      const idx = s.chatSessions.findIndex((session) => session.id === activeId)
+      if (idx < 0) return {}
+      const target = s.chatSessions[idx]
+      const nextSession: ChatSession = { ...target, messages: [], updated_at: Date.now(), title: target.title || DEFAULT_CHAT_SESSION_TITLE }
+      const nextSessions = [...s.chatSessions]
+      nextSessions[idx] = nextSession
+      persistChatState(nextSessions, activeId)
+      return { chatSessions: nextSessions, chatMessages: [] }
+    })
+  },
+
+  createChatSession: () => {
+    if (get().isChatLoading) return
+    set((s) => {
+      let nextSessions = [...s.chatSessions]
+      if (nextSessions.length >= MAX_CHAT_SESSIONS) {
+        const removableIdx = nextSessions.findIndex((session) => session.id !== s.activeChatSessionId)
+        nextSessions.splice(removableIdx >= 0 ? removableIdx : 0, 1)
+      }
+      const newSession = buildChatSession([], `${DEFAULT_CHAT_SESSION_TITLE} ${nextSessions.length + 1}`)
+      nextSessions = [...nextSessions, newSession]
+      persistChatState(nextSessions, newSession.id)
+      return {
+        chatSessions: nextSessions,
+        activeChatSessionId: newSession.id,
+        chatMessages: [],
+        isChatLoading: false,
+      }
+    })
+  },
+
+  setActiveChatSession: (sessionId) => {
+    if (get().isChatLoading) return
+    set((s) => {
+      const target = s.chatSessions.find((session) => session.id === sessionId)
+      if (!target) return {}
+      persistChatState(s.chatSessions, target.id)
+      return { activeChatSessionId: target.id, chatMessages: target.messages }
+    })
+  },
+
+  closeChatSession: (sessionId) => {
+    set((s) => {
+      if (s.isChatLoading && s.activeChatSessionId === sessionId) return {}
+      const idx = s.chatSessions.findIndex((session) => session.id === sessionId)
+      if (idx < 0) return {}
+
+      if (s.chatSessions.length <= 1) {
+        const resetSession: ChatSession = { ...s.chatSessions[0], messages: [], updated_at: Date.now(), title: DEFAULT_CHAT_SESSION_TITLE }
+        persistChatState([resetSession], resetSession.id)
+        return {
+          chatSessions: [resetSession],
+          activeChatSessionId: resetSession.id,
+          chatMessages: [],
+          isChatLoading: false,
+        }
+      }
+
+      const remaining = s.chatSessions.filter((session) => session.id !== sessionId)
+      const nextActiveId = s.activeChatSessionId === sessionId
+        ? remaining[Math.max(0, idx - 1)]?.id ?? remaining[0].id
+        : (s.activeChatSessionId ?? remaining[0].id)
+      const nextMessages = remaining.find((session) => session.id === nextActiveId)?.messages ?? []
+      persistChatState(remaining, nextActiveId)
+      return {
+        chatSessions: remaining,
+        activeChatSessionId: nextActiveId,
+        chatMessages: nextMessages,
+      }
+    })
+  },
+
+  refreshChatMessagesForActiveUser: () => {
+    const next = readStoredChatState()
+    set({
+      chatSessions: next.sessions,
+      activeChatSessionId: next.activeSessionId,
+      chatMessages: deriveActiveChatMessages(next.sessions, next.activeSessionId),
+      isChatLoading: false,
+    })
+  },
 
   setDisplayTimezone: (tz: string) => {
     persistTimezone(tz)

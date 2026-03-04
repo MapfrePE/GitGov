@@ -28,7 +28,7 @@ function SplashScreen() {
 
 function App() {
   const { checkExistingSession, isLoading } = useAuthStore()
-  const { initFromEnv } = useControlPlaneStore()
+  const initFromEnv = useControlPlaneStore((s) => s.initFromEnv)
   const { initializeUpdater } = useUpdateStore()
   const [initialized, setInitialized] = useState(false)
 

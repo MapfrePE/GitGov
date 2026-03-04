@@ -1,4 +1,4 @@
-import { Fragment, useState, useCallback } from 'react'
+import { Fragment, useState, useCallback, useMemo } from 'react'
 import { GitCommit, X, ChevronDown, ChevronRight, ChevronLeft, ExternalLink } from 'lucide-react'
 import { Badge } from '@/components/shared/Badge'
 import { Spinner } from '@/components/shared/Spinner'
@@ -32,14 +32,17 @@ function isLikelySyntheticEvent(log: CombinedEvent): boolean {
 }
 
 export function RecentCommitsTable() {
-  const {
-    serverLogs, jenkinsCorrelations, ticketCoverage,
-    prMergeEvidence,
-    jiraTicketDetails, jiraTicketDetailLoading,
-    loadJiraTicketDetail,
-    logsPage, logsPageSize, setLogsPage,
-    displayTimezone,
-  } = useControlPlaneStore()
+  const serverLogs = useControlPlaneStore((s) => s.serverLogs)
+  const jenkinsCorrelations = useControlPlaneStore((s) => s.jenkinsCorrelations)
+  const ticketCoverage = useControlPlaneStore((s) => s.ticketCoverage)
+  const prMergeEvidence = useControlPlaneStore((s) => s.prMergeEvidence)
+  const jiraTicketDetails = useControlPlaneStore((s) => s.jiraTicketDetails)
+  const jiraTicketDetailLoading = useControlPlaneStore((s) => s.jiraTicketDetailLoading)
+  const loadJiraTicketDetail = useControlPlaneStore((s) => s.loadJiraTicketDetail)
+  const logsPage = useControlPlaneStore((s) => s.logsPage)
+  const logsPageSize = useControlPlaneStore((s) => s.logsPageSize)
+  const setLogsPage = useControlPlaneStore((s) => s.setLogsPage)
+  const displayTimezone = useControlPlaneStore((s) => s.displayTimezone)
 
   const [expandedCommitRows, setExpandedCommitRows] = useState<Record<string, boolean>>({})
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null)
@@ -51,22 +54,28 @@ export function RecentCommitsTable() {
     if (ticketId) void loadJiraTicketDetail(ticketId)
   }, [loadJiraTicketDetail])
 
-  const allRows: DashboardRow[] = buildDashboardRows(serverLogs)
+  const allRows: DashboardRow[] = useMemo(() => buildDashboardRows(serverLogs), [serverLogs])
   const totalRows = allRows.length
   const totalPages = Math.max(1, Math.ceil(totalRows / logsPageSize))
   const safePage = Math.min(logsPage, totalPages - 1)
   const dashboardRows = allRows.slice(safePage * logsPageSize, (safePage + 1) * logsPageSize)
 
-  const pipelineByCommitSha = new Map(
-    jenkinsCorrelations.filter((c) => c.pipeline && c.commit_sha).map((c) => [c.commit_sha.toLowerCase(), c.pipeline!]),
+  const pipelineByCommitSha = useMemo(
+    () => new Map(
+      jenkinsCorrelations.filter((c) => c.pipeline && c.commit_sha).map((c) => [c.commit_sha.toLowerCase(), c.pipeline!]),
+    ),
+    [jenkinsCorrelations],
   )
-  const prEvidenceByHeadSha = new Map(
-    prMergeEvidence
-      .filter((entry) => entry.head_sha && entry.approvals_count >= 0)
-      .map((entry) => [entry.head_sha!.toLowerCase(), entry]),
+  const prEvidenceByHeadSha = useMemo(
+    () => new Map(
+      prMergeEvidence
+        .filter((entry) => entry.head_sha && entry.approvals_count >= 0)
+        .map((entry) => [entry.head_sha!.toLowerCase(), entry]),
+    ),
+    [prMergeEvidence],
   )
 
-  const findPipelineForLog = (log: CombinedEvent): CommitPipelineRun | null => {
+  const findPipelineForLog = useCallback((log: CombinedEvent): CommitPipelineRun | null => {
     const sha = readDetailString(log, 'commit_sha')
     if (!sha) return null
     const normalized = sha.toLowerCase()
@@ -76,9 +85,9 @@ export function RecentCommitsTable() {
       if (fullSha.startsWith(normalized) || normalized.startsWith(fullSha)) return p
     }
     return null
-  }
+  }, [pipelineByCommitSha])
 
-  const findPrEvidenceForLog = (log: CombinedEvent): { approvals_count: number; pr_number: number } | null => {
+  const findPrEvidenceForLog = useCallback((log: CombinedEvent): { approvals_count: number; pr_number: number } | null => {
     const sha = readDetailString(log, 'commit_sha')
     if (!sha) return null
     const normalized = sha.toLowerCase()
@@ -90,7 +99,7 @@ export function RecentCommitsTable() {
       }
     }
     return null
-  }
+  }, [prEvidenceByHeadSha])
 
   const selectedTicketDetails = selectedTicketId
     ? (jiraTicketDetails[selectedTicketId] ?? (ticketCoverage?.tickets_without_commits ?? []).find((t) => typeof t.ticket_id === 'string' && t.ticket_id === selectedTicketId) ?? null)
@@ -110,7 +119,7 @@ export function RecentCommitsTable() {
         <GitCommit size={11} strokeWidth={1.5} className="text-surface-400" />
         Commits Recientes
       </div>
-      <p className="text-xs text-surface-400 mb-4">Mostrando ventana reciente, no histórico completo</p>
+      <p className="text-xs text-surface-400 mb-4">Mostrando ventana reciente (hasta 500 eventos cargados), no histórico completo</p>
 
       {/* Ticket detail panel */}
       {selectedTicketId && (
@@ -220,7 +229,7 @@ export function RecentCommitsTable() {
         <div className="flex items-center justify-between mt-3 pt-3 border-t border-white/4">
           <span className="text-xs text-surface-300">
             Página {safePage + 1} de {totalPages}
-            <span className="ml-1 text-surface-500">({totalRows} total)</span>
+            <span className="ml-1 text-surface-500">({totalRows} en esta ventana)</span>
           </span>
           <div className="flex items-center gap-1">
             <button
