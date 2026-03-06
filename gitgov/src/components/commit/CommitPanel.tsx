@@ -25,6 +25,14 @@ function formatPushErrorForUser(rawError: unknown): string {
     return 'Push rechazado por GitHub: token inválido o expirado. Reautentícate en GitHub y vuelve a intentar.'
   }
 
+  if (
+    parsed.code === 'AUTH_ERROR' ||
+    msg.includes('No hay token guardado') ||
+    msg.includes('Token not found in keyring')
+  ) {
+    return 'Push no enviado por autenticación local (token no disponible). Tus cambios y commits locales NO se perdieron; siguen en tu repositorio. Reautentica GitHub y vuelve a intentar push.'
+  }
+
   return msg
 }
 
@@ -88,8 +96,9 @@ export function CommitPanel() {
 
   const ahead = branchSync?.ahead ?? 0
   const behind = branchSync?.behind ?? 0
+  const pendingLocalCommits = branchSync?.pending_local_commits ?? ahead
   const hasUpstream = branchSync?.has_upstream ?? false
-  const hasLocalCommits = ahead > 0
+  const hasLocalCommits = pendingLocalCommits > 0
 
   const hasStagedFiles = stagedFiles.size > 0
   const hasUncommittedChanges = fileChanges.some((f) => f.staged) || stagedFiles.size > 0
@@ -114,11 +123,11 @@ export function CommitPanel() {
       setMessage('')
       toast('success', `Commit creado: ${hash.substring(0, 7)}`)
       const sync = await refreshBranchSync(currentBranch ?? undefined)
-      const aheadAfterCommit = sync?.ahead ?? 0
-      if (aheadAfterCommit > 0) {
+      const pendingAfterCommit = sync?.pending_local_commits ?? sync?.ahead ?? 0
+      if (pendingAfterCommit > 0) {
         toast(
           'warning',
-          `Tienes ${aheadAfterCommit} commit(s) local(es) sin push en ${sync?.branch ?? currentBranch ?? 'la rama actual'}.`
+          `Tienes ${pendingAfterCommit} commit(s) local(es) sin push en ${sync?.branch ?? currentBranch ?? 'la rama actual'}.`
         )
       }
     } catch (e) {
@@ -138,11 +147,11 @@ export function CommitPanel() {
     try {
       await push(currentBranch, user.login)
       const syncAfterPush = await refreshBranchSync(currentBranch)
-      const aheadAfterPush = syncAfterPush?.ahead ?? 0
-      if (aheadAfterPush > 0) {
+      const pendingAfterPush = syncAfterPush?.pending_local_commits ?? syncAfterPush?.ahead ?? 0
+      if (pendingAfterPush > 0) {
         toast(
           'warning',
-          `Push ejecutado pero aún quedan ${aheadAfterPush} commit(s) sin sincronizar en ${syncAfterPush?.branch ?? currentBranch}.`
+          `Push ejecutado pero aún quedan ${pendingAfterPush} commit(s) sin sincronizar en ${syncAfterPush?.branch ?? currentBranch}.`
         )
       } else {
         toast('success', `Push exitoso a ${currentBranch}`)
@@ -152,13 +161,16 @@ export function CommitPanel() {
     } catch (e) {
       toast('error', formatPushErrorForUser(e))
       const syncAfterError = await refreshBranchSync(currentBranch)
-      const aheadAfterError = syncAfterError?.ahead ?? 0
-      if (aheadAfterError > 0) {
+      const pendingAfterError = syncAfterError?.pending_local_commits ?? syncAfterError?.ahead ?? 0
+      if (pendingAfterError > 0) {
         toast(
           'warning',
-          `Alerta: tienes ${aheadAfterError} commit(s) local(es) sin push en ${syncAfterError?.branch ?? currentBranch}.`
+          `Alerta: tienes ${pendingAfterError} commit(s) local(es) sin push en ${syncAfterError?.branch ?? currentBranch}.`
         )
+      } else {
+        toast('info', 'Tus cambios locales no se perdieron. Verifica el estado local y reintenta push.')
       }
+      await refreshStatus()
     } finally {
       setIsPushing(false)
     }
@@ -240,10 +252,10 @@ export function CommitPanel() {
                 </span>
               )}
 
-              {hasUpstream && ahead > 0 && (
+              {pendingLocalCommits > 0 && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-danger-500/30 bg-danger-500/10 text-danger-300">
                   <ArrowUp size={11} strokeWidth={1.75} />
-                  {ahead} commit(s) sin push
+                  {pendingLocalCommits} commit(s) local(es) sin push
                 </span>
               )}
 

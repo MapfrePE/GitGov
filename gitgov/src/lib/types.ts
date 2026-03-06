@@ -78,6 +78,19 @@ export interface BranchSyncStatus {
   has_upstream: boolean
   ahead: number
   behind: number
+  pending_local_commits?: number
+}
+
+export interface PendingPushFile {
+  path: string
+  commits_touching: number
+}
+
+export interface PendingPushPreview {
+  branch: string
+  commit_count: number
+  files: PendingPushFile[]
+  truncated?: boolean
 }
 
 export interface AuthenticatedUser {

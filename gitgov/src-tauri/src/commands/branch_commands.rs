@@ -1,8 +1,9 @@
 use crate::audit::AuditDatabase;
 use crate::config::{load_config, validate_branch_name};
 use crate::git::{
-    checkout_branch, create_branch, get_branch_sync_status, get_current_branch, list_branches,
-    open_repository, BranchInfo, BranchSyncStatus,
+    checkout_branch, create_branch, get_branch_sync_status, get_current_branch,
+    get_pending_push_preview, list_branches, open_repository, BranchInfo, BranchSyncStatus,
+    PendingPushPreview,
 };
 use crate::models::{AuditAction, AuditLogEntry, AuditStatus};
 use crate::outbox::{Outbox, OutboxEvent};
@@ -62,6 +63,19 @@ pub fn cmd_get_branch_sync_status(
         .map_err(|e| to_command_error(e, "GIT_ERROR"))?;
 
     Ok(status)
+}
+
+#[tauri::command]
+pub fn cmd_get_pending_push_preview(
+    repo_path: String,
+    branch: Option<String>,
+) -> Result<PendingPushPreview, String> {
+    let repo = open_repository(&repo_path).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+
+    let preview = get_pending_push_preview(&repo, branch.as_deref())
+        .map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+
+    Ok(preview)
 }
 
 #[tauri::command]

@@ -1,6 +1,7 @@
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use std::time::Duration;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
@@ -30,8 +31,16 @@ pub struct RepoInfo {
     pub has_write_access: bool,
 }
 
+fn build_http_client() -> Result<Client, ApiError> {
+    Client::builder()
+        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| ApiError::NetworkError(e.to_string()))
+}
+
 pub fn get_authenticated_user(token: &str) -> Result<GithubUser, ApiError> {
-    let client = Client::new();
+    let client = build_http_client()?;
 
     let response = client
         .get("https://api.github.com/user")
@@ -53,7 +62,7 @@ pub fn get_authenticated_user(token: &str) -> Result<GithubUser, ApiError> {
 }
 
 pub fn get_repository_info(token: &str, owner: &str, repo: &str) -> Result<RepoInfo, ApiError> {
-    let client = Client::new();
+    let client = build_http_client()?;
 
     let response = client
         .get(format!("https://api.github.com/repos/{}/{}", owner, repo))
@@ -102,7 +111,7 @@ pub fn setup_branch_protection(
     repo: &str,
     branch: &str,
 ) -> Result<(), ApiError> {
-    let client = Client::new();
+    let client = build_http_client()?;
 
     let protection_config = serde_json::json!({
         "required_status_checks": {

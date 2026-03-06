@@ -4575,3 +4575,123 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
 - Validación de no regresión:
   - `cd gitgov/gitgov-server && cargo test` -> `99 passed; 0 failed`
   - `cd gitgov && npx tsc -b` -> sin errores
+
+## 2026-03-06 - Hotfix UX crítico: freeze en Device Flow + token perdido en push
+
+- Causa observada en campo:
+  - Login por Device Flow podía dejar sensación de "No responde" cuando la llamada bloqueante tardaba (sin timeout explícito) y con posibilidad de invocaciones simultáneas de `pollAuth`.
+  - Push podía fallar con `Token not found in keyring` aun después de autenticar por fragilidad de lookup (variantes de login/caso y dependencia estricta de keyring en tiempo real).
+
+- Cambios aplicados:
+  - `gitgov/src/store/useAuthStore.ts`
+    - Se añadió guard `authPollInFlight` para evitar `pollAuth` concurrentes por doble click/reentrancia.
+  - `gitgov/src-tauri/src/commands/auth_commands.rs`
+    - `cmd_start_auth`, `cmd_poll_auth`, `cmd_get_current_user`, `cmd_validate_token` ahora corren en `spawn_blocking` (`run_blocking_auth_command`) para evitar bloqueo perceptible de UI.
+    - `get_token_for_user` ahora hace fallback a `current_user` si el login pedido no recupera token y la sesión actual sí existe.
+  - `gitgov/src-tauri/src/github/auth.rs`
+    - Se añadió cache en proceso para token JSON (exacto + login canónico lowercase).
+    - Lookup de keyring robusto: intenta exacto y alias canónico (case-insensitive práctico).
+    - Guardado robusto: persiste alias canónico en keyring cuando aplica.
+    - Borrado limpia exacto+canónico+cache.
+    - Timeouts HTTP explícitos para Device Flow (`timeout=20s`, `connect_timeout=10s`).
+    - Tests nuevos para alias canónico y cache.
+  - `gitgov/src-tauri/src/github/api.rs`
+    - Timeouts HTTP explícitos en GitHub API (`timeout=20s`, `connect_timeout=10s`).
+
+- Validación ejecutada:
+  - `cd gitgov/src-tauri && cargo test` -> `14 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo test` -> `99 passed; 0 failed`
+  - `cd gitgov && npx tsc -b` -> sin errores
+  - `cd gitgov && npx eslint src/store/useAuthStore.ts` -> sin errores nuevos
+
+- Impacto Golden Path:
+  - No se cambió contrato de `/events`, `/stats`, `/logs` ni deduplicación.
+  - El fix ataca capa de autenticación desktop/keyring y UX de login sin romper ingestión ni dashboard.
+- UX adicional post-incidente (push/token):
+  - `gitgov/src/components/commit/CommitPanel.tsx`
+    - Mensaje de error de push por token ahora declara explícitamente que los cambios/commits locales no se pierden.
+    - En fallo de push se fuerza `refreshStatus()` para evitar vista desfasada que pueda parecer pérdida de cambios.
+- Hardening adicional (cero pánico UX en push fallido):
+  - `gitgov/src-tauri/src/git/branch.rs` + `gitgov/src/lib/types.ts`
+    - Se agregó `pending_local_commits` en `BranchSyncStatus`.
+    - Ahora se calcula también cuando no hay upstream (commits locales no presentes en ramas remotas), para no ocultar trabajo local.
+  - `gitgov/src/components/commit/CommitPanel.tsx`
+    - Push/commit usan `pending_local_commits` para mostrar commits locales pendientes incluso sin upstream.
+    - El botón/estado de push ya no depende solo de `ahead` cuando no hay upstream.
+  - `gitgov/src/components/layout/Header.tsx`
+    - Badge superior muestra commits locales pendientes con `pending_local_commits`.
+  - `gitgov/src-tauri/src/commands/auth_commands.rs`
+    - `get_token_for_user` añade recuperación robusta: login solicitado -> login de sesión -> sweep de migración legacy -> reintento.
+- Validación adicional exhaustiva (esta pasada):
+  - `cd gitgov/src-tauri && cargo test` -> `16 passed; 0 failed` (incluye nuevas pruebas de branch sync con/sin upstream).
+  - `cd gitgov && npx tsc -b` -> sin errores.
+  - `cd gitgov && npx eslint src/components/commit/CommitPanel.tsx src/components/layout/Header.tsx src/store/useAuthStore.ts src/lib/types.ts` -> sin errores nuevos.
+  - `cd gitgov/gitgov-server && cargo test` -> `99 passed; 0 failed`.
+- Smoke contractual adicional (runtime local 127.0.0.1:3000, sesión temporal):
+  - `/health` -> 200
+  - `/events` (1ra) -> accepted=1
+  - `/events` (2da mismo UUID) -> duplicates=1
+  - `/stats` -> 200
+  - `/logs?limit=5&offset=0` -> 200
+  - Resultado: contrato runtime OK (ingesta + dedup + stats + logs).
+
+## 2026-03-06 - Revalidación exhaustiva (segunda pasada, foco token/push/UI)
+
+- Objetivo confirmado:
+  - Si falla token/push, no se debe perder visibilidad del trabajo local en UI.
+  - No romper Golden Path (auth Bearer + ingesta + dashboard sin 401).
+
+- Verificación de código crítico (sin cambios funcionales nuevos en esta pasada):
+  - `gitgov/src/components/commit/CommitPanel.tsx`: mantiene mensajes explícitos de no pérdida local y refresco de estado tras error de push.
+  - `gitgov/src-tauri/src/git/branch.rs`: mantiene `pending_local_commits` para no ocultar commits locales sin upstream.
+  - `gitgov/src-tauri/src/commands/auth_commands.rs` + `gitgov/src-tauri/src/github/auth.rs`: lookup de token robusto (fallback sesión + migración legacy + alias canónico).
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov/src-tauri && cargo test` -> `16 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo test` -> `99 passed; 0 failed`
+  - `cd gitgov && npx tsc -b` -> sin errores
+  - `cd gitgov && npx eslint src/components/commit/CommitPanel.tsx src/components/layout/Header.tsx src/store/useAuthStore.ts src/lib/types.ts` -> 0 errores nuevos
+
+- Smoke runtime contractual (servidor local 127.0.0.1:3000):
+  - `/health` -> 200
+  - `/events` con `user_login=MapfrePE`:
+    - 1ra llamada -> `accepted=1`
+    - 2da llamada (mismo `event_uuid`) -> `duplicates=1`
+  - `/stats` -> 200
+  - `/logs?limit=5&offset=0` -> 200
+  - Nota operativa: payload con `user_login` sintético fue rechazado por política de entorno (`synthetic user_login is not allowed in this environment`), por eso la prueba contractual se ejecutó con usuario real permitido.
+
+## 2026-03-06 - UX anti-pánico: archivos pendientes de push visibles en la UI
+
+- Problema atendido:
+  - Cuando un push falla, los archivos del commit local dejan de verse en el panel de cambios (working tree) y esto da señal de pérdida, aunque el commit siga en disco.
+  - Requisito: el dev debe poder ver en la app qué archivos quedaron pendientes de enviar.
+
+- Cambio implementado:
+  - Backend Tauri:
+    - `gitgov/src-tauri/src/git/branch.rs`
+      - Nuevo `PendingPushPreview` + `PendingPushFile`.
+      - Nuevo cálculo `get_pending_push_preview(...)` que lista archivos tocados por commits locales no presentes en ramas remotas.
+    - `gitgov/src-tauri/src/commands/branch_commands.rs`
+      - Nuevo comando `cmd_get_pending_push_preview`.
+    - `gitgov/src-tauri/src/lib.rs`
+      - Registro del comando en `invoke_handler`.
+  - Frontend:
+    - `gitgov/src/lib/types.ts`
+      - Nuevos tipos `PendingPushPreview` y `PendingPushFile`.
+    - `gitgov/src/store/useRepoStore.ts`
+      - Nuevo estado `pendingPushPreview`.
+      - Nueva acción `refreshPendingPushPreview`.
+      - `refreshBranchSync` ahora refresca automáticamente este preview cuando hay commits pendientes.
+    - `gitgov/src/components/diff/FileList.tsx`
+      - Nueva sección visible: `Pendiente de push: X commit(s), Y archivo(s)`.
+      - Lista expandible de paths (con cuántos commits toca cada archivo).
+      - Empty-state ajustado: si no hay cambios en working tree pero sí commits sin push, se informa explícitamente y se guía al usuario a esa lista.
+
+- Validación ejecutada:
+  - `cd gitgov/src-tauri && cargo test` -> `17 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo test` -> `99 passed; 0 failed`
+  - `cd gitgov && npx tsc -b` -> sin errores
+  - `cd gitgov && npx eslint src/components/diff/FileList.tsx src/store/useRepoStore.ts src/lib/types.ts` -> 0 errores nuevos
+  - Verificación repo actual:
+    - `git -C c:\Users\PC\Desktop\GitGov diff --name-only origin/main..main | Measure-Object -Line` -> `90`

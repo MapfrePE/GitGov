@@ -562,6 +562,36 @@ pub fn cmd_push(
                 developer_login = %developer_login,
                 "Token not found in keyring for user"
             );
+            let mut event = OutboxEvent::new(
+                "push_failed".to_string(),
+                developer_login.clone(),
+                Some(branch.clone()),
+                AuditStatus::Failed,
+            )
+            .with_reason("Token not found for authenticated user".to_string())
+            .with_metadata(serde_json::json!({"device": device_metadata()}));
+            if let Some(full_name) = repo_full_name.clone() {
+                event = event.with_repo(full_name);
+            }
+            if let Some(org) = org_name.clone() {
+                event = event.with_org(org);
+            }
+            let _ = outbox.add(event);
+
+            let entry = AuditLogEntry {
+                id: Uuid::new_v4().to_string(),
+                timestamp: chrono::Utc::now().timestamp_millis(),
+                developer_login: developer_login.clone(),
+                developer_name: developer_login.clone(),
+                action: AuditAction::Push,
+                branch: branch.clone(),
+                files: vec![],
+                commit_hash: None,
+                status: AuditStatus::Failed,
+                reason: Some("Token not found for authenticated user".to_string()),
+            };
+            let _ = audit_db.insert(&entry);
+
             trigger_flush(&outbox);
             return Err(to_command_error(
                 format!("No hay token guardado para el usuario '{}'. Intenta re-autenticarte cerrando y abriendo la app.", developer_login),

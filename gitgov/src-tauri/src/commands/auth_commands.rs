@@ -1,5 +1,6 @@
 use crate::github::{
-    delete_token, get_authenticated_user, load_token, poll_for_token, save_token, start_device_flow,
+    delete_token, get_authenticated_user, load_token, migrate_legacy_tokens_from_disk, poll_for_token,
+    save_token, start_device_flow,
 };
 use crate::models::AuthenticatedUser;
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,19 @@ fn to_command_error(e: impl std::fmt::Display, code: &str) -> String {
     .unwrap_or_else(|_| format!("{{\"code\":\"{}\",\"message\":\"{}\"}}", code, e))
 }
 
+async fn run_blocking_auth_command<T, F>(task_name: &'static str, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| {
+        to_command_error(
+            format!("{}_THREAD_JOIN_ERROR: {}", task_name, e),
+            "AUTH_ERROR",
+        )
+    })?
+}
+
 fn current_user_file_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -67,83 +81,91 @@ fn clear_current_user_session() {
 }
 
 #[tauri::command]
-pub fn cmd_start_auth() -> Result<DeviceFlowInfo, String> {
-    let flow = start_device_flow().map_err(|e| to_command_error(e, "AUTH_ERROR"))?;
-
-    Ok(DeviceFlowInfo {
-        user_code: flow.user_code,
-        verification_uri: flow.verification_uri,
-        device_code: flow.device_code,
-        interval: flow.interval,
+pub async fn cmd_start_auth() -> Result<DeviceFlowInfo, String> {
+    run_blocking_auth_command("START_AUTH", move || {
+        let flow = start_device_flow().map_err(|e| to_command_error(e, "AUTH_ERROR"))?;
+        Ok(DeviceFlowInfo {
+            user_code: flow.user_code,
+            verification_uri: flow.verification_uri,
+            device_code: flow.device_code,
+            interval: flow.interval,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn cmd_poll_auth(device_code: String, interval: u64) -> Result<AuthenticatedUser, String> {
-    let token = match poll_for_token(&device_code, interval) {
-        Ok(t) => t,
-        Err(e) => {
-            let error_code = match &e {
-                crate::github::AuthError::Pending => "PENDING",
-                crate::github::AuthError::SlowDown => "SLOW_DOWN",
-                _ => "AUTH_ERROR",
-            };
-            return Err(to_command_error(e, error_code));
-        }
-    };
-
-    let gh_user = get_authenticated_user(&token).map_err(|e| to_command_error(e, "API_ERROR"))?;
-
-    tracing::info!(
-        login = %gh_user.login,
-        "Saving token to keyring for user"
-    );
-
-    save_token(&gh_user.login, &token, None).map_err(|e| {
-        tracing::error!(error = %e, "Failed to save token to keyring");
-        to_command_error(e, "KEYRING_ERROR")
-    })?;
-
-    tracing::info!(
-        login = %gh_user.login,
-        "Token saved successfully"
-    );
-
-    let user = AuthenticatedUser {
-        login: gh_user.login.clone(),
-        name: gh_user.name.unwrap_or_else(|| "Unknown".to_string()),
-        avatar_url: gh_user.avatar_url,
-        group: None,
-        is_admin: false,
-    };
-
-    save_current_user_session(&user)?;
-
-    Ok(user)
-}
-
-#[tauri::command]
-pub fn cmd_get_current_user() -> Result<Option<AuthenticatedUser>, String> {
-    if let Some(session_user) = load_current_user_session() {
-        if let Ok(token) = load_token(&session_user.login) {
-            if let Ok(gh_user) = get_authenticated_user(&token) {
-                let refreshed_user = AuthenticatedUser {
-                    login: gh_user.login,
-                    name: gh_user.name.unwrap_or(session_user.name),
-                    avatar_url: gh_user.avatar_url,
-                    group: session_user.group,
-                    is_admin: session_user.is_admin,
+pub async fn cmd_poll_auth(device_code: String, interval: u64) -> Result<AuthenticatedUser, String> {
+    run_blocking_auth_command("POLL_AUTH", move || {
+        let token = match poll_for_token(&device_code, interval) {
+            Ok(t) => t,
+            Err(e) => {
+                let error_code = match &e {
+                    crate::github::AuthError::Pending => "PENDING",
+                    crate::github::AuthError::SlowDown => "SLOW_DOWN",
+                    _ => "AUTH_ERROR",
                 };
-                let _ = save_current_user_session(&refreshed_user);
-                return Ok(Some(refreshed_user));
+                return Err(to_command_error(e, error_code));
             }
+        };
+
+        let gh_user = get_authenticated_user(&token).map_err(|e| to_command_error(e, "API_ERROR"))?;
+
+        tracing::info!(
+            login = %gh_user.login,
+            "Saving token to keyring for user"
+        );
+
+        save_token(&gh_user.login, &token, None).map_err(|e| {
+            tracing::error!(error = %e, "Failed to save token to keyring");
+            to_command_error(e, "KEYRING_ERROR")
+        })?;
+
+        tracing::info!(
+            login = %gh_user.login,
+            "Token saved successfully"
+        );
+
+        let user = AuthenticatedUser {
+            login: gh_user.login.clone(),
+            name: gh_user.name.unwrap_or_else(|| "Unknown".to_string()),
+            avatar_url: gh_user.avatar_url,
+            group: None,
+            is_admin: false,
+        };
+
+        save_current_user_session(&user)?;
+
+        Ok(user)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_get_current_user() -> Result<Option<AuthenticatedUser>, String> {
+    run_blocking_auth_command("GET_CURRENT_USER", move || {
+        if let Some(session_user) = load_current_user_session() {
+            if let Ok(token) = load_token(&session_user.login) {
+                if let Ok(gh_user) = get_authenticated_user(&token) {
+                    let refreshed_user = AuthenticatedUser {
+                        login: gh_user.login,
+                        name: gh_user.name.unwrap_or(session_user.name),
+                        avatar_url: gh_user.avatar_url,
+                        group: session_user.group,
+                        is_admin: session_user.is_admin,
+                    };
+                    let _ = save_current_user_session(&refreshed_user);
+                    return Ok(Some(refreshed_user));
+                }
+            }
+
+            // Session exists but token is invalid/expired; clear local session marker.
+            clear_current_user_session();
         }
 
-        // Session exists but token is invalid/expired; clear local session marker.
-        clear_current_user_session();
-    }
-
-    Ok(None)
+        Ok(None)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -174,16 +196,19 @@ pub fn cmd_logout(username: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn cmd_validate_token(token: String) -> Result<AuthenticatedUser, String> {
-    let gh_user = get_authenticated_user(&token).map_err(|e| to_command_error(e, "API_ERROR"))?;
+pub async fn cmd_validate_token(token: String) -> Result<AuthenticatedUser, String> {
+    run_blocking_auth_command("VALIDATE_TOKEN", move || {
+        let gh_user = get_authenticated_user(&token).map_err(|e| to_command_error(e, "API_ERROR"))?;
 
-    Ok(AuthenticatedUser {
-        login: gh_user.login,
-        name: gh_user.name.unwrap_or_else(|| "Unknown".to_string()),
-        avatar_url: gh_user.avatar_url,
-        group: None,
-        is_admin: false,
+        Ok(AuthenticatedUser {
+            login: gh_user.login,
+            name: gh_user.name.unwrap_or_else(|| "Unknown".to_string()),
+            avatar_url: gh_user.avatar_url,
+            group: None,
+            is_admin: false,
+        })
     })
+    .await
 }
 
 #[tauri::command]
@@ -237,18 +262,64 @@ pub fn cmd_open_external_url(url: String) -> Result<(), String> {
 
 pub fn get_token_for_user(username: &str) -> Option<String> {
     tracing::debug!(username = %username, "Attempting to load token from keyring");
-    match load_token(username) {
-        Ok(token) => {
-            tracing::debug!(username = %username, "Token loaded successfully");
-            Some(token)
+    let requested = username.trim().to_string();
+    let session_login = load_current_user_session()
+        .map(|u| u.login.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    let try_login = |login: &str, origin: &str| -> Option<String> {
+        match load_token(login) {
+            Ok(token) => {
+                tracing::info!(login = %login, origin = %origin, "Recovered token");
+                Some(token)
+            }
+            Err(crate::github::AuthError::TokenExpired) => {
+                tracing::warn!(login = %login, origin = %origin, "Token expired");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(login = %login, origin = %origin, error = %e, "Token load failed");
+                None
+            }
         }
-        Err(crate::github::AuthError::TokenExpired) => {
-            tracing::warn!(username = %username, "Token expired");
-            None
-        }
-        Err(e) => {
-            tracing::warn!(username = %username, error = %e, "Failed to load token");
-            None
+    };
+
+    if !requested.is_empty() {
+        if let Some(token) = try_login(&requested, "requested_login") {
+            return Some(token);
         }
     }
+
+    if let Some(session) = session_login.as_deref() {
+        if requested.is_empty() || !session.eq_ignore_ascii_case(&requested) {
+            if let Some(token) = try_login(session, "session_login_fallback") {
+                return Some(token);
+            }
+        }
+    }
+
+    let migration = migrate_legacy_tokens_from_disk();
+    if migration.scanned_files > 0 {
+        tracing::warn!(
+            scanned_files = migration.scanned_files,
+            migrated_tokens = migration.migrated_tokens,
+            failed_files = migration.failed_files,
+            "Token lookup recovery: legacy migration sweep executed"
+        );
+    }
+
+    if !requested.is_empty() {
+        if let Some(token) = try_login(&requested, "requested_after_migration") {
+            return Some(token);
+        }
+    }
+    if let Some(session) = session_login.as_deref() {
+        if requested.is_empty() || !session.eq_ignore_ascii_case(&requested) {
+            if let Some(token) = try_login(session, "session_after_migration") {
+                return Some(token);
+            }
+        }
+    }
+
+    None
 }

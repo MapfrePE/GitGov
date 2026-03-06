@@ -9,6 +9,7 @@ const LEGACY_TOKEN_FILE_COMPAT_ENV: &str = "GITGOV_ALLOW_LEGACY_TOKEN_FILE";
 const LEGACY_TOKEN_DIR_ENV: &str = "GITGOV_LEGACY_TOKEN_DIR";
 const SIMULATE_KEYRING_FAILURE_ENV: &str = "GITGOV_SIMULATE_KEYRING_FAILURE";
 const SIMULATE_KEYRING_MEMORY_ENV: &str = "GITGOV_SIMULATE_KEYRING_MEMORY";
+const AUTH_HTTP_TIMEOUT_SECS: u64 = 20;
 
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -84,6 +85,14 @@ fn parse_bool_like(value: &str) -> bool {
     )
 }
 
+fn normalize_username(username: &str) -> String {
+    username.trim().to_string()
+}
+
+fn canonical_username(username: &str) -> String {
+    normalize_username(username).to_ascii_lowercase()
+}
+
 fn legacy_token_file_compat_enabled() -> bool {
     std::env::var(LEGACY_TOKEN_FILE_COMPAT_ENV)
         .ok()
@@ -121,6 +130,50 @@ fn simulated_keyring_store() -> &'static std::sync::Mutex<std::collections::Hash
     STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+fn in_process_token_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn cache_store_token_json(username: &str, json: &str) {
+    let normalized = normalize_username(username);
+    if normalized.is_empty() {
+        return;
+    }
+    let canonical = canonical_username(&normalized);
+    if let Ok(mut cache) = in_process_token_cache().lock() {
+        cache.insert(normalized, json.to_string());
+        cache.insert(canonical, json.to_string());
+    }
+}
+
+fn cache_get_token_json(username: &str) -> Option<String> {
+    let normalized = normalize_username(username);
+    if normalized.is_empty() {
+        return None;
+    }
+    let canonical = canonical_username(&normalized);
+    let cache = in_process_token_cache().lock().ok()?;
+    cache
+        .get(&normalized)
+        .cloned()
+        .or_else(|| cache.get(&canonical).cloned())
+}
+
+fn cache_delete_token_json(username: &str) {
+    let normalized = normalize_username(username);
+    if normalized.is_empty() {
+        return;
+    }
+    let canonical = canonical_username(&normalized);
+    if let Ok(mut cache) = in_process_token_cache().lock() {
+        cache.remove(&normalized);
+        cache.remove(&canonical);
+    }
+}
+
 #[cfg(test)]
 fn clear_simulated_keyring_store() {
     if let Ok(mut store) = simulated_keyring_store().lock() {
@@ -129,11 +182,19 @@ fn clear_simulated_keyring_store() {
 }
 
 fn keyring_set_password(username: &str, json: &str) -> Result<(), AuthError> {
+    let normalized = normalize_username(username);
+    if normalized.is_empty() {
+        return Err(AuthError::TokenNotFound);
+    }
+    let canonical = canonical_username(&normalized);
+
     if keyring_memory_simulation_enabled() {
         let mut store = simulated_keyring_store()
             .lock()
             .map_err(|_| AuthError::KeyringError("Simulated keyring lock poisoned".to_string()))?;
-        store.insert(username.to_string(), json.to_string());
+        store.insert(normalized.clone(), json.to_string());
+        store.insert(canonical.clone(), json.to_string());
+        cache_store_token_json(&normalized, json);
         return Ok(());
     }
     if keyring_failure_simulation_enabled() {
@@ -141,42 +202,93 @@ fn keyring_set_password(username: &str, json: &str) -> Result<(), AuthError> {
             "Simulated keyring failure".to_string(),
         ));
     }
-    let entry = keyring::Entry::new("gitgov", username)
+    let entry = keyring::Entry::new("gitgov", &normalized)
         .map_err(|e| AuthError::KeyringError(e.to_string()))?;
     entry
         .set_password(json)
-        .map_err(|e| AuthError::KeyringError(e.to_string()))
+        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+    cache_store_token_json(&normalized, json);
+    if canonical != normalized {
+        if let Ok(alias_entry) = keyring::Entry::new("gitgov", &canonical) {
+            if let Err(e) = alias_entry.set_password(json) {
+                tracing::warn!(
+                    username = %normalized,
+                    canonical_username = %canonical,
+                    error = %e,
+                    "Failed to save keyring alias for canonical username"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn keyring_get_password(username: &str) -> Result<String, AuthError> {
+    let normalized = normalize_username(username);
+    if normalized.is_empty() {
+        return Err(AuthError::TokenNotFound);
+    }
+    let canonical = canonical_username(&normalized);
+
     if keyring_memory_simulation_enabled() {
         let store = simulated_keyring_store()
             .lock()
             .map_err(|_| AuthError::KeyringError("Simulated keyring lock poisoned".to_string()))?;
-        return store.get(username).cloned().ok_or(AuthError::TokenNotFound);
+        return store
+            .get(&normalized)
+            .cloned()
+            .or_else(|| store.get(&canonical).cloned())
+            .ok_or(AuthError::TokenNotFound);
     }
     if keyring_failure_simulation_enabled() {
         return Err(AuthError::KeyringError(
             "Simulated keyring failure".to_string(),
         ));
     }
-    let entry = keyring::Entry::new("gitgov", username)
-        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
-    entry.get_password().map_err(|e| {
-        if is_keyring_no_entry_error(&e) {
-            AuthError::TokenNotFound
-        } else {
-            AuthError::KeyringError(format!("Failed to get password: {}", e))
+    if let Some(json) = cache_get_token_json(&normalized) {
+        return Ok(json);
+    }
+
+    let fetch_for = |account: &str| -> Result<String, AuthError> {
+        let entry = keyring::Entry::new("gitgov", account)
+            .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+        entry.get_password().map_err(|e| {
+            if is_keyring_no_entry_error(&e) {
+                AuthError::TokenNotFound
+            } else {
+                AuthError::KeyringError(format!("Failed to get password: {}", e))
+            }
+        })
+    };
+
+    match fetch_for(&normalized) {
+        Ok(json) => {
+            cache_store_token_json(&normalized, &json);
+            Ok(json)
         }
-    })
+        Err(AuthError::TokenNotFound) if canonical != normalized => {
+            let json = fetch_for(&canonical)?;
+            cache_store_token_json(&normalized, &json);
+            Ok(json)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn keyring_delete_password(username: &str) -> Result<(), AuthError> {
+    let normalized = normalize_username(username);
+    if normalized.is_empty() {
+        return Ok(());
+    }
+    let canonical = canonical_username(&normalized);
+    cache_delete_token_json(&normalized);
+
     if keyring_memory_simulation_enabled() {
         let mut store = simulated_keyring_store()
             .lock()
             .map_err(|_| AuthError::KeyringError("Simulated keyring lock poisoned".to_string()))?;
-        store.remove(username);
+        store.remove(&normalized);
+        store.remove(&canonical);
         return Ok(());
     }
     if keyring_failure_simulation_enabled() {
@@ -184,13 +296,19 @@ fn keyring_delete_password(username: &str) -> Result<(), AuthError> {
             "Simulated keyring failure".to_string(),
         ));
     }
-    let entry = keyring::Entry::new("gitgov", username)
+    let entry = keyring::Entry::new("gitgov", &normalized)
         .map_err(|e| AuthError::KeyringError(e.to_string()))?;
-    match entry.delete_credential() {
+    let primary_result = match entry.delete_credential() {
         Ok(_) => Ok(()),
         Err(e) if is_keyring_no_entry_error(&e) => Ok(()),
         Err(e) => Err(AuthError::KeyringError(e.to_string())),
+    };
+    if canonical != normalized {
+        if let Ok(alias_entry) = keyring::Entry::new("gitgov", &canonical) {
+            let _ = alias_entry.delete_credential();
+        }
     }
+    primary_result
 }
 
 fn legacy_token_base_dir() -> std::path::PathBuf {
@@ -227,8 +345,16 @@ impl StoredToken {
     }
 }
 
+fn build_http_client() -> Result<Client, AuthError> {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(AUTH_HTTP_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| AuthError::NetworkError(e.to_string()))
+}
+
 pub fn start_device_flow() -> Result<DeviceFlowResponse, AuthError> {
-    let client = Client::new();
+    let client = build_http_client()?;
 
     let response = client
         .post("https://github.com/login/device/code")
@@ -251,7 +377,7 @@ pub fn start_device_flow() -> Result<DeviceFlowResponse, AuthError> {
 pub fn poll_for_token(device_code: &str, interval: u64) -> Result<String, AuthError> {
     std::thread::sleep(std::time::Duration::from_secs(interval));
 
-    let client = Client::new();
+    let client = build_http_client()?;
 
     let response = client
         .post("https://github.com/login/oauth/access_token")
@@ -289,7 +415,7 @@ pub fn poll_and_save_token(
 ) -> Result<String, AuthError> {
     std::thread::sleep(std::time::Duration::from_secs(interval));
 
-    let client = Client::new();
+    let client = build_http_client()?;
 
     let response = client
         .post("https://github.com/login/oauth/access_token")
@@ -940,5 +1066,32 @@ mod tests {
             token_file.exists(),
             "legacy token file should remain when migration fails"
         );
+    }
+
+    #[test]
+    fn keyring_lookup_is_case_insensitive_via_canonical_alias() {
+        let _env_lock = env_lock().lock().expect("env lock poisoned");
+        clear_simulated_keyring_store();
+        let legacy_dir = TempDirGuard::create();
+        let _env_guard = EnvGuard::apply("false", &legacy_dir.path, "false", "true");
+
+        let username = "MapfrePE";
+        let json = "{\"access_token\":\"abc\"}";
+        keyring_set_password(username, json).expect("expected keyring save to succeed");
+
+        let loaded = keyring_get_password("mapfrepe")
+            .expect("expected canonical lowercase keyring lookup to succeed");
+        assert_eq!(loaded, json);
+    }
+
+    #[test]
+    fn in_process_token_cache_supports_canonical_login_lookup() {
+        cache_store_token_json("MapfrePE", "token-json");
+        assert_eq!(
+            cache_get_token_json("mapfrepe"),
+            Some("token-json".to_string())
+        );
+        cache_delete_token_json("MapfrePE");
+        assert!(cache_get_token_json("mapfrepe").is_none());
     }
 }

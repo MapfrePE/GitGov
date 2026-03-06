@@ -1,6 +1,13 @@
 import { create } from 'zustand'
 import { tauriInvoke, parseCommandError } from '@/lib/tauri'
-import type { BranchInfo, BranchSyncStatus, FileChange, GitGovConfig, RepoValidation } from '@/lib/types'
+import type {
+  BranchInfo,
+  BranchSyncStatus,
+  FileChange,
+  GitGovConfig,
+  PendingPushPreview,
+  RepoValidation,
+} from '@/lib/types'
 
 interface RepoState {
   repoPath: string | null
@@ -8,6 +15,7 @@ interface RepoState {
   validation: RepoValidation | null
   currentBranch: string | null
   branchSync: BranchSyncStatus | null
+  pendingPushPreview: PendingPushPreview | null
   branches: BranchInfo[]
   fileChanges: FileChange[]
   selectedFiles: Set<string>
@@ -25,6 +33,7 @@ interface RepoActions {
   refreshStatus: () => Promise<void>
   refreshBranches: () => Promise<void>
   refreshBranchSync: (branch?: string) => Promise<BranchSyncStatus | null>
+  refreshPendingPushPreview: (branch?: string) => Promise<PendingPushPreview | null>
   selectFile: (path: string) => void
   deselectFile: (path: string) => void
   selectAll: () => void
@@ -49,6 +58,7 @@ const initialState: RepoState = {
   validation: null,
   currentBranch: null,
   branchSync: null,
+  pendingPushPreview: null,
   branches: [],
   fileChanges: [],
   selectedFiles: new Set(),
@@ -126,7 +136,7 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
   refreshBranchSync: async (branch?: string) => {
     const { repoPath, currentBranch } = get()
     if (!repoPath) {
-      set({ branchSync: null })
+      set({ branchSync: null, pendingPushPreview: null })
       return null
     }
 
@@ -137,9 +147,39 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
         branch: resolvedBranch,
       })
       set({ branchSync: status })
+      const pendingCommits = status.pending_local_commits ?? status.ahead
+      if (pendingCommits > 0) {
+        await get().refreshPendingPushPreview(status.branch)
+      } else {
+        set({ pendingPushPreview: null })
+      }
       return status
     } catch (e) {
-      set({ error: parseCommandError(String(e)).message, branchSync: null })
+      set({
+        error: parseCommandError(String(e)).message,
+        branchSync: null,
+        pendingPushPreview: null,
+      })
+      return null
+    }
+  },
+
+  refreshPendingPushPreview: async (branch?: string) => {
+    const { repoPath, currentBranch } = get()
+    if (!repoPath) {
+      set({ pendingPushPreview: null })
+      return null
+    }
+    try {
+      const resolvedBranch = branch ?? currentBranch ?? undefined
+      const preview = await tauriInvoke<PendingPushPreview>('cmd_get_pending_push_preview', {
+        repoPath,
+        branch: resolvedBranch,
+      })
+      set({ pendingPushPreview: preview })
+      return preview
+    } catch (e) {
+      set({ error: parseCommandError(String(e)).message, pendingPushPreview: null })
       return null
     }
   },

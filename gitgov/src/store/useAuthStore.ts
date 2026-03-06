@@ -5,6 +5,7 @@ import type { AuthenticatedUser, DeviceFlowInfo } from '@/lib/types'
 type AuthStep = 'idle' | 'waiting_device' | 'polling' | 'authenticated'
 const LOCAL_PIN_KEY = 'gitgov.local_pin_v1'
 let authPollTimer: ReturnType<typeof setTimeout> | null = null
+let authPollInFlight = false
 const REQUIRE_DEVICE_FLOW_ON_START =
   String(import.meta.env.VITE_REQUIRE_DEVICE_FLOW_ON_START ?? 'true').toLowerCase() !== 'false'
 const MIN_POLLING_VISUAL_MS = 900
@@ -74,11 +75,13 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
   pollAuth: async () => {
     const { deviceFlowInfo } = get()
     if (!deviceFlowInfo) return
+    if (authPollInFlight) return
     if (authPollTimer) {
       clearTimeout(authPollTimer)
       authPollTimer = null
     }
 
+    authPollInFlight = true
     set({ authStep: 'polling' })
 
     try {
@@ -126,6 +129,8 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
         }
         set({ error: error.message, authStep: 'idle', isLoading: false })
       }
+    } finally {
+      authPollInFlight = false
     }
   },
 

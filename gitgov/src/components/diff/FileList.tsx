@@ -49,6 +49,8 @@ interface FileItemProps {
   file: FileChange
   selected: boolean
   disabled: boolean
+  pendingPushOnly?: boolean
+  pendingPushTouches?: number | null
   gitgovHiddenRule?: string | null
   showGitGovHiddenBadge?: boolean
   onToggle: () => void
@@ -97,19 +99,27 @@ const FileItem = memo(function FileItem({
   file,
   selected,
   disabled,
+  pendingPushOnly = false,
+  pendingPushTouches = null,
   gitgovHiddenRule,
   showGitGovHiddenBadge,
   onToggle,
   onViewDiff,
   onUnstage,
 }: FileItemProps) {
-  const statusChar = {
-    Modified: 'M',
-    Added: 'A',
-    Deleted: 'D',
-    Renamed: 'R',
-    Untracked: '?',
-  }[file.status]
+  const statusChar = pendingPushOnly
+    ? 'P'
+    : {
+      Modified: 'M',
+      Added: 'A',
+      Deleted: 'D',
+      Renamed: 'R',
+      Untracked: '?',
+    }[file.status]
+  const statusClass = pendingPushOnly
+    ? 'bg-warning-500/15 text-warning-300 border border-warning-500/30'
+    : FILE_STATUS_COLORS[statusChar ?? '?']
+  const interactionsBlocked = disabled || pendingPushOnly
 
   const lastSlash = file.path.lastIndexOf('/')
   const dir = lastSlash >= 0 ? file.path.slice(0, lastSlash) : ''
@@ -120,12 +130,13 @@ const FileItem = memo(function FileItem({
       className={clsx(
         'flex items-center gap-2.5 px-3 py-2 cursor-pointer group transition-colors duration-150',
         selected ? 'bg-white/3' : 'hover:bg-white/2',
-        disabled && 'opacity-50'
+        disabled && 'opacity-50',
+        pendingPushOnly && 'bg-warning-500/5'
       )}
     >
       <button
         onClick={onToggle}
-        disabled={disabled}
+        disabled={interactionsBlocked}
         className="shrink-0"
       >
         <CheckSquare
@@ -139,14 +150,14 @@ const FileItem = memo(function FileItem({
         />
       </button>
 
-      <span
-        className={clsx(
-          'shrink-0 w-4 h-4 rounded text-[9px] font-semibold mono-data flex items-center justify-center',
-          FILE_STATUS_COLORS[statusChar ?? '?']
-        )}
-      >
-        {statusChar}
-      </span>
+        <span
+          className={clsx(
+            'shrink-0 w-4 h-4 rounded text-[9px] font-semibold mono-data flex items-center justify-center',
+            statusClass
+          )}
+        >
+          {statusChar}
+        </span>
 
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1">
@@ -160,10 +171,23 @@ const FileItem = memo(function FileItem({
               GitGov-hidden
             </span>
           )}
+          {pendingPushOnly && (
+            <span
+              title="Archivo presente en commit(s) local(es) pendiente(s) de push"
+              className="text-[9px] px-1.5 py-0.5 rounded bg-warning-500/15 text-warning-200 border border-warning-500/30 shrink-0"
+            >
+              Sin push
+            </span>
+          )}
+          {pendingPushOnly && pendingPushTouches && pendingPushTouches > 1 && (
+            <span className="text-[9px] text-warning-300 shrink-0">
+              {pendingPushTouches} commits
+            </span>
+          )}
         </div>
       </div>
 
-      {file.staged && (
+      {file.staged && !pendingPushOnly && (
         <button
           onClick={(e) => { e.stopPropagation(); onUnstage() }}
           title="Quitar del staging"
@@ -182,12 +206,14 @@ const FileItem = memo(function FileItem({
         </div>
       )}
 
-      <button
-        onClick={onViewDiff}
-        className="opacity-0 group-hover:opacity-100 text-surface-500 hover:text-surface-300 transition-all duration-150"
-      >
-        <FileText size={13} strokeWidth={1.5} />
-      </button>
+      {!pendingPushOnly && (
+        <button
+          onClick={onViewDiff}
+          className="opacity-0 group-hover:opacity-100 text-surface-500 hover:text-surface-300 transition-all duration-150"
+        >
+          <FileText size={13} strokeWidth={1.5} />
+        </button>
+      )}
     </div>
   )
 })
@@ -196,6 +222,7 @@ export function FileList() {
   const {
     repoPath,
     fileChanges,
+    pendingPushPreview,
     selectedFiles,
     stagedFiles,
     isLoadingStatus,
@@ -233,6 +260,7 @@ export function FileList() {
   const [listScrollTop, setListScrollTop] = useState(0)
   const [listViewportHeight, setListViewportHeight] = useState(480)
   const [busyGroupActionKey, setBusyGroupActionKey] = useState<string | null>(null)
+  const [showPendingPushFiles, setShowPendingPushFiles] = useState(true)
   const listContainerRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -311,6 +339,16 @@ export function FileList() {
       node.scrollTop = 0
     }
   }, [repoPath, searchQuery, fileChanges.length])
+
+  useEffect(() => {
+    if (!pendingPushPreview || pendingPushPreview.files.length === 0) {
+      setShowPendingPushFiles(true)
+      return
+    }
+    if (fileChanges.length === 0) {
+      setShowPendingPushFiles(true)
+    }
+  }, [pendingPushPreview, fileChanges.length])
 
   useEffect(() => {
     if (searchQuery.trim()) return
@@ -592,6 +630,10 @@ export function FileList() {
 
   const unstagedCount = useMemo(() => fileChanges.reduce((acc, f) => acc + (f.staged ? 0 : 1), 0), [fileChanges])
   const hasUnstagedFiles = unstagedCount > 0
+  const pendingPushFiles = pendingPushPreview?.files ?? []
+  const pendingPushCommits = pendingPushPreview?.commit_count ?? 0
+  const pendingPushFilesCount = pendingPushFiles.length
+  const hasPendingPushFiles = pendingPushCommits > 0 && pendingPushFilesCount > 0
   const someSelected = selectedFiles.size > 0
   const isLargeChangeset = fileChanges.length > LARGE_CHANGESET_THRESHOLD
   const visibleFiles = isLargeChangeset ? filteredFiles.slice(0, visibleCount) : filteredFiles
@@ -741,6 +783,42 @@ export function FileList() {
           ) : null}
         </div>
       </div>
+
+      {hasPendingPushFiles && (
+        <div className="px-4 py-2 border-b border-warning-500/20 bg-warning-500/5">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] text-warning-200">
+              Pendiente de push: {pendingPushCommits} commit(s) local(es), {pendingPushFilesCount}
+              {' '}archivo(s) en esos commits.
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowPendingPushFiles((prev) => !prev)}
+              className="text-[10px] px-2 py-1 rounded border border-warning-500/30 text-warning-200 hover:bg-warning-500/10 transition-colors"
+            >
+              {showPendingPushFiles ? 'Ocultar archivos' : 'Ver archivos'}
+            </button>
+          </div>
+
+          {showPendingPushFiles && (
+            <div className="mt-2 max-h-36 overflow-y-auto rounded border border-warning-500/20 bg-surface-950/40 divide-y divide-warning-500/10">
+              {pendingPushFiles.map((entry) => (
+                <div key={entry.path} className="flex items-center justify-between gap-2 px-2.5 py-1.5">
+                  <span className="text-[11px] text-surface-200 truncate mono-data">{entry.path}</span>
+                  <span className="text-[10px] text-warning-300 shrink-0">
+                    {entry.commits_touching} commit(s)
+                  </span>
+                </div>
+              ))}
+              {pendingPushPreview?.truncated && (
+                <div className="px-2.5 py-1.5 text-[10px] text-warning-300">
+                  Lista truncada por tamaño. Refina el push para reducir volumen visible.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="px-4 py-2 border-b border-surface-700/20 bg-surface-950/40">
         <label className="flex items-center gap-2 rounded-lg border border-surface-700/40 bg-surface-900/70 px-2.5 py-2">
@@ -1189,8 +1267,19 @@ export function FileList() {
         ) : fileChanges.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-surface-500 p-6">
             <FileCode size={24} strokeWidth={1.5} className="mb-3 text-surface-700" />
-            <p className="text-xs font-medium text-surface-400">No hay cambios</p>
-            <p className="text-[11px] text-surface-600 mt-1">Edita archivos para empezar</p>
+            {hasPendingPushFiles ? (
+              <>
+                <p className="text-xs font-medium text-warning-200">Working tree limpio</p>
+                <p className="text-[11px] text-warning-300 mt-1 text-center">
+                  Hay commits locales sin push. Revisa arriba la lista de archivos pendientes.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-xs font-medium text-surface-400">No hay cambios</p>
+                <p className="text-[11px] text-surface-600 mt-1">Edita archivos para empezar</p>
+              </>
+            )}
           </div>
         ) : filteredFiles.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-surface-500 p-6">

@@ -74,16 +74,20 @@ export function Header({ children }: HeaderProps) {
             />
             {branchSync && (
               <div className="flex items-center gap-1">
+                {(() => {
+                  const pendingLocalCommits = branchSync.pending_local_commits ?? branchSync.ahead
+                  return (
+                    <>
                 {!branchSync.has_upstream && (
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border border-warning-500/30 bg-warning-500/10 text-warning-300">
                     <AlertTriangle size={10} strokeWidth={2} />
                     sin upstream
                   </span>
                 )}
-                {branchSync.ahead > 0 && (
+                {pendingLocalCommits > 0 && (
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border border-danger-500/30 bg-danger-500/10 text-danger-300">
                     <ArrowUp size={10} strokeWidth={2} />
-                    {branchSync.ahead}
+                    {pendingLocalCommits}
                   </span>
                 )}
                 {branchSync.behind > 0 && (
@@ -92,6 +96,9 @@ export function Header({ children }: HeaderProps) {
                     {branchSync.behind}
                   </span>
                 )}
+                    </>
+                  )
+                })()}
               </div>
             )}
           </>
