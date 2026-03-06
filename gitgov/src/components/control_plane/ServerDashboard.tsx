@@ -27,6 +27,7 @@ export function ServerDashboard() {
   const isRefreshingDashboard = useControlPlaneStore((s) => s.isRefreshingDashboard)
   const refreshForCurrentRole = useControlPlaneStore((s) => s.refreshForCurrentRole)
   const loadLogs = useControlPlaneStore((s) => s.loadLogs)
+  const loadLogsIncremental = useControlPlaneStore((s) => s.loadLogsIncremental)
   const activeDevs7d = useControlPlaneStore((s) => s.activeDevs7d)
   const activeDevs7dUpdatedAt = useControlPlaneStore((s) => s.activeDevs7dUpdatedAt)
   const loadActiveDevs7d = useControlPlaneStore((s) => s.loadActiveDevs7d)
@@ -37,6 +38,9 @@ export function ServerDashboard() {
 
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [showActiveDevsModal, setShowActiveDevsModal] = useState(false)
+  const [isWindowVisible, setIsWindowVisible] = useState(
+    typeof document === 'undefined' ? true : document.visibilityState === 'visible',
+  )
   const isChatLoadingRef = useRef(isChatLoading)
 
   useEffect(() => {
@@ -44,14 +48,23 @@ export function ServerDashboard() {
   }, [isChatLoading])
 
   useEffect(() => {
+    const onVisibilityChange = () => {
+      setIsWindowVisible(document.visibilityState === 'visible')
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange)
+  }, [])
+
+  useEffect(() => {
     if (!isConnected) return
 
     const runRefresh = () => {
       if (isChatLoadingRef.current) return
+      if (!isWindowVisible) return
       if (userRole === 'Admin') {
         void refreshForCurrentRole()
       } else {
-        void loadLogs(DASHBOARD_LOG_LIMIT, 0)
+        void loadLogsIncremental(DASHBOARD_LOG_LIMIT)
       }
     }
 
@@ -62,7 +75,7 @@ export function ServerDashboard() {
       runRefresh()
     }, 30000)
     return () => clearInterval(interval)
-  }, [isConnected, autoRefresh, refreshForCurrentRole, loadLogs, userRole])
+  }, [isConnected, autoRefresh, refreshForCurrentRole, loadLogsIncremental, userRole, isWindowVisible])
 
   /* ── maintenance mode ── */
   if (connectionStatus === 'maintenance') {

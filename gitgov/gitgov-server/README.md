@@ -385,7 +385,7 @@ The system uses evidence-based language, NOT accusations:
 **Important:** The server expects `Authorization: Bearer {api_key}` header, NOT `X-API-Key`.
 
 **Flow:**
-1. Client sends: `Authorization: Bearer 57f1ed59-371d-46ef-9fdf-508f59bc4963`
+1. Client sends: `Authorization: Bearer <YOUR_API_KEY>`
 2. Server hashes: `SHA256("57f1ed59-...")` → `abc123...`
 3. Server queries: `SELECT * FROM api_keys WHERE key_hash = 'abc123...'`
 4. If found → authentication successful

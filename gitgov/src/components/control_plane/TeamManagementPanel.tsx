@@ -3,6 +3,8 @@ import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Badge } from '@/components/shared/Badge'
 import { formatTs } from '@/lib/timezone'
 
+const TEAM_PAGE_SIZE = 50
+
 export function TeamManagementPanel() {
   const selectedOrgName = useControlPlaneStore((s) => s.selectedOrgName)
   const teamOverview = useControlPlaneStore((s) => s.teamOverview)
@@ -18,14 +20,17 @@ export function TeamManagementPanel() {
 
   const [daysInput, setDaysInput] = useState(String(teamWindowDays))
   const [activeTab, setActiveTab] = useState<'devs' | 'repos'>('devs')
+  const [isLoadingMoreDevs, setIsLoadingMoreDevs] = useState(false)
+  const [isLoadingMoreRepos, setIsLoadingMoreRepos] = useState(false)
 
   useEffect(() => {
     const orgName = selectedOrgName.trim() || undefined
-    void Promise.all([
-      loadTeamOverview({ orgName }),
-      loadTeamRepos({ orgName }),
-    ])
-  }, [selectedOrgName, loadTeamOverview, loadTeamRepos])
+    if (activeTab === 'devs') {
+      void loadTeamOverview({ orgName, days: teamWindowDays, status: teamStatusFilter, limit: TEAM_PAGE_SIZE, offset: 0 })
+      return
+    }
+    void loadTeamRepos({ orgName, days: teamWindowDays, limit: TEAM_PAGE_SIZE, offset: 0 })
+  }, [selectedOrgName, activeTab, teamWindowDays, teamStatusFilter, loadTeamOverview, loadTeamRepos])
 
   const totals = useMemo(() => {
     return teamOverview.reduce(
@@ -39,6 +44,9 @@ export function TeamManagementPanel() {
       { events: 0, commits: 0, pushes: 0, blocked: 0 },
     )
   }, [teamOverview])
+
+  const canLoadMoreDevs = teamOverview.length < teamOverviewTotal
+  const canLoadMoreRepos = teamRepos.length < teamReposTotal
 
   return (
     <div className="glass-panel p-5 space-y-4">
@@ -84,10 +92,22 @@ export function TeamManagementPanel() {
             if (Number.isFinite(days)) {
               setTeamFilters({ days })
             }
-            await Promise.all([
-              loadTeamOverview({ orgName: selectedOrgName, days: Number.isFinite(days) ? days : undefined }),
-              loadTeamRepos({ orgName: selectedOrgName, days: Number.isFinite(days) ? days : undefined }),
-            ])
+            if (activeTab === 'devs') {
+              await loadTeamOverview({
+                orgName: selectedOrgName,
+                days: Number.isFinite(days) ? days : undefined,
+                status: teamStatusFilter,
+                limit: TEAM_PAGE_SIZE,
+                offset: 0,
+              })
+              return
+            }
+            await loadTeamRepos({
+              orgName: selectedOrgName,
+              days: Number.isFinite(days) ? days : undefined,
+              limit: TEAM_PAGE_SIZE,
+              offset: 0,
+            })
           }}
         >
           Aplicar filtros
@@ -112,80 +132,137 @@ export function TeamManagementPanel() {
       </div>
 
       {activeTab === 'devs' && (
-        <div className="max-h-80 overflow-auto border border-white/6 rounded-lg">
-          <table className="w-full text-xs">
-            <thead className="sticky top-0 bg-surface-800">
-              <tr className="text-surface-500 text-[10px]">
-                <th className="text-left py-2 px-2">Developer</th>
-                <th className="text-left py-2 px-2">Rol/Estado</th>
-                <th className="text-left py-2 px-2">Actividad</th>
-                <th className="text-left py-2 px-2">Repos activos</th>
-                <th className="text-left py-2 px-2">Último evento</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5">
-              {teamOverview.map((dev) => (
-                <tr key={dev.login}>
-                  <td className="py-1.5 px-2 text-surface-100">
-                    <div>{dev.login}</div>
-                    <div className="text-[10px] text-surface-500">{dev.email || '-'}</div>
-                  </td>
-                  <td className="py-1.5 px-2 text-surface-300">
-                    <div>{dev.role}</div>
-                    <div className="text-[10px]">{dev.status}</div>
-                  </td>
-                  <td className="py-1.5 px-2 text-surface-300">
-                    <div>events: {dev.total_events}</div>
-                    <div className="text-[10px]">commits: {dev.commits} | pushes: {dev.pushes} | blocked: {dev.blocked_pushes}</div>
-                  </td>
-                  <td className="py-1.5 px-2">
-                    <div className="text-surface-200">{dev.repos_active_count}</div>
-                    <div className="text-[10px] text-surface-500 truncate max-w-64" title={dev.repos.slice(0, 3).map((r) => r.repo_name).join(', ')}>
-                      {dev.repos.slice(0, 3).map((r) => r.repo_name).join(', ') || '-'}
-                    </div>
-                  </td>
-                  <td className="py-1.5 px-2 text-surface-400">{formatTs(dev.last_seen, displayTimezone)}</td>
+        <div className="space-y-2">
+          <div className="max-h-80 overflow-auto border border-white/6 rounded-lg">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-surface-800">
+                <tr className="text-surface-500 text-[10px]">
+                  <th className="text-left py-2 px-2">Developer</th>
+                  <th className="text-left py-2 px-2">Rol/Estado</th>
+                  <th className="text-left py-2 px-2">Actividad</th>
+                  <th className="text-left py-2 px-2">Repos activos</th>
+                  <th className="text-left py-2 px-2">Último evento</th>
                 </tr>
-              ))}
-              {teamOverview.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="py-8 text-center text-surface-600">Sin actividad para los filtros actuales.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {teamOverview.map((dev) => (
+                  <tr key={dev.login}>
+                    <td className="py-1.5 px-2 text-surface-100">
+                      <div>{dev.login}</div>
+                      <div className="text-[10px] text-surface-500">{dev.email || '-'}</div>
+                    </td>
+                    <td className="py-1.5 px-2 text-surface-300">
+                      <div>{dev.role}</div>
+                      <div className="text-[10px]">{dev.status}</div>
+                    </td>
+                    <td className="py-1.5 px-2 text-surface-300">
+                      <div>events: {dev.total_events}</div>
+                      <div className="text-[10px]">commits: {dev.commits} | pushes: {dev.pushes} | blocked: {dev.blocked_pushes}</div>
+                    </td>
+                    <td className="py-1.5 px-2">
+                      <div className="text-surface-200">{dev.repos_active_count}</div>
+                      <div className="text-[10px] text-surface-500 truncate max-w-64" title={dev.repos.slice(0, 3).map((r) => r.repo_name).join(', ')}>
+                        {dev.repos.slice(0, 3).map((r) => r.repo_name).join(', ') || '-'}
+                      </div>
+                    </td>
+                    <td className="py-1.5 px-2 text-surface-400">{formatTs(dev.last_seen, displayTimezone)}</td>
+                  </tr>
+                ))}
+                {teamOverview.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="py-8 text-center text-surface-600">Sin actividad para los filtros actuales.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-surface-400">
+            <span>Mostrando {teamOverview.length} de {teamOverviewTotal} developers</span>
+            {canLoadMoreDevs && (
+              <button
+                type="button"
+                disabled={isLoadingMoreDevs}
+                className="px-3 py-1.5 rounded bg-white/5 border border-white/10 text-surface-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={async () => {
+                  setIsLoadingMoreDevs(true)
+                  try {
+                    await loadTeamOverview({
+                      orgName: selectedOrgName,
+                      days: teamWindowDays,
+                      status: teamStatusFilter,
+                      limit: TEAM_PAGE_SIZE,
+                      offset: teamOverview.length,
+                      append: true,
+                    })
+                  } finally {
+                    setIsLoadingMoreDevs(false)
+                  }
+                }}
+              >
+                {isLoadingMoreDevs ? 'Cargando...' : `Cargar ${Math.min(TEAM_PAGE_SIZE, teamOverviewTotal - teamOverview.length)} más`}
+              </button>
+            )}
+          </div>
         </div>
       )}
 
       {activeTab === 'repos' && (
-        <div className="max-h-80 overflow-auto border border-white/6 rounded-lg">
-          <table className="w-full text-xs">
-            <thead className="sticky top-0 bg-surface-800">
-              <tr className="text-surface-500 text-[10px]">
-                <th className="text-left py-2 px-2">Repo</th>
-                <th className="text-left py-2 px-2">Developers activos</th>
-                <th className="text-left py-2 px-2">Eventos</th>
-                <th className="text-left py-2 px-2">Commits/Pushes/Blocked</th>
-                <th className="text-left py-2 px-2">Último evento</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5">
-              {teamRepos.map((repo) => (
-                <tr key={repo.repo_name}>
-                  <td className="py-1.5 px-2 text-surface-100">{repo.repo_name}</td>
-                  <td className="py-1.5 px-2 text-surface-300">{repo.developers_active}</td>
-                  <td className="py-1.5 px-2 text-surface-300">{repo.total_events}</td>
-                  <td className="py-1.5 px-2 text-surface-300">{repo.commits}/{repo.pushes}/{repo.blocked_pushes}</td>
-                  <td className="py-1.5 px-2 text-surface-400">{formatTs(repo.last_seen, displayTimezone)}</td>
+        <div className="space-y-2">
+          <div className="max-h-80 overflow-auto border border-white/6 rounded-lg">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-surface-800">
+                <tr className="text-surface-500 text-[10px]">
+                  <th className="text-left py-2 px-2">Repo</th>
+                  <th className="text-left py-2 px-2">Developers activos</th>
+                  <th className="text-left py-2 px-2">Eventos</th>
+                  <th className="text-left py-2 px-2">Commits/Pushes/Blocked</th>
+                  <th className="text-left py-2 px-2">Último evento</th>
                 </tr>
-              ))}
-              {teamRepos.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="py-8 text-center text-surface-600">Sin repos para los filtros actuales.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {teamRepos.map((repo) => (
+                  <tr key={repo.repo_name}>
+                    <td className="py-1.5 px-2 text-surface-100">{repo.repo_name}</td>
+                    <td className="py-1.5 px-2 text-surface-300">{repo.developers_active}</td>
+                    <td className="py-1.5 px-2 text-surface-300">{repo.total_events}</td>
+                    <td className="py-1.5 px-2 text-surface-300">{repo.commits}/{repo.pushes}/{repo.blocked_pushes}</td>
+                    <td className="py-1.5 px-2 text-surface-400">{formatTs(repo.last_seen, displayTimezone)}</td>
+                  </tr>
+                ))}
+                {teamRepos.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="py-8 text-center text-surface-600">Sin repos para los filtros actuales.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-surface-400">
+            <span>Mostrando {teamRepos.length} de {teamReposTotal} repos</span>
+            {canLoadMoreRepos && (
+              <button
+                type="button"
+                disabled={isLoadingMoreRepos}
+                className="px-3 py-1.5 rounded bg-white/5 border border-white/10 text-surface-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={async () => {
+                  setIsLoadingMoreRepos(true)
+                  try {
+                    await loadTeamRepos({
+                      orgName: selectedOrgName,
+                      days: teamWindowDays,
+                      limit: TEAM_PAGE_SIZE,
+                      offset: teamRepos.length,
+                      append: true,
+                    })
+                  } finally {
+                    setIsLoadingMoreRepos(false)
+                  }
+                }}
+              >
+                {isLoadingMoreRepos ? 'Cargando...' : `Cargar ${Math.min(TEAM_PAGE_SIZE, teamReposTotal - teamRepos.length)} más`}
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>

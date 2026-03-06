@@ -355,8 +355,16 @@ pub struct EventFilter {
     pub status: Option<String>,
     pub start_date: Option<i64>,
     pub end_date: Option<i64>,
+    /// Keyset cursor timestamp (ms epoch) for `/logs` pagination.
+    #[serde(default)]
+    pub before_created_at: Option<i64>,
+    /// Keyset cursor tie-breaker (event id as text UUID) for `/logs` pagination.
+    #[serde(default)]
+    pub before_id: Option<String>,
     #[serde(default)]
     pub limit: usize,
+    /// Offset pagination is legacy for `/logs` and kept for backward compatibility.
+    /// Prefer keyset cursor (`before_created_at` + `before_id`) for high-volume paths.
     #[serde(default)]
     pub offset: usize,
 }
@@ -1689,7 +1697,12 @@ mod tests {
 
     #[test]
     fn user_role_roundtrip() {
-        let roles = [UserRole::Admin, UserRole::Architect, UserRole::Developer, UserRole::PM];
+        let roles = [
+            UserRole::Admin,
+            UserRole::Architect,
+            UserRole::Developer,
+            UserRole::PM,
+        ];
         for role in &roles {
             assert_eq!(&UserRole::from_str(role.as_str()), role);
         }
@@ -1731,10 +1744,22 @@ mod tests {
 
     #[test]
     fn pipeline_status_roundtrip() {
-        assert_eq!(PipelineStatus::from_str("success"), Some(PipelineStatus::Success));
-        assert_eq!(PipelineStatus::from_str("failure"), Some(PipelineStatus::Failure));
-        assert_eq!(PipelineStatus::from_str("aborted"), Some(PipelineStatus::Aborted));
-        assert_eq!(PipelineStatus::from_str("unstable"), Some(PipelineStatus::Unstable));
+        assert_eq!(
+            PipelineStatus::from_str("success"),
+            Some(PipelineStatus::Success)
+        );
+        assert_eq!(
+            PipelineStatus::from_str("failure"),
+            Some(PipelineStatus::Failure)
+        );
+        assert_eq!(
+            PipelineStatus::from_str("aborted"),
+            Some(PipelineStatus::Aborted)
+        );
+        assert_eq!(
+            PipelineStatus::from_str("unstable"),
+            Some(PipelineStatus::Unstable)
+        );
         assert_eq!(PipelineStatus::from_str("invalid"), None);
     }
 
@@ -1762,7 +1787,10 @@ mod tests {
     #[test]
     fn signal_status_roundtrip() {
         assert_eq!(SignalStatus::from_str("pending"), SignalStatus::Pending);
-        assert_eq!(SignalStatus::from_str("investigating"), SignalStatus::Investigating);
+        assert_eq!(
+            SignalStatus::from_str("investigating"),
+            SignalStatus::Investigating
+        );
         assert_eq!(SignalStatus::from_str("confirmed"), SignalStatus::Confirmed);
         assert_eq!(SignalStatus::from_str("dismissed"), SignalStatus::Dismissed);
         assert_eq!(SignalStatus::from_str("unknown"), SignalStatus::Pending);
@@ -1855,7 +1883,10 @@ mod tests {
         );
         let ev = &batch.events[0];
         assert_eq!(ev.event_type, "commit");
-        assert!(ev.commit_sha.is_some(), "commit event must carry commit_sha");
+        assert!(
+            ev.commit_sha.is_some(),
+            "commit event must carry commit_sha"
+        );
         assert_eq!(ev.status, "success");
     }
 
@@ -1880,7 +1911,8 @@ mod tests {
     #[test]
     fn golden_path_response_accepted_shape() {
         // Validates /events response — Desktop parses this to know if accepted or duped.
-        let json = r#"{"accepted":["00000000-0000-0000-0000-000000000001"],"duplicates":[],"errors":[]}"#;
+        let json =
+            r#"{"accepted":["00000000-0000-0000-0000-000000000001"],"duplicates":[],"errors":[]}"#;
         let resp: ClientEventResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.accepted.len(), 1);
         assert!(resp.duplicates.is_empty());
@@ -1890,7 +1922,8 @@ mod tests {
     #[test]
     fn golden_path_duplicate_detected_in_response() {
         // Server returns the same UUID as a duplicate on second send.
-        let json = r#"{"accepted":[],"duplicates":["00000000-0000-0000-0000-000000000001"],"errors":[]}"#;
+        let json =
+            r#"{"accepted":[],"duplicates":["00000000-0000-0000-0000-000000000001"],"errors":[]}"#;
         let resp: ClientEventResponse = serde_json::from_str(json).unwrap();
         assert!(resp.accepted.is_empty());
         assert_eq!(resp.duplicates.len(), 1);

@@ -37,11 +37,8 @@ pub fn unstage_files(repo: &Repository, files: &[String]) -> Result<(), GitError
         .peel_to_commit()
         .map_err(|e| GitError::GitError(e.message().to_string()))?;
 
-    repo.reset_default(
-        Some(commit.as_object()),
-        files.iter().map(|s| s.as_str()),
-    )
-    .map_err(|e| GitError::GitError(e.message().to_string()))?;
+    repo.reset_default(Some(commit.as_object()), files.iter().map(|s| s.as_str()))
+        .map_err(|e| GitError::GitError(e.message().to_string()))?;
 
     Ok(())
 }

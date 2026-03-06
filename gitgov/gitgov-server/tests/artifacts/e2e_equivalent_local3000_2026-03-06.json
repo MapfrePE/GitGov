@@ -1,0 +1,11 @@
+{
+  "health_ok": true,
+  "auth_bearer_ok": true,
+  "wrong_header_rejected": true,
+  "event_ingest_ok": true,
+  "logs_query_ok": true,
+  "logs_contains_successful_push": true,
+  "stats_ok": true,
+  "combined_events_ok": true,
+  "all_passed": true
+}

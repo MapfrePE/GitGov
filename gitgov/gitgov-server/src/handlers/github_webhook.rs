@@ -138,16 +138,26 @@ pub async fn handle_github_webhook(
                 }),
             )
         }
-        Err(_e) => (
-            StatusCode::OK,
-            Json(WebhookResponse {
-                received: true,
-                delivery_id,
-                event_type,
-                processed: Some(false),
-                error: Some("Internal database error".to_string()),
-            }),
-        ),
+        Err(e) => {
+            let err_text = e.to_string();
+            let is_internal_db_error = err_text.contains("Internal database error");
+            let (status, error_msg) = if is_internal_db_error {
+                // Return 5xx so GitHub can retry transient server/database failures.
+                (StatusCode::SERVICE_UNAVAILABLE, "Internal database error")
+            } else {
+                (StatusCode::BAD_REQUEST, "Webhook payload could not be processed")
+            };
+            (
+                status,
+                Json(WebhookResponse {
+                    received: true,
+                    delivery_id,
+                    event_type,
+                    processed: Some(false),
+                    error: Some(error_msg.to_string()),
+                }),
+            )
+        }
     }
 }
 

@@ -84,7 +84,12 @@ pub struct AuditFilter {
     pub repo_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_created_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_id: Option<String>,
     pub limit: usize,
+    /// Legacy pagination for `/logs`; prefer keyset cursor (`before_created_at` + `before_id`).
     pub offset: usize,
 }
 
@@ -103,6 +108,8 @@ impl Default for AuditFilter {
             repo_full_name: None,
             repo_name: None,
             org_name: None,
+            before_created_at: None,
+            before_id: None,
             limit: 50,
             offset: 0,
         }
@@ -647,10 +654,9 @@ fn normalize_loopback_url(url: &str) -> String {
         return trimmed.to_string();
     };
 
-    if parsed.host_str() == Some("localhost")
-        && parsed.set_host(Some("127.0.0.1")).is_ok() {
-            return parsed.to_string();
-        }
+    if parsed.host_str() == Some("localhost") && parsed.set_host(Some("127.0.0.1")).is_ok() {
+        return parsed.to_string();
+    }
 
     trimmed.to_string()
 }
@@ -668,9 +674,9 @@ impl ControlPlaneClient {
         let mut url = reqwest::Url::parse(&self.config.url)
             .map_err(|e| ServerError::ServerError(format!("Invalid server URL: {}", e)))?;
 
-        let mut path = url
-            .path_segments_mut()
-            .map_err(|_| ServerError::ServerError("Server URL cannot be used as base URL".to_string()))?;
+        let mut path = url.path_segments_mut().map_err(|_| {
+            ServerError::ServerError("Server URL cannot be used as base URL".to_string())
+        })?;
         path.pop_if_empty();
         for segment in segments {
             path.push(segment);
@@ -712,14 +718,8 @@ impl ControlPlaneClient {
             .user_login
             .as_ref()
             .or(filter.developer_login.as_ref());
-        let effective_event_type = filter
-            .event_type
-            .as_ref()
-            .or(filter.action.as_ref());
-        let effective_repo_full_name = filter
-            .repo_full_name
-            .as_ref()
-            .or(filter.repo_name.as_ref());
+        let effective_event_type = filter.event_type.as_ref().or(filter.action.as_ref());
+        let effective_repo_full_name = filter.repo_full_name.as_ref().or(filter.repo_name.as_ref());
 
         let mut query_params: Vec<(String, String)> = Vec::new();
         if let Some(source) = &filter.source {
@@ -749,8 +749,19 @@ impl ControlPlaneClient {
         if let Some(org_name) = &filter.org_name {
             query_params.push(("org_name".to_string(), org_name.clone()));
         }
+        if let Some(before_created_at) = filter.before_created_at {
+            query_params.push((
+                "before_created_at".to_string(),
+                before_created_at.to_string(),
+            ));
+        }
+        if let Some(before_id) = &filter.before_id {
+            query_params.push(("before_id".to_string(), before_id.clone()));
+        }
         query_params.push(("limit".to_string(), filter.limit.to_string()));
-        query_params.push(("offset".to_string(), filter.offset.to_string()));
+        if filter.offset > 0 {
+            query_params.push(("offset".to_string(), filter.offset.to_string()));
+        }
 
         let mut request = self.client.get(&url).query(&query_params);
 
@@ -1154,7 +1165,10 @@ impl ControlPlaneClient {
             .map_err(|e| ServerError::NetworkError(e.to_string()))?;
 
         if response.status().as_u16() == 404 {
-            return Ok(JiraTicketDetailResponse { found: false, ticket: None });
+            return Ok(JiraTicketDetailResponse {
+                found: false,
+                ticket: None,
+            });
         }
         if !response.status().is_success() {
             return Err(ServerError::ServerError(format!(
@@ -1325,12 +1339,9 @@ impl ControlPlaneClient {
         status: &str,
     ) -> Result<OrgUser, ServerError> {
         let url = self.endpoint_url(&["org-users", user_id, "status"])?;
-        let mut request = self
-            .client
-            .patch(url)
-            .json(&UpdateOrgUserStatusRequest {
-                status: status.to_string(),
-            });
+        let mut request = self.client.patch(url).json(&UpdateOrgUserStatusRequest {
+            status: status.to_string(),
+        });
         if let Some(ref api_key) = self.config.api_key {
             request = request.header("Authorization", format!("Bearer {}", api_key));
         }
@@ -1348,7 +1359,10 @@ impl ControlPlaneClient {
             .map_err(|e| ServerError::SerializationError(e.to_string()))
     }
 
-    pub fn create_api_key_for_org_user(&self, user_id: &str) -> Result<ApiKeyResponse, ServerError> {
+    pub fn create_api_key_for_org_user(
+        &self,
+        user_id: &str,
+    ) -> Result<ApiKeyResponse, ServerError> {
         let url = self.endpoint_url(&["org-users", user_id, "api-key"])?;
         let mut request = self.client.post(url).body("");
         if let Some(ref api_key) = self.config.api_key {

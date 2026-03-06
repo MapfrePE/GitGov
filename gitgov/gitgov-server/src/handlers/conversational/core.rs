@@ -23,6 +23,7 @@ Puedes conversar de forma natural. Si alguien te saluda, responde cálidamente. 
 \n\
 == REGLAS DE RESPUESTA ==\n\
 - Usa EXCLUSIVAMENTE los datos/contexto provistos por el backend en el campo <data>. NO inventes datos numéricos ni eventos.\n\
+- Regla no negociable: si la pregunta pide logs/eventos, responde solo con datos exactos y verificables; si no hay datos suficientes, usa status=\"insufficient_data\" (nunca inventes).\n\
 - Si <data>.mode = \"project_knowledge\", prioriza los snippets incluidos para responder de forma accionable y técnica.\n\
 - Si <data>.mode = \"sql_result\", interpreta los datos y explícalos en lenguaje natural.\n\
 - Si los datos están vacíos o son insuficientes para responder la pregunta específica, usa status=\"insufficient_data\".\n\
@@ -115,7 +116,7 @@ const PROJECT_KNOWLEDGE_BASE: &[(&str, &[&str], &str)] = &[
     (
         "Endpoint /logs",
         &["logs", "ver eventos", "historial", "actividad", "filtrar logs", "paginacion"],
-        "GET /logs devuelve eventos combinados con paginación. Params opcionales: limit (default 50), offset (default 0), event_type, user_login, repo, start_ts, end_ts. Admin ve todos; Developer ve solo sus propios eventos. Response: {\"events\":[...]}.",
+        "GET /logs devuelve eventos combinados con paginación. Preferir keyset con before_created_at + before_id. Params opcionales: limit, before_created_at, before_id, offset (compatibilidad legada, deprecado), event_type, user_login, repo, start_ts, end_ts. Admin ve todos; Developer ve solo sus propios eventos. Response: {\"events\":[...],\"stale\"?:bool,\"deprecations\"?:string[]}.",
     ),
     (
         "Endpoint /stats",
@@ -260,7 +261,7 @@ const PROJECT_KNOWLEDGE_BASE: &[(&str, &[&str], &str)] = &[
     (
         "Rate limits configurables",
         &["rate limit", "throttle", "429", "too many requests", "limite peticiones", "rate vars"],
-        "Rate limits configurables via variables de entorno: GITGOV_RATE_LIMIT_EVENTS_PER_MIN (default 240, ruta /events), GITGOV_RATE_LIMIT_AUDIT_STREAM_PER_MIN (default 60), GITGOV_RATE_LIMIT_JENKINS_PER_MIN (default 120), GITGOV_RATE_LIMIT_JIRA_PER_MIN (default 120), GITGOV_RATE_LIMIT_ADMIN_PER_MIN (default 60 para logs/stats/dashboard). Si recibes 429, aumenta el límite correspondiente.",
+        "Rate limits configurables via variables de entorno: GITGOV_RATE_LIMIT_EVENTS_PER_MIN (default 240, ruta /events), GITGOV_RATE_LIMIT_AUDIT_STREAM_PER_MIN (default 60), GITGOV_RATE_LIMIT_JENKINS_PER_MIN (default 120), GITGOV_RATE_LIMIT_JIRA_PER_MIN (default 120), GITGOV_RATE_LIMIT_ADMIN_PER_MIN (default 60 para endpoints admin generales), GITGOV_RATE_LIMIT_LOGS_PER_MIN (default hereda ADMIN para /logs), GITGOV_RATE_LIMIT_STATS_PER_MIN (default hereda ADMIN para /stats, /stats/daily y /dashboard). Si recibes 429, aumenta el límite correspondiente.",
     ),
     (
         "Deploy en EC2 con systemd",

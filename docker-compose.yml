@@ -35,7 +35,7 @@ services:
       DATABASE_URL: postgresql://gitgov:gitgov_dev_password@gitgov-db:5432/gitgov
       GITGOV_JWT_SECRET: change-me-in-real-env
       GITGOV_SERVER_ADDR: 0.0.0.0:3000
-      GITGOV_API_KEY: 57f1ed59-371d-46ef-9fdf-508f59bc4963
+      GITGOV_API_KEY: change-me-dev-api-key
       RUST_LOG: info
       # Optional hardening examples:
       # JENKINS_WEBHOOK_SECRET: your-jenkins-secret

@@ -1,0 +1,28 @@
+﻿{
+    "summary":  {
+                    "passed":  true,
+                    "timestamp_ms":  1772675988371
+                },
+    "checks":  {
+                   "logs_no_offset":  {
+                                          "ok":  true,
+                                          "status":  200
+                                      },
+                   "jenkins_corr_no_offset":  {
+                                                  "ok":  true,
+                                                  "status":  200
+                                              },
+                   "signals_no_offset":  {
+                                             "ok":  true,
+                                             "status":  200
+                                         },
+                   "governance_no_offset":  {
+                                                "ok":  true,
+                                                "status":  200
+                                            },
+                   "logs_no_params":  {
+                                          "ok":  true,
+                                          "status":  200
+                                      }
+               }
+}

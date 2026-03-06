@@ -1,14 +1,14 @@
 use crate::control_plane::{
-    AcceptOrgInvitationRequest, AcceptOrgInvitationResponse, ApiKeyInfo, ApiKeyResponse, AuditFilter,
-    ChatAskRequest, ChatAskResponse, CombinedEvent, CommitPipelineCorrelation, ControlPlaneClient,
-    CreateOrgInvitationRequest, CreateOrgInvitationResponse, CreateOrgRequest, CreateOrgResponse,
-    CreateOrgUserRequest, CreateOrgUserResponse, DailyActivityFilter, DailyActivityPoint,
-    EventPayload, ExportLogEntry, ExportResponse, FeatureRequestCreated, FeatureRequestInput,
-    JenkinsCorrelationFilter, JiraCorrelateRequest, JiraCorrelateResponse, JiraTicketDetailResponse,
-    MeResponse, OrgInvitation, OrgInvitationsResponse, OrgUser, OrgUsersResponse,
-    PrMergeEvidenceEntry, PrMergeEvidenceFilter, ResendOrgInvitationRequest, RevokeApiKeyResponse,
-    ServerConfig, ServerStats, TeamReposResponse, TeamOverviewResponse, TicketCoverageQuery,
-    TicketCoverageResponse,
+    AcceptOrgInvitationRequest, AcceptOrgInvitationResponse, ApiKeyInfo, ApiKeyResponse,
+    AuditFilter, ChatAskRequest, ChatAskResponse, CombinedEvent, CommitPipelineCorrelation,
+    ControlPlaneClient, CreateOrgInvitationRequest, CreateOrgInvitationResponse, CreateOrgRequest,
+    CreateOrgResponse, CreateOrgUserRequest, CreateOrgUserResponse, DailyActivityFilter,
+    DailyActivityPoint, EventPayload, ExportLogEntry, ExportResponse, FeatureRequestCreated,
+    FeatureRequestInput, JenkinsCorrelationFilter, JiraCorrelateRequest, JiraCorrelateResponse,
+    JiraTicketDetailResponse, MeResponse, OrgInvitation, OrgInvitationsResponse, OrgUser,
+    OrgUsersResponse, PrMergeEvidenceEntry, PrMergeEvidenceFilter, ResendOrgInvitationRequest,
+    RevokeApiKeyResponse, ServerConfig, ServerStats, TeamOverviewResponse, TeamReposResponse,
+    TicketCoverageQuery, TicketCoverageResponse,
 };
 use crate::outbox::Outbox;
 use serde::{Deserialize, Serialize};
@@ -70,14 +70,12 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
-    tauri::async_runtime::spawn_blocking(f)
-        .await
-        .map_err(|e| {
-            to_command_error(
-                format!("{}_THREAD_JOIN_ERROR: {}", task_name, e),
-                "SERVER_ERROR",
-            )
-        })?
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| {
+        to_command_error(
+            format!("{}_THREAD_JOIN_ERROR: {}", task_name, e),
+            "SERVER_ERROR",
+        )
+    })?
 }
 
 #[tauri::command]
@@ -709,6 +707,11 @@ pub async fn cmd_server_create_feature_request(
         client.create_feature_request(&input)
     })
     .await
-    .map_err(|e| to_command_error(format!("FEATURE_REQUEST_THREAD_JOIN_ERROR: {}", e), "SERVER_ERROR"))?
+    .map_err(|e| {
+        to_command_error(
+            format!("FEATURE_REQUEST_THREAD_JOIN_ERROR: {}", e),
+            "SERVER_ERROR",
+        )
+    })?
     .map_err(|e| to_command_error(e, "SERVER_ERROR"))
 }

@@ -39,6 +39,97 @@ fn looks_generic_non_answer(text: &str) -> bool {
     markers.iter().any(|m| t.contains(m))
 }
 
+fn is_logs_precision_query(question: &str) -> bool {
+    let q = question.to_lowercase();
+    let has_logs_word = q
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| matches!(w, "log" | "logs" | "evento" | "eventos" | "event" | "events" | "historial"));
+    has_logs_word
+        || q.contains("actividad reciente")
+        || q.contains("ultimos eventos")
+        || q.contains("ultimos logs")
+        || q.contains("recent activity")
+        || q.contains("recent logs")
+        || q.contains("latest logs")
+}
+
+fn extract_logs_limit(question: &str, default_limit: usize, max_limit: usize) -> usize {
+    for token in question.split(|c: char| !c.is_ascii_digit()) {
+        if token.is_empty() {
+            continue;
+        }
+        if let Ok(value) = token.parse::<usize>() {
+            if value > 0 {
+                return value.min(max_limit);
+            }
+        }
+    }
+    default_limit.min(max_limit).max(1)
+}
+
+fn extract_logs_event_type_hint(question: &str) -> Option<String> {
+    let q = question.to_lowercase();
+    if q.contains("blocked_push") || q.contains("push bloque") {
+        return Some("blocked_push".to_string());
+    }
+    if q.contains("successful_push") || q.contains("push exitos") {
+        return Some("successful_push".to_string());
+    }
+    if q.contains("attempt_push") || q.contains("intento de push") {
+        return Some("attempt_push".to_string());
+    }
+    if q.contains("stage_files") || q.contains("staged") || q.contains("staging") {
+        return Some("stage_files".to_string());
+    }
+    if q.contains("commit") {
+        return Some("commit".to_string());
+    }
+    None
+}
+
+fn render_precise_logs_answer(events: &[CombinedEvent], language: &str) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(events.len());
+    for event in events {
+        let user = event.user_login.as_deref().unwrap_or("n/a");
+        let repo = event.repo_name.as_deref().unwrap_or("n/a");
+        let branch = event.branch.as_deref().unwrap_or("n/a");
+        let status = event.status.as_deref().unwrap_or("n/a");
+        let ts_label =
+            if let Some(dt_utc) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(event.created_at) {
+                let lima_tz = chrono::FixedOffset::west_opt(5 * 3600)
+                    .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("valid offset"));
+                let dt_lima = dt_utc.with_timezone(&lima_tz);
+                format!(
+                    "{} Lima | {} UTC | {}ms",
+                    dt_lima.format("%Y-%m-%d %H:%M:%S"),
+                    dt_utc.format("%Y-%m-%d %H:%M:%S"),
+                    event.created_at
+                )
+            } else {
+                format!("{}ms", event.created_at)
+            };
+
+        lines.push(format!(
+            "- {} | source={} type={} user={} repo={} branch={} status={} id={}",
+            ts_label, event.source, event.event_type, user, repo, branch, status, event.id
+        ));
+    }
+
+    if language == "en" {
+        format!(
+            "Exact log sample ({} events, deterministic DB query):\n{}",
+            events.len(),
+            lines.join("\n")
+        )
+    } else {
+        format!(
+            "Muestra exacta de logs ({} eventos, consulta deterministica DB):\n{}",
+            events.len(),
+            lines.join("\n")
+        )
+    }
+}
+
 fn normalize_llm_response(
     mut response: ChatAskResponse,
     question: &str,
@@ -1874,6 +1965,82 @@ Corte temporal: {lima} (America/Lima) | {utc} UTC.",
             }
         }
         None => {}
+    }
+
+    if is_logs_precision_query(&question) {
+        let mut filter = EventFilter {
+            limit: extract_logs_limit(&question, 5, 20),
+            ..EventFilter::default()
+        };
+        filter.org_id = scoped_org_id.clone();
+        filter.org_name = None;
+        filter.user_login = nlp.entities.user_login.clone();
+        filter.event_type = extract_logs_event_type_hint(&question);
+
+        match state.db.get_combined_events(&filter).await {
+            Ok(events) => {
+                if events.is_empty() {
+                    let answer = if nlp.entities.language == "en" {
+                        "I did not find log events for the requested scope/filters. Provide org/user/event_type or a narrower time window.".to_string()
+                    } else {
+                        "No encontre eventos de log para el scope/filtros solicitados. Indica org/usuario/tipo de evento o una ventana de tiempo mas acotada.".to_string()
+                    };
+                    return finalize_chat_response(
+                        &state,
+                        &conversation_key,
+                        &mut session,
+                        &nlp,
+                        StatusCode::OK,
+                        ChatAskResponse {
+                            status: "insufficient_data".to_string(),
+                            answer,
+                            missing_capability: None,
+                            can_report_feature: false,
+                            data_refs: vec![
+                                "logs_endpoint".to_string(),
+                                "deterministic_sql_results".to_string(),
+                            ],
+                        },
+                    );
+                }
+
+                let answer = render_precise_logs_answer(&events, &nlp.entities.language);
+                return finalize_chat_response(
+                    &state,
+                    &conversation_key,
+                    &mut session,
+                    &nlp,
+                    StatusCode::OK,
+                    ChatAskResponse {
+                        status: "ok".to_string(),
+                        answer,
+                        missing_capability: None,
+                        can_report_feature: false,
+                        data_refs: vec![
+                            "logs_endpoint".to_string(),
+                            "deterministic_sql_results".to_string(),
+                        ],
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::error!("deterministic logs answer error: {}", e);
+                return finalize_chat_response(
+                    &state,
+                    &conversation_key,
+                    &mut session,
+                    &nlp,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ChatAskResponse {
+                        status: "error".to_string(),
+                        answer: "Error consultando logs exactos en la base de datos".to_string(),
+                        missing_capability: None,
+                        can_report_feature: false,
+                        data_refs: vec!["logs_endpoint".to_string()],
+                    },
+                );
+            }
+        }
     }
 
     if let Some(answer) = build_grounded_knowledge_answer(&question, &nlp.entities.language) {

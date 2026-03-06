@@ -2,8 +2,8 @@ use crate::github::{
     delete_token, get_authenticated_user, load_token, poll_for_token, save_token, start_device_flow,
 };
 use crate::models::AuthenticatedUser;
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceFlowInfo {
@@ -46,12 +46,10 @@ fn current_user_file_path() -> PathBuf {
 fn save_current_user_session(user: &AuthenticatedUser) -> Result<(), String> {
     let path = current_user_file_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| to_command_error(e, "SESSION_ERROR"))?;
+        std::fs::create_dir_all(parent).map_err(|e| to_command_error(e, "SESSION_ERROR"))?;
     }
 
-    let json = serde_json::to_string(user)
-        .map_err(|e| to_command_error(e, "SESSION_ERROR"))?;
+    let json = serde_json::to_string(user).map_err(|e| to_command_error(e, "SESSION_ERROR"))?;
 
     std::fs::write(&path, json).map_err(|e| to_command_error(e, "SESSION_ERROR"))?;
     Ok(())
@@ -194,8 +192,7 @@ pub fn cmd_open_external_url(url: String) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err(to_command_error("URL vacía", "INVALID_URL"));
     }
-    let parsed =
-        reqwest::Url::parse(trimmed).map_err(|e| to_command_error(e, "INVALID_URL"))?;
+    let parsed = reqwest::Url::parse(trimmed).map_err(|e| to_command_error(e, "INVALID_URL"))?;
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         return Err(to_command_error(

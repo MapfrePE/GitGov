@@ -7,8 +7,35 @@ pub async fn ingest_client_events(
     State(state): State<Arc<AppState>>,
     Json(batch): Json<ClientEventBatch>,
 ) -> impl IntoResponse {
+    let batch_len = batch.events.len();
+    if state.events_max_batch > 0 && batch_len > state.events_max_batch {
+        tracing::warn!(
+            auth_user = %auth_user.client_id,
+            batch_len,
+            max_batch = state.events_max_batch,
+            "Rejecting /events payload because it exceeds max configured batch size"
+        );
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ClientEventResponse {
+                accepted: vec![],
+                duplicates: vec![],
+                errors: vec![EventError {
+                    event_uuid: "batch".to_string(),
+                    error: format!(
+                        "Too many events in a single request: {} (max {})",
+                        batch_len, state.events_max_batch
+                    ),
+                }],
+            }),
+        );
+    }
+
     let mut events = Vec::new();
+    let mut pre_validation_errors: Vec<EventError> = Vec::new();
     let strict_actor_match = state.strict_actor_match;
+    let mut org_id_cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut repo_cache: HashMap<String, Option<Repo>> = HashMap::new();
 
     for input in batch.events {
         if strict_actor_match
@@ -21,17 +48,12 @@ pub async fn ingest_client_events(
                 event_uuid = %input.event_uuid,
                 "Rejecting client event due to strict actor match enforcement"
             );
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ClientEventResponse {
-                    accepted: vec![],
-                    duplicates: vec![],
-                    errors: vec![EventError {
-                        event_uuid: input.event_uuid,
-                        error: "user_login must match authenticated client_id (STRICT_ACTOR_MATCH)".to_string(),
-                    }],
-                }),
-            );
+            pre_validation_errors.push(EventError {
+                event_uuid: input.event_uuid,
+                error: "user_login must match authenticated client_id (STRICT_ACTOR_MATCH)"
+                    .to_string(),
+            });
+            continue;
         }
 
         let effective_user_login = if auth_user.role == UserRole::Admin {
@@ -47,25 +69,28 @@ pub async fn ingest_client_events(
                 event_uuid = %input.event_uuid,
                 "Rejecting client event due to synthetic login policy"
             );
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ClientEventResponse {
-                    accepted: vec![],
-                    duplicates: vec![],
-                    errors: vec![EventError {
-                        event_uuid: input.event_uuid,
-                        error: "synthetic user_login is not allowed in this environment".to_string(),
-                    }],
-                }),
-            );
+            pre_validation_errors.push(EventError {
+                event_uuid: input.event_uuid,
+                error: "synthetic user_login is not allowed in this environment".to_string(),
+            });
+            continue;
         }
 
         // Get org and repo IDs
         let requested_org_id = if let Some(ref org_name) = input.org_name {
-            state.db.get_org_by_login(org_name).await
-                .ok()
-                .flatten()
-                .map(|o| o.id)
+            if let Some(cached) = org_id_cache.get(org_name) {
+                cached.clone()
+            } else {
+                let resolved = state
+                    .db
+                    .get_org_by_login(org_name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|o| o.id);
+                org_id_cache.insert(org_name.clone(), resolved.clone());
+                resolved
+            }
         } else {
             None
         };
@@ -82,17 +107,11 @@ pub async fn ingest_client_events(
                         event_uuid = %input.event_uuid,
                         "Rejecting client event with org mismatch"
                     );
-                    return (
-                        StatusCode::FORBIDDEN,
-                        Json(ClientEventResponse {
-                            accepted: vec![],
-                            duplicates: vec![],
-                            errors: vec![EventError {
-                                event_uuid: input.event_uuid,
-                                error: "Event org_name is outside API key scope".to_string(),
-                            }],
-                        }),
-                    );
+                    pre_validation_errors.push(EventError {
+                        event_uuid: input.event_uuid,
+                        error: "Event org_name is outside API key scope".to_string(),
+                    });
+                    continue;
                 }
             }
         }
@@ -118,11 +137,17 @@ pub async fn ingest_client_events(
             });
 
         let repo = if let Some(ref repo_full_name) = inferred_repo_full_name {
-            state
-                .db
-                .get_repo_by_full_name(repo_full_name)
-                .await
-                .unwrap_or_default()
+            if let Some(cached) = repo_cache.get(repo_full_name) {
+                cached.clone()
+            } else {
+                let resolved = state
+                    .db
+                    .get_repo_by_full_name(repo_full_name)
+                    .await
+                    .unwrap_or_default();
+                repo_cache.insert(repo_full_name.clone(), resolved.clone());
+                resolved
+            }
         } else {
             None
         };
@@ -135,17 +160,11 @@ pub async fn ingest_client_events(
                         event_uuid = %input.event_uuid,
                         "Rejecting client event with repo outside API key scope"
                     );
-                    return (
-                        StatusCode::FORBIDDEN,
-                        Json(ClientEventResponse {
-                            accepted: vec![],
-                            duplicates: vec![],
-                            errors: vec![EventError {
-                                event_uuid: input.event_uuid,
-                                error: "Event repo_full_name is outside API key scope".to_string(),
-                            }],
-                        }),
-                    );
+                    pre_validation_errors.push(EventError {
+                        event_uuid: input.event_uuid,
+                        error: "Event repo_full_name is outside API key scope".to_string(),
+                    });
+                    continue;
                 }
             }
         }
@@ -165,7 +184,22 @@ pub async fn ingest_client_events(
                 .upsert_repo_by_full_name(Some(effective_org_id), full_name, repo_name, true)
                 .await
             {
-                Ok(id) => Some(id),
+                Ok(id) => {
+                    // Populate in-batch cache so repeated events in same payload avoid extra lookups/upserts.
+                    repo_cache.insert(
+                        full_name.to_string(),
+                        Some(Repo {
+                            id: id.clone(),
+                            org_id: Some(effective_org_id.to_string()),
+                            github_id: None,
+                            full_name: full_name.to_string(),
+                            name: repo_name.to_string(),
+                            private: true,
+                            created_at: chrono::Utc::now().timestamp_millis(),
+                        }),
+                    );
+                    Some(id)
+                }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -202,8 +236,25 @@ pub async fn ingest_client_events(
         events.push(event);
     }
 
+    if events.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(ClientEventResponse {
+                accepted: vec![],
+                duplicates: vec![],
+                errors: pre_validation_errors,
+            }),
+        );
+    }
+
     match state.db.insert_client_events_batch(&events).await {
-        Ok(response) => {
+        Ok(mut response) => {
+            if !pre_validation_errors.is_empty() {
+                response.errors.extend(pre_validation_errors);
+            }
+            invalidate_stats_cache(&state);
+            invalidate_logs_cache(&state);
+
             // Fire-and-forget: update client_sessions last_seen + device metadata
             {
                 let client_id = auth_user.client_id.clone();
@@ -251,15 +302,17 @@ pub async fn ingest_client_events(
         }
         Err(e) => {
             tracing::error!("Failed to insert client events batch: {}", e);
+            let mut errors = pre_validation_errors;
+            errors.push(EventError {
+                event_uuid: "batch".to_string(),
+                error: "Internal database error".to_string(),
+            });
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ClientEventResponse {
                     accepted: vec![],
                     duplicates: vec![],
-                    errors: vec![EventError {
-                        event_uuid: "batch".to_string(),
-                        error: "Internal database error".to_string(),
-                    }],
+                    errors,
                 }),
             )
         }
@@ -270,11 +323,429 @@ pub async fn ingest_client_events(
 // QUERY ENDPOINTS
 // ============================================================================
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct OutboxLeaseRequest {
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub holder: Option<String>,
+    #[serde(default)]
+    pub lease_ttl_ms: Option<u64>,
+    #[serde(default)]
+    pub max_wait_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OutboxLeaseResponse {
+    pub granted: bool,
+    pub wait_ms: u64,
+    pub lease_ttl_ms: u64,
+    pub mode: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OutboxLeaseTelemetryResponse {
+    pub enabled: bool,
+    pub default_lease_ttl_ms: u64,
+    pub telemetry: OutboxLeaseTelemetrySnapshot,
+}
+
+fn record_outbox_lease_telemetry(
+    state: &Arc<AppState>,
+    mode: OutboxLeaseTelemetryMode,
+    requested_ttl_ms: u64,
+    effective_ttl_ms: u64,
+    wait_ms: u64,
+    ttl_clamped: bool,
+    wait_clamped: bool,
+    request_started: Instant,
+) {
+    match state.outbox_lease_telemetry.lock() {
+        Ok(mut telemetry) => telemetry.record(
+            mode,
+            requested_ttl_ms,
+            effective_ttl_ms,
+            wait_ms,
+            ttl_clamped,
+            wait_clamped,
+            request_started.elapsed().as_millis() as u64,
+        ),
+        Err(_) => tracing::warn!("Outbox lease telemetry lock poisoned; skipping telemetry record"),
+    }
+}
+
+pub async fn acquire_outbox_flush_lease(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<OutboxLeaseRequest>,
+) -> impl IntoResponse {
+    let request_started = Instant::now();
+    let requested_ttl_ms = request
+        .lease_ttl_ms
+        .unwrap_or(state.outbox_server_lease_ttl_ms);
+    let lease_ttl_ms = requested_ttl_ms.clamp(1_000, 60_000);
+    let ttl_clamped = requested_ttl_ms != lease_ttl_ms;
+    let requested_max_wait_ms = request.max_wait_ms.unwrap_or(lease_ttl_ms);
+    let max_wait_ms = requested_max_wait_ms.clamp(250, 120_000);
+    let wait_clamped = requested_max_wait_ms != max_wait_ms;
+
+    if !state.outbox_server_lease_enabled {
+        record_outbox_lease_telemetry(
+            &state,
+            OutboxLeaseTelemetryMode::DisabledFailOpen,
+            requested_ttl_ms,
+            lease_ttl_ms,
+            0,
+            ttl_clamped,
+            wait_clamped,
+            request_started,
+        );
+        return (
+            StatusCode::OK,
+            Json(OutboxLeaseResponse {
+                granted: true,
+                wait_ms: 0,
+                lease_ttl_ms: state.outbox_server_lease_ttl_ms,
+                mode: "disabled_fail_open".to_string(),
+            }),
+        );
+    }
+
+    let scope = request
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| auth_user.org_id.clone())
+        .unwrap_or_else(|| "global".to_string());
+    let scope_key = format!("flush:{}", scope);
+    let holder = request
+        .holder
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "client:{}:{}",
+                auth_user.client_id,
+                auth_user.org_id.as_deref().unwrap_or("global")
+            )
+        });
+
+    match state
+        .db
+        .try_acquire_outbox_flush_lease(&scope_key, &holder, Duration::from_millis(lease_ttl_ms))
+        .await
+    {
+        Ok(decision) => {
+            let response_wait_ms = decision.wait_ms.min(max_wait_ms);
+            record_outbox_lease_telemetry(
+                &state,
+                if decision.granted {
+                    OutboxLeaseTelemetryMode::Granted
+                } else {
+                    OutboxLeaseTelemetryMode::Denied
+                },
+                requested_ttl_ms,
+                lease_ttl_ms,
+                response_wait_ms,
+                ttl_clamped,
+                wait_clamped,
+                request_started,
+            );
+            (
+            StatusCode::OK,
+            Json(OutboxLeaseResponse {
+                granted: decision.granted,
+                wait_ms: response_wait_ms,
+                lease_ttl_ms,
+                mode: "server_lease".to_string(),
+            }),
+        )
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                scope_key = %scope_key,
+                holder = %holder,
+                "Outbox lease acquisition failed; returning fail-open grant"
+            );
+            record_outbox_lease_telemetry(
+                &state,
+                OutboxLeaseTelemetryMode::DbErrorFailOpen,
+                requested_ttl_ms,
+                lease_ttl_ms,
+                0,
+                ttl_clamped,
+                wait_clamped,
+                request_started,
+            );
+            (
+                StatusCode::OK,
+                Json(OutboxLeaseResponse {
+                    granted: true,
+                    wait_ms: 0,
+                    lease_ttl_ms,
+                    mode: "db_error_fail_open".to_string(),
+                }),
+            )
+        }
+    }
+}
+
+pub async fn get_outbox_lease_metrics(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Err(resp) = require_admin(&auth_user) {
+        return resp.into_response();
+    }
+
+    let telemetry = match state.outbox_lease_telemetry.lock() {
+        Ok(telemetry) => telemetry.snapshot(),
+        Err(_) => {
+            tracing::warn!("Outbox lease telemetry lock poisoned while reading");
+            OutboxLeaseTelemetrySnapshot::default()
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(OutboxLeaseTelemetryResponse {
+            enabled: state.outbox_server_lease_enabled,
+            default_lease_ttl_ms: state.outbox_server_lease_ttl_ms,
+            telemetry,
+        }),
+    )
+        .into_response()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LogsResponse {
     pub events: Vec<CombinedEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecations: Option<Vec<String>>,
+}
+
+const GLOBAL_STATS_CACHE_KEY: &str = "__global__";
+const MAX_STATS_CACHE_ENTRIES: usize = 256;
+const MAX_LOGS_CACHE_ENTRIES: usize = 512;
+const LOGS_OFFSET_DEPRECATION_NOTICE: &str =
+    "The /logs `offset` query parameter is deprecated. Prefer keyset pagination with `before_created_at` and `before_id`.";
+
+fn logs_deprecations_for_request(filter: &EventFilter) -> Option<Vec<String>> {
+    (filter.offset > 0).then(|| vec![LOGS_OFFSET_DEPRECATION_NOTICE.to_string()])
+}
+
+fn should_reject_logs_offset(filter: &EventFilter, reject_offset_pagination: bool) -> bool {
+    reject_offset_pagination && filter.offset > 0 && filter.before_created_at.is_none()
+}
+
+fn stats_cache_key(org_id: Option<&str>) -> String {
+    org_id.unwrap_or(GLOBAL_STATS_CACHE_KEY).to_string()
+}
+
+fn get_cached_stats(state: &AppState, org_id: Option<&str>) -> Option<AuditStats> {
+    if state.stats_cache_ttl.is_zero() {
+        return None;
+    }
+
+    let now = Instant::now();
+    let key = stats_cache_key(org_id);
+    let mut cache = match state.stats_cache.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!("Stats cache lock poisoned while reading; bypassing cache");
+            return None;
+        }
+    };
+
+    if let Some(entry) = cache.get(&key) {
+        if entry.expires_at > now {
+            return Some(entry.stats.clone());
+        }
+    }
+    cache.remove(&key);
+    None
+}
+
+fn put_cached_stats(state: &AppState, org_id: Option<&str>, stats: &AuditStats) {
+    if state.stats_cache_ttl.is_zero() {
+        return;
+    }
+
+    let key = stats_cache_key(org_id);
+    let expires_at = Instant::now() + state.stats_cache_ttl;
+    let mut cache = match state.stats_cache.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!("Stats cache lock poisoned while writing; skipping cache write");
+            return;
+        }
+    };
+
+    cache.insert(
+        key,
+        StatsCacheEntry {
+            stats: stats.clone(),
+            expires_at,
+        },
+    );
+    if cache.len() > MAX_STATS_CACHE_ENTRIES {
+        cache.retain(|_, entry| entry.expires_at > Instant::now());
+    }
+}
+
+fn invalidate_stats_cache(state: &AppState) {
+    if state.stats_cache_ttl.is_zero() {
+        return;
+    }
+
+    match state.stats_cache.lock() {
+        Ok(mut cache) => {
+            if !cache.is_empty() {
+                cache.clear();
+            }
+        }
+        Err(_) => {
+            tracing::warn!("Stats cache lock poisoned while invalidating");
+        }
+    }
+}
+
+fn logs_cache_key(role: &UserRole, filter: &EventFilter) -> Option<String> {
+    if filter.before_created_at.is_some() || filter.offset > 0 {
+        // Cursor/offset pages are rarely repeated; avoid polluting cache.
+        return None;
+    }
+    let role_scope = role.as_str();
+    serde_json::to_string(filter)
+        .ok()
+        .map(|serialized| format!("{role_scope}|{serialized}"))
+}
+
+fn get_cached_logs(state: &AppState, key: &str) -> Option<Vec<CombinedEvent>> {
+    if state.logs_cache_ttl.is_zero() {
+        return None;
+    }
+
+    let now = Instant::now();
+    let mut cache = match state.logs_cache.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!("Logs cache lock poisoned while reading; bypassing cache");
+            return None;
+        }
+    };
+
+    if let Some(entry) = cache.get(key) {
+        if entry.expires_at > now {
+            return Some(entry.events.clone());
+        }
+    }
+    cache.remove(key);
+    None
+}
+
+fn get_cached_logs_on_error(state: &AppState, key: &str) -> Option<Vec<CombinedEvent>> {
+    if state.logs_cache_ttl.is_zero() {
+        return None;
+    }
+    let grace = state.logs_cache_stale_on_error;
+    if grace.is_zero() {
+        return None;
+    }
+
+    let now = Instant::now();
+    let mut cache = match state.logs_cache.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!("Logs cache lock poisoned while serving stale fallback");
+            return None;
+        }
+    };
+
+    if let Some(entry) = cache.get(key) {
+        let stale_deadline = entry.expires_at + grace;
+        if stale_deadline > now {
+            return Some(entry.events.clone());
+        }
+    }
+
+    cache.remove(key);
+    None
+}
+
+fn put_cached_logs(state: &AppState, key: &str, events: &[CombinedEvent]) {
+    if state.logs_cache_ttl.is_zero() {
+        return;
+    }
+
+    let expires_at = Instant::now() + state.logs_cache_ttl;
+    let mut cache = match state.logs_cache.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!("Logs cache lock poisoned while writing; skipping cache write");
+            return;
+        }
+    };
+
+    cache.insert(
+        key.to_string(),
+        LogsCacheEntry {
+            events: events.to_vec(),
+            expires_at,
+        },
+    );
+
+    if cache.len() > MAX_LOGS_CACHE_ENTRIES {
+        cache.retain(|_, entry| entry.expires_at > Instant::now());
+    }
+}
+
+fn invalidate_logs_cache(state: &AppState) {
+    if state.logs_cache_ttl.is_zero() {
+        return;
+    }
+
+    match state.logs_cache.lock() {
+        Ok(mut cache) => {
+            if !cache.is_empty() {
+                cache.clear();
+            }
+        }
+        Err(_) => {
+            tracing::warn!("Logs cache lock poisoned while invalidating");
+        }
+    }
+}
+
+async fn load_audit_stats(state: &AppState, org_id: Option<&str>) -> Result<AuditStats, DbError> {
+    if let Some(stats) = get_cached_stats(state, org_id) {
+        return Ok(stats);
+    }
+
+    let mut stats = state.db.get_stats(org_id).await?;
+    stats.pipeline = state
+        .db
+        .get_pipeline_health_stats(org_id)
+        .await
+        .unwrap_or_default();
+    stats.client_events.desktop_pushes_today = match state.db.get_desktop_pushes_today(org_id).await {
+        Ok(count) => count,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to compute desktop pushes today for /stats");
+            0
+        }
+    };
+    put_cached_stats(state, org_id, &stats);
+    Ok(stats)
 }
 
 pub async fn get_logs(
@@ -296,6 +767,28 @@ pub async fn get_logs(
             ..filter
         }
     };
+    let deprecations = logs_deprecations_for_request(&filter);
+
+    if filter.offset > 0 {
+        tracing::warn!(
+            requested_offset = filter.offset,
+            "Deprecated /logs offset pagination requested; prefer keyset cursor"
+        );
+    }
+    if should_reject_logs_offset(&filter, state.logs_reject_offset_pagination) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(LogsResponse {
+                events: vec![],
+                error: Some(
+                    "offset pagination is disabled; use before_created_at and before_id"
+                        .to_string(),
+                ),
+                stale: None,
+                deprecations,
+            }),
+        );
+    }
 
     let scoped_org_id = match resolve_and_check_org_scope(
         &state,
@@ -318,6 +811,8 @@ pub async fn get_logs(
                 Json(LogsResponse {
                     events: vec![],
                     error: Some(error.to_string()),
+                    stale: None,
+                    deprecations: deprecations.clone(),
                 }),
             );
         }
@@ -327,16 +822,68 @@ pub async fn get_logs(
         filter.org_id = scoped_org_id;
         filter.org_name = None;
     }
+    // Keyset pagination path should not also apply offset pagination.
+    if filter.before_created_at.is_some() {
+        filter.offset = 0;
+    }
+    let logs_key = logs_cache_key(&auth_user.role, &filter);
+    if let Some(cache_key) = logs_key.as_deref() {
+        if let Some(cached_events) = get_cached_logs(&state, cache_key) {
+            return (
+                StatusCode::OK,
+                Json(LogsResponse {
+                    events: cached_events,
+                    error: None,
+                    stale: None,
+                    deprecations: deprecations.clone(),
+                }),
+            );
+        }
+    }
 
     match state.db.get_combined_events(&filter).await {
-        Ok(events) => (StatusCode::OK, Json(LogsResponse { events, error: None })),
-        Err(_e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(LogsResponse {
-                events: vec![],
-                error: Some("Internal database error".to_string()),
-            }),
-        ),
+        Ok(events) => {
+            if let Some(cache_key) = logs_key.as_deref() {
+                put_cached_logs(&state, cache_key, &events);
+            }
+            (
+                StatusCode::OK,
+                Json(LogsResponse {
+                    events,
+                    error: None,
+                    stale: None,
+                    deprecations: deprecations.clone(),
+                }),
+            )
+        }
+        Err(e) => {
+            if let Some(cache_key) = logs_key.as_deref() {
+                if let Some(events) = get_cached_logs_on_error(&state, cache_key) {
+                    tracing::warn!(
+                        error = %e,
+                        "Serving stale /logs cache due transient database error"
+                    );
+                    return (
+                        StatusCode::OK,
+                        Json(LogsResponse {
+                            events,
+                            error: None,
+                            stale: Some(true),
+                            deprecations: deprecations.clone(),
+                        }),
+                    );
+                }
+            }
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(LogsResponse {
+                    events: vec![],
+                    error: Some("Internal database error".to_string()),
+                    stale: None,
+                    deprecations,
+                }),
+            )
+        }
     }
 }
 
@@ -349,18 +896,8 @@ pub async fn get_stats(
     }
 
     let org_id = auth_user.org_id.as_deref();
-    match state.db.get_stats(org_id).await {
-        Ok(mut stats) => {
-            stats.pipeline = state.db.get_pipeline_health_stats(org_id).await.unwrap_or_default();
-            stats.client_events.desktop_pushes_today = match state.db.get_desktop_pushes_today(org_id).await {
-                Ok(count) => count,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to compute desktop pushes today for /stats");
-                    0
-                }
-            };
-            (StatusCode::OK, Json(stats))
-        }
+    match load_audit_stats(&state, org_id).await {
+        Ok(stats) => (StatusCode::OK, Json(stats)),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(AuditStats::default())),
     }
 }
@@ -529,7 +1066,7 @@ pub async fn get_dashboard(
     }
 
     let org_id = auth_user.org_id.as_deref();
-    let stats = state.db.get_stats(org_id).await.unwrap_or_default();
+    let stats = load_audit_stats(&state, org_id).await.unwrap_or_default();
 
     let filter = EventFilter {
         limit: 10,

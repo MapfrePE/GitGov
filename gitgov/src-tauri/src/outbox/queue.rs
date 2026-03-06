@@ -1,6 +1,9 @@
 use crate::models::{AuditAction, AuditStatus};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +11,19 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
+
+const OUTBOX_BATCH_SIZE: usize = 100;
+const RETRY_BASE_DELAY_MS: i64 = 1_000;
+const RETRY_MAX_DELAY_MS: i64 = 60_000;
+const RETRY_RATE_LIMIT_FLOOR_MS: i64 = 5_000;
+const RETRY_CLIENT_ERROR_FLOOR_MS: i64 = 30_000;
+const DEFAULT_FLUSH_INTERVAL_JITTER_MAX_MS: u64 = 5_000;
+const DEFAULT_GLOBAL_COORD_ENABLED: bool = false;
+const DEFAULT_GLOBAL_COORD_WINDOW_MS: u64 = 20_000;
+const DEFAULT_GLOBAL_COORD_MAX_DEFERRAL_MS: u64 = 1_600;
+const DEFAULT_SERVER_LEASE_ENABLED: bool = false;
+const DEFAULT_SERVER_LEASE_TTL_MS: u64 = 2_000;
+const DEFAULT_SERVER_LEASE_SCOPE: &str = "global";
 
 #[derive(Debug, Error)]
 pub enum OutboxError {
@@ -17,6 +33,84 @@ pub enum OutboxError {
     SerializationError(String),
     #[error("Network error: {0}")]
     NetworkError(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RetryClass {
+    Network,
+    Http5xx,
+    RateLimited,
+    HttpOther,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RetryDirective {
+    class: RetryClass,
+    retry_after_ms: Option<i64>,
+    status_code: Option<u16>,
+}
+
+impl RetryDirective {
+    fn default_backoff() -> Self {
+        Self {
+            class: RetryClass::Network,
+            retry_after_ms: None,
+            status_code: None,
+        }
+    }
+
+    fn rate_limited(retry_after_ms: Option<i64>, status_code: u16) -> Self {
+        Self {
+            class: RetryClass::RateLimited,
+            retry_after_ms,
+            status_code: Some(status_code),
+        }
+    }
+
+    fn http_5xx(status_code: u16) -> Self {
+        Self {
+            class: RetryClass::Http5xx,
+            retry_after_ms: None,
+            status_code: Some(status_code),
+        }
+    }
+
+    fn http_other(status_code: u16) -> Self {
+        Self {
+            class: RetryClass::HttpOther,
+            retry_after_ms: None,
+            status_code: Some(status_code),
+        }
+    }
+
+    fn network() -> Self {
+        Self {
+            class: RetryClass::Network,
+            retry_after_ms: None,
+            status_code: None,
+        }
+    }
+
+    fn class_name(&self) -> &'static str {
+        match self.class {
+            RetryClass::Network => "network",
+            RetryClass::Http5xx => "http_5xx",
+            RetryClass::RateLimited => "http_429",
+            RetryClass::HttpOther => "http_other",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SendBatchFailure {
+    error: OutboxError,
+    retry: RetryDirective,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ServerLeaseDecision {
+    granted: bool,
+    wait_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +134,8 @@ pub struct OutboxEvent {
     pub attempts: u32,
     #[serde(default)]
     pub last_attempt: Option<i64>,
+    #[serde(default)]
+    pub next_attempt_at: Option<i64>,
 }
 
 impl OutboxEvent {
@@ -66,6 +162,7 @@ impl OutboxEvent {
             sent: false,
             attempts: 0,
             last_attempt: None,
+            next_attempt_at: None,
         }
     }
 
@@ -141,13 +238,82 @@ pub struct Outbox {
     worker_control: Arc<WorkerControl>,
     server_url: Arc<Mutex<Option<String>>>,
     api_key: Arc<Mutex<Option<String>>>,
+    http_client: reqwest::blocking::Client,
     max_retries: u32,
+    flush_interval_jitter_max_ms: u64,
+    global_coord_enabled: bool,
+    global_coord_window_ms: u64,
+    global_coord_max_deferral_ms: u64,
+    server_lease_enabled: bool,
+    server_lease_ttl_ms: u64,
+    server_lease_scope: String,
 }
 
 impl Outbox {
     pub fn new(app_data_dir: &std::path::Path) -> Result<Self, OutboxError> {
         let path = app_data_dir.join("outbox.jsonl");
         let events = Self::load_events(&path)?;
+        let flush_interval_jitter_max_ms = std::env::var("GITGOV_OUTBOX_FLUSH_JITTER_MAX_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_FLUSH_INTERVAL_JITTER_MAX_MS)
+            .min(60_000);
+        let global_coord_enabled = std::env::var("GITGOV_OUTBOX_GLOBAL_COORD_ENABLED")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(DEFAULT_GLOBAL_COORD_ENABLED);
+        let global_coord_window_ms = std::env::var("GITGOV_OUTBOX_GLOBAL_COORD_WINDOW_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_GLOBAL_COORD_WINDOW_MS)
+            .clamp(5_000, 300_000);
+        let global_coord_max_deferral_ms =
+            std::env::var("GITGOV_OUTBOX_GLOBAL_COORD_MAX_DEFERRAL_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_GLOBAL_COORD_MAX_DEFERRAL_MS)
+                .min(global_coord_window_ms.saturating_sub(1));
+        let server_lease_enabled = std::env::var("GITGOV_OUTBOX_SERVER_LEASE_ENABLED")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(DEFAULT_SERVER_LEASE_ENABLED);
+        let server_lease_ttl_ms = std::env::var("GITGOV_OUTBOX_SERVER_LEASE_TTL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SERVER_LEASE_TTL_MS)
+            .clamp(1_000, 60_000);
+        let server_lease_scope = std::env::var("GITGOV_OUTBOX_SERVER_LEASE_SCOPE")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DEFAULT_SERVER_LEASE_SCOPE.to_string());
+        let http_client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| {
+                OutboxError::NetworkError(format!("Failed to initialize HTTP client: {}", e))
+            })?;
+
+        tracing::info!(
+            flush_interval_jitter_max_ms,
+            global_coord_enabled,
+            global_coord_window_ms,
+            global_coord_max_deferral_ms,
+            server_lease_enabled,
+            server_lease_ttl_ms,
+            server_lease_scope = %server_lease_scope,
+            "Outbox coordination config loaded"
+        );
 
         Ok(Self {
             path,
@@ -159,7 +325,15 @@ impl Outbox {
             }),
             server_url: Arc::new(Mutex::new(None)),
             api_key: Arc::new(Mutex::new(None)),
+            http_client,
             max_retries: 5,
+            flush_interval_jitter_max_ms,
+            global_coord_enabled,
+            global_coord_window_ms,
+            global_coord_max_deferral_ms,
+            server_lease_enabled,
+            server_lease_ttl_ms,
+            server_lease_scope,
         })
     }
 
@@ -336,6 +510,11 @@ impl Outbox {
         Ok(event_uuid)
     }
 
+    /// Notify background worker to flush pending events promptly.
+    pub fn notify_flush(&self) {
+        self.worker_control.trigger.notify_all();
+    }
+
     pub fn get_pending_count(&self) -> usize {
         self.events
             .lock()
@@ -354,27 +533,26 @@ impl Outbox {
                     ))
                 }
             },
-            Err(_) => {
-                return Err(OutboxError::IoError(
-                    "Server URL lock poisoned".to_string(),
-                ))
-            }
+            Err(_) => return Err(OutboxError::IoError("Server URL lock poisoned".to_string())),
         };
 
         let api_key = match self.api_key.lock() {
             Ok(guard) => guard.clone(),
-            Err(_) => {
-                return Err(OutboxError::IoError("API key lock poisoned".to_string()))
-            }
+            Err(_) => return Err(OutboxError::IoError("API key lock poisoned".to_string())),
         };
 
-        // Step 1: Snapshot pending events
+        // Step 1: Snapshot pending events that are ready for retry.
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let events_to_send: Vec<OutboxEvent> = {
             let events = self
                 .events
                 .lock()
                 .map_err(|_| OutboxError::IoError("Events lock poisoned".to_string()))?;
-            events.iter().filter(|e| !e.sent).cloned().collect()
+            events
+                .iter()
+                .filter(|e| Self::is_event_ready_for_retry(e, now_ms))
+                .cloned()
+                .collect()
         };
 
         if events_to_send.is_empty() {
@@ -385,9 +563,134 @@ impl Outbox {
             });
         }
 
-        // Step 2: Build batch
-        let batch = ClientEventBatch {
-            events: events_to_send
+        let mut sent_count = 0usize;
+        let mut dup_count = 0usize;
+        let mut failed_count = 0usize;
+
+        // Step 2-4: Build chunks, send, and apply response
+        for chunk in events_to_send.chunks(OUTBOX_BATCH_SIZE) {
+            let batch = Self::build_batch(chunk);
+            let response = match self.send_batch(&server_url, api_key.as_deref(), &batch) {
+                Ok(response) => response,
+                Err(failure) => {
+                    tracing::warn!(
+                        retry_class = failure.retry.class_name(),
+                        status_code = ?failure.retry.status_code,
+                        retry_after_ms = ?failure.retry.retry_after_ms,
+                        "Outbox flush chunk failed; scheduling retry"
+                    );
+                    if let Ok(mut events) = self.events.lock() {
+                        Self::mark_chunk_retry(&mut events, chunk, self.max_retries, failure.retry);
+                    }
+                    // Persist progress of previously applied chunks before returning.
+                    if let Err(persist_error) = self.persist() {
+                        tracing::error!(
+                            "Failed to persist outbox after partial flush error: {}",
+                            persist_error
+                        );
+                    }
+                    return Err(failure.error);
+                }
+            };
+
+            sent_count += response.accepted.len();
+            dup_count += response.duplicates.len();
+            failed_count += response.errors.len();
+
+            let mut events = self
+                .events
+                .lock()
+                .map_err(|_| OutboxError::IoError("Events lock poisoned".to_string()))?;
+            Self::apply_batch_response(&mut events, &response, self.max_retries);
+        }
+
+        // Step 5: Persist final state
+        self.persist()?;
+
+        Ok(FlushResult {
+            sent: sent_count,
+            duplicates: dup_count,
+            failed: failed_count,
+        })
+    }
+
+    fn send_batch(
+        &self,
+        server_url: &str,
+        api_key: Option<&str>,
+        batch: &ClientEventBatch,
+    ) -> Result<ClientEventResponse, SendBatchFailure> {
+        Self::send_batch_with_client(&self.http_client, server_url, api_key, batch)
+    }
+
+    fn send_batch_with_client(
+        http_client: &reqwest::blocking::Client,
+        server_url: &str,
+        api_key: Option<&str>,
+        batch: &ClientEventBatch,
+    ) -> Result<ClientEventResponse, SendBatchFailure> {
+        let url = format!("{}/events", server_url);
+
+        let mut request = http_client.post(&url).json(batch);
+        if let Some(api_key) = api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = request.send().map_err(|e| SendBatchFailure {
+            error: OutboxError::NetworkError(e.to_string()),
+            retry: RetryDirective::network(),
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            let retry_after_ms = Self::parse_retry_after_ms(response.headers());
+            let retry = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                RetryDirective::rate_limited(retry_after_ms, status_code)
+            } else if status.is_server_error() {
+                RetryDirective::http_5xx(status_code)
+            } else {
+                RetryDirective::http_other(status_code)
+            };
+
+            return Err(SendBatchFailure {
+                error: OutboxError::NetworkError(format!("Server returned status: {}", status)),
+                retry,
+            });
+        }
+
+        response.json().map_err(|e| SendBatchFailure {
+            error: OutboxError::SerializationError(e.to_string()),
+            retry: RetryDirective::network(),
+        })
+    }
+
+    fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<i64> {
+        let value = headers.get(reqwest::header::RETRY_AFTER)?;
+        let raw = value.to_str().ok()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+
+        if let Ok(seconds) = raw.parse::<u64>() {
+            return Some((seconds.saturating_mul(1_000)).min(i64::MAX as u64) as i64);
+        }
+
+        let date = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+        let now = chrono::Utc::now();
+        let retry_after = date
+            .with_timezone(&chrono::Utc)
+            .signed_duration_since(now)
+            .num_milliseconds();
+        if retry_after <= 0 {
+            return None;
+        }
+        Some(retry_after)
+    }
+
+    fn build_batch(events: &[OutboxEvent]) -> ClientEventBatch {
+        ClientEventBatch {
+            events: events
                 .iter()
                 .map(|e| ClientEventInput {
                     event_uuid: e.event_uuid.clone(),
@@ -407,83 +710,7 @@ impl Outbox {
                 .collect(),
             client_id: None,
             client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        };
-
-        // Step 3: Send to server
-        let response = self.send_batch(&server_url, api_key.as_deref(), &batch)?;
-
-        let sent_count = response.accepted.len();
-        let dup_count = response.duplicates.len();
-        let failed_count = response.errors.len();
-
-        // Step 4: Update state
-        {
-            let mut events = self
-                .events
-                .lock()
-                .map_err(|_| OutboxError::IoError("Events lock poisoned".to_string()))?;
-
-            for event in events.iter_mut() {
-                if response.accepted.contains(&event.event_uuid)
-                    || response.duplicates.contains(&event.event_uuid)
-                {
-                    event.sent = true;
-                } else if response
-                    .errors
-                    .iter()
-                    .any(|e| e.event_uuid == event.event_uuid)
-                {
-                    event.attempts += 1;
-                    event.last_attempt = Some(chrono::Utc::now().timestamp_millis());
-                }
-            }
-
-            events.retain(|e| !e.sent || e.attempts < self.max_retries);
         }
-
-        // Step 5: Persist
-        self.persist()?;
-
-        Ok(FlushResult {
-            sent: sent_count,
-            duplicates: dup_count,
-            failed: failed_count,
-        })
-    }
-
-    fn send_batch(
-        &self,
-        server_url: &str,
-        api_key: Option<&str>,
-        batch: &ClientEventBatch,
-    ) -> Result<ClientEventResponse, OutboxError> {
-        let url = format!("{}/events", server_url);
-
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| OutboxError::NetworkError(e.to_string()))?;
-
-        let mut request = client.post(&url).json(batch);
-
-        if let Some(api_key) = api_key {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
-        }
-
-        let response = request
-            .send()
-            .map_err(|e| OutboxError::NetworkError(e.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(OutboxError::NetworkError(format!(
-                "Server returned status: {}",
-                response.status()
-            )));
-        }
-
-        response
-            .json()
-            .map_err(|e| OutboxError::SerializationError(e.to_string()))
     }
 
     /// Start background flush worker with CLEAN SHUTDOWN support.
@@ -497,18 +724,39 @@ impl Outbox {
         let path = self.path.clone();
         let server_url = Arc::clone(&self.server_url);
         let api_key = Arc::clone(&self.api_key);
+        let http_client = self.http_client.clone();
         let max_retries = self.max_retries;
+        let flush_interval_jitter_max_ms = self.flush_interval_jitter_max_ms;
+        let global_coord_enabled = self.global_coord_enabled;
+        let global_coord_window_ms = self.global_coord_window_ms;
+        let global_coord_max_deferral_ms = self.global_coord_max_deferral_ms;
+        let server_lease_enabled = self.server_lease_enabled;
+        let server_lease_ttl_ms = self.server_lease_ttl_ms;
+        let server_lease_scope = self.server_lease_scope.clone();
 
         std::thread::spawn(move || {
             let mut last_flush = std::time::Instant::now();
-            let interval = Duration::from_secs(interval_secs);
+            let base_interval = Duration::from_secs(interval_secs);
+            let schedule_jitter_ms =
+                Self::stable_worker_jitter_ms(&path, flush_interval_jitter_max_ms);
+            let interval = base_interval + Duration::from_millis(schedule_jitter_ms);
+
+            tracing::info!(
+                base_interval_secs = interval_secs,
+                schedule_jitter_ms,
+                effective_interval_ms = interval.as_millis() as u64,
+                "Outbox worker periodic flush interval configured"
+            );
 
             loop {
                 // Wait with timeout, wakeable by shutdown signal
                 let events_lock = events.lock().unwrap();
-                let (lock, _result) = worker_control
+                let wait_for = interval
+                    .checked_sub(last_flush.elapsed())
+                    .unwrap_or(Duration::from_secs(0));
+                let (lock, wait_result) = worker_control
                     .trigger
-                    .wait_timeout(events_lock, Duration::from_secs(1))
+                    .wait_timeout(events_lock, wait_for)
                     .unwrap();
                 drop(lock);
 
@@ -518,94 +766,130 @@ impl Outbox {
                     return;
                 }
 
-                // Check if it's time to flush
-                let now = std::time::Instant::now();
-                if now.duration_since(last_flush) < interval {
+                let was_notified = !wait_result.timed_out();
+                let periodic_due = last_flush.elapsed() >= interval;
+                if !was_notified && !periodic_due {
                     continue;
                 }
 
-                last_flush = now;
-
-                // Check pending count
-                let pending_count = events
-                    .lock()
-                    .map(|e| e.iter().filter(|ev| !ev.sent).count())
-                    .unwrap_or(0);
-
-                if pending_count == 0 {
-                    continue;
-                }
-
-                // Snapshot pending events
+                // Snapshot pending events that are ready for retry.
+                let now_ms = chrono::Utc::now().timestamp_millis();
                 let events_to_send: Vec<OutboxEvent> = {
                     let events_lock = events.lock().unwrap();
-                    events_lock.iter().filter(|e| !e.sent).cloned().collect()
+                    events_lock
+                        .iter()
+                        .filter(|e| Self::is_event_ready_for_retry(e, now_ms))
+                        .cloned()
+                        .collect()
                 };
 
                 if events_to_send.is_empty() {
+                    if periodic_due {
+                        last_flush = std::time::Instant::now();
+                    }
                     continue;
                 }
+
+                // Mark flush attempt to avoid tight loops on repeated wake-ups.
+                last_flush = std::time::Instant::now();
 
                 // Build and send batch
                 let url_opt = server_url.lock().ok().and_then(|g| (*g).clone());
                 let api_key_opt = api_key.lock().ok().and_then(|g| (*g).clone());
 
-                if let (Some(ref url), Ok(client)) = (
-                    &url_opt,
-                    reqwest::blocking::Client::builder()
-                        .timeout(Duration::from_secs(30))
-                        .build(),
-                ) {
-                    let batch = ClientEventBatch {
-                        events: events_to_send
-                            .iter()
-                            .map(|e| ClientEventInput {
-                                event_uuid: e.event_uuid.clone(),
-                                event_type: e.event_type.clone(),
-                                org_name: e.org_name.clone(),
-                                repo_full_name: e.repo_full_name.clone(),
-                                user_login: e.user_login.clone(),
-                                user_name: e.user_name.clone(),
-                                branch: e.branch.clone(),
-                                commit_sha: e.commit_sha.clone(),
-                                files: e.files.clone(),
-                                status: e.status.clone(),
-                                reason: e.reason.clone(),
-                                metadata: e.metadata.clone(),
-                                timestamp: Some(e.timestamp),
-                            })
-                            .collect(),
-                        client_id: None,
-                        client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                    };
-
-                    let mut request = client.post(format!("{}/events", url)).json(&batch);
-                    if let Some(ref key) = api_key_opt {
-                        request = request.header("Authorization", format!("Bearer {}", key));
+                if server_lease_enabled {
+                    if let (Some(url), Some(api_key)) = (url_opt.as_deref(), api_key_opt.as_deref())
+                    {
+                        let holder = Self::global_coordination_identity(Some(api_key), &path);
+                        match Self::try_acquire_server_flush_lease(
+                            &http_client,
+                            url,
+                            api_key,
+                            server_lease_scope.as_str(),
+                            holder.as_str(),
+                            server_lease_ttl_ms,
+                        ) {
+                            Ok(decision) if !decision.granted && decision.wait_ms > 0 => {
+                                tracing::debug!(
+                                    wait_ms = decision.wait_ms,
+                                    lease_ttl_ms = server_lease_ttl_ms,
+                                    "Outbox server lease not granted yet; waiting before flush"
+                                );
+                                let events_lock = events.lock().unwrap();
+                                let (lock, _wait_result) = worker_control
+                                    .trigger
+                                    .wait_timeout(
+                                        events_lock,
+                                        Duration::from_millis(decision.wait_ms),
+                                    )
+                                    .unwrap();
+                                drop(lock);
+                                if worker_control.shutdown.load(Ordering::Relaxed) {
+                                    tracing::info!("Outbox worker shutting down gracefully");
+                                    return;
+                                }
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Outbox server lease request failed; continuing fail-open"
+                                );
+                            }
+                        }
                     }
+                }
 
-                    match request.send() {
-                        Ok(response) if response.status().is_success() => {
-                            if let Ok(batch_response) = response.json::<ClientEventResponse>() {
+                if global_coord_enabled {
+                    let identity_seed =
+                        Self::global_coordination_identity(api_key_opt.as_deref(), &path);
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let delay_ms = Self::global_coordination_wait_ms(
+                        identity_seed.as_str(),
+                        now_ms,
+                        global_coord_window_ms,
+                        global_coord_max_deferral_ms,
+                    );
+                    if delay_ms > 0 {
+                        tracing::debug!(
+                            delay_ms,
+                            global_coord_window_ms,
+                            global_coord_max_deferral_ms,
+                            "Outbox global coordination deferring flush window"
+                        );
+                        let events_lock = events.lock().unwrap();
+                        let (lock, _wait_result) = worker_control
+                            .trigger
+                            .wait_timeout(events_lock, Duration::from_millis(delay_ms))
+                            .unwrap();
+                        drop(lock);
+                        if worker_control.shutdown.load(Ordering::Relaxed) {
+                            tracing::info!("Outbox worker shutting down gracefully");
+                            return;
+                        }
+                        continue;
+                    }
+                }
+
+                if let Some(ref url) = url_opt {
+                    for chunk in events_to_send.chunks(OUTBOX_BATCH_SIZE) {
+                        let batch = Self::build_batch(chunk);
+                        match Self::send_batch_with_client(
+                            &http_client,
+                            url,
+                            api_key_opt.as_deref(),
+                            &batch,
+                        ) {
+                            Ok(batch_response) => {
                                 // Update state and persist atomically
                                 let snapshot_for_persist: Vec<String> = {
                                     let mut events_lock = events.lock().unwrap();
-                                    for event in events_lock.iter_mut() {
-                                        if batch_response.accepted.contains(&event.event_uuid)
-                                            || batch_response.duplicates.contains(&event.event_uuid)
-                                        {
-                                            event.sent = true;
-                                        } else if batch_response
-                                            .errors
-                                            .iter()
-                                            .any(|e| e.event_uuid == event.event_uuid)
-                                        {
-                                            event.attempts += 1;
-                                            event.last_attempt =
-                                                Some(chrono::Utc::now().timestamp_millis());
-                                        }
-                                    }
-                                    events_lock.retain(|e| !e.sent || e.attempts < max_retries);
+                                    Self::apply_batch_response(
+                                        &mut events_lock,
+                                        &batch_response,
+                                        max_retries,
+                                    );
 
                                     events_lock
                                         .iter()
@@ -622,20 +906,232 @@ impl Outbox {
                                     tracing::error!("Failed to persist outbox: {}", e);
                                 }
                             }
-                        }
-                        Ok(response) => {
-                            tracing::warn!(
-                                url = %format!("{}/events", url),
-                                status = %response.status(),
-                                "Outbox flush failed"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!("Outbox flush network error: {}", e);
+                            Err(failure) => {
+                                tracing::warn!(
+                                    url = %format!("{}/events", url),
+                                    retry_class = failure.retry.class_name(),
+                                    status_code = ?failure.retry.status_code,
+                                    retry_after_ms = ?failure.retry.retry_after_ms,
+                                    error = %failure.error,
+                                    "Outbox flush failed; scheduling retry"
+                                );
+                                let snapshot_for_persist: Vec<String> = {
+                                    let mut events_lock = events.lock().unwrap();
+                                    Self::mark_chunk_retry(
+                                        &mut events_lock,
+                                        chunk,
+                                        max_retries,
+                                        failure.retry,
+                                    );
+                                    events_lock
+                                        .iter()
+                                        .filter_map(|e| serde_json::to_string(e).ok())
+                                        .collect()
+                                };
+                                if let Err(pe) = Self::atomic_persist_static(
+                                    &path,
+                                    &file_lock,
+                                    &snapshot_for_persist,
+                                ) {
+                                    tracing::error!("Failed to persist outbox: {}", pe);
+                                }
+                                break;
+                            }
                         }
                     }
                 }
             }
+        })
+    }
+
+    fn apply_batch_response(
+        events: &mut Vec<OutboxEvent>,
+        batch_response: &ClientEventResponse,
+        max_retries: u32,
+    ) {
+        let accepted: HashSet<&str> = batch_response.accepted.iter().map(String::as_str).collect();
+        let duplicates: HashSet<&str> = batch_response
+            .duplicates
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let errors: HashSet<&str> = batch_response
+            .errors
+            .iter()
+            .map(|e| e.event_uuid.as_str())
+            .collect();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        for event in events.iter_mut() {
+            let event_uuid = event.event_uuid.as_str();
+            if accepted.contains(event_uuid) || duplicates.contains(event_uuid) {
+                event.sent = true;
+                event.next_attempt_at = None;
+            } else if errors.contains(event_uuid) {
+                Self::mark_event_retry(event, now_ms, RetryDirective::default_backoff());
+            }
+        }
+
+        events.retain(|e| !e.sent || e.attempts < max_retries);
+    }
+
+    fn is_event_ready_for_retry(event: &OutboxEvent, now_ms: i64) -> bool {
+        if event.sent {
+            return false;
+        }
+        match event.next_attempt_at {
+            Some(next_ms) => now_ms >= next_ms,
+            None => true,
+        }
+    }
+
+    fn mark_chunk_retry(
+        events: &mut Vec<OutboxEvent>,
+        chunk: &[OutboxEvent],
+        max_retries: u32,
+        retry: RetryDirective,
+    ) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let chunk_uuids: HashSet<&str> = chunk.iter().map(|e| e.event_uuid.as_str()).collect();
+        for event in events.iter_mut() {
+            if chunk_uuids.contains(event.event_uuid.as_str()) {
+                Self::mark_event_retry(event, now_ms, retry);
+            }
+        }
+        events.retain(|e| !e.sent || e.attempts < max_retries);
+    }
+
+    fn mark_event_retry(event: &mut OutboxEvent, now_ms: i64, retry: RetryDirective) {
+        event.attempts += 1;
+        event.last_attempt = Some(now_ms);
+        let retry_delay_ms =
+            Self::compute_retry_delay_ms(event.attempts, event.event_uuid.as_str(), retry);
+        event.next_attempt_at = Some(now_ms + retry_delay_ms);
+    }
+
+    fn compute_retry_delay_ms(attempt: u32, event_uuid: &str, retry: RetryDirective) -> i64 {
+        let exp = attempt.saturating_sub(1).min(6);
+        let core_delay = (RETRY_BASE_DELAY_MS.saturating_mul(1_i64 << exp)).min(RETRY_MAX_DELAY_MS);
+        let floor_delay = match retry.class {
+            RetryClass::RateLimited => retry
+                .retry_after_ms
+                .unwrap_or(RETRY_RATE_LIMIT_FLOOR_MS)
+                .max(RETRY_RATE_LIMIT_FLOOR_MS),
+            RetryClass::HttpOther => RETRY_CLIENT_ERROR_FLOOR_MS,
+            RetryClass::Network | RetryClass::Http5xx => 0,
+        };
+        let delay_without_jitter = core_delay.max(floor_delay);
+        let jitter_cap = (delay_without_jitter / 5).clamp(50, 5_000);
+        delay_without_jitter + Self::stable_jitter_ms(event_uuid, attempt, jitter_cap)
+    }
+
+    fn stable_jitter_ms(event_uuid: &str, attempt: u32, max_jitter_ms: i64) -> i64 {
+        if max_jitter_ms <= 0 {
+            return 0;
+        }
+        let mut hasher = DefaultHasher::new();
+        event_uuid.hash(&mut hasher);
+        attempt.hash(&mut hasher);
+        let value = hasher.finish();
+        (value % max_jitter_ms as u64) as i64
+    }
+
+    fn stable_worker_jitter_ms(path: &PathBuf, max_jitter_ms: u64) -> u64 {
+        if max_jitter_ms == 0 {
+            return 0;
+        }
+        let mut hasher = DefaultHasher::new();
+        path.to_string_lossy().hash(&mut hasher);
+        std::process::id().hash(&mut hasher);
+        hasher.finish() % max_jitter_ms
+    }
+
+    fn global_coordination_identity(api_key: Option<&str>, path: &PathBuf) -> String {
+        if let Some(key) = api_key {
+            let trimmed = key.trim();
+            if !trimmed.is_empty() {
+                let mut hasher = DefaultHasher::new();
+                trimmed.hash(&mut hasher);
+                return format!("api-key-hash:{:016x}", hasher.finish());
+            }
+        }
+
+        let hostname = std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "unknown-host".to_string());
+        format!("path:{}|host:{}", path.to_string_lossy(), hostname)
+    }
+
+    fn global_coordination_wait_ms(
+        identity_seed: &str,
+        now_ms: i64,
+        window_ms: u64,
+        max_deferral_ms: u64,
+    ) -> u64 {
+        if identity_seed.trim().is_empty() || window_ms == 0 || max_deferral_ms == 0 {
+            return 0;
+        }
+        let now = now_ms.max(0) as u64;
+        let window_index = now / window_ms;
+        let elapsed_in_window = now % window_ms;
+
+        let mut hasher = DefaultHasher::new();
+        identity_seed.hash(&mut hasher);
+        window_index.hash(&mut hasher);
+        let target_offset = hasher.finish() % (max_deferral_ms + 1);
+
+        target_offset.saturating_sub(elapsed_in_window)
+    }
+
+    fn try_acquire_server_flush_lease(
+        http_client: &reqwest::blocking::Client,
+        server_url: &str,
+        api_key: &str,
+        scope: &str,
+        holder: &str,
+        lease_ttl_ms: u64,
+    ) -> Result<ServerLeaseDecision, OutboxError> {
+        #[derive(Serialize)]
+        struct LeaseRequest<'a> {
+            scope: &'a str,
+            holder: &'a str,
+            lease_ttl_ms: u64,
+            max_wait_ms: u64,
+        }
+
+        #[derive(Deserialize)]
+        struct LeaseResponse {
+            granted: bool,
+            #[serde(default)]
+            wait_ms: u64,
+        }
+
+        let url = format!("{}/outbox/lease", server_url);
+        let response = http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&LeaseRequest {
+                scope,
+                holder,
+                lease_ttl_ms,
+                max_wait_ms: lease_ttl_ms,
+            })
+            .send()
+            .map_err(|e| OutboxError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(OutboxError::NetworkError(format!(
+                "Lease endpoint returned status: {}",
+                response.status()
+            )));
+        }
+
+        let parsed: LeaseResponse = response
+            .json()
+            .map_err(|e| OutboxError::SerializationError(e.to_string()))?;
+        Ok(ServerLeaseDecision {
+            granted: parsed.granted,
+            wait_ms: parsed.wait_ms.min(120_000),
         })
     }
 
@@ -748,4 +1244,80 @@ pub struct FlushResult {
     pub sent: usize,
     pub duplicates: usize,
     pub failed: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_retry_after_ms_supports_seconds_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("120"),
+        );
+
+        assert_eq!(Outbox::parse_retry_after_ms(&headers), Some(120_000));
+    }
+
+    #[test]
+    fn compute_retry_delay_rate_limited_honors_retry_after_floor() {
+        let retry = RetryDirective::rate_limited(Some(45_000), 429);
+        let delay = Outbox::compute_retry_delay_ms(1, "event-uuid-1", retry);
+        assert!(delay >= 45_000);
+    }
+
+    #[test]
+    fn compute_retry_delay_grows_for_http_5xx_attempts() {
+        let retry = RetryDirective::http_5xx(503);
+        let delay_attempt_1 = Outbox::compute_retry_delay_ms(1, "event-uuid-2", retry);
+        let delay_attempt_2 = Outbox::compute_retry_delay_ms(2, "event-uuid-2", retry);
+        assert!(delay_attempt_2 > delay_attempt_1);
+    }
+
+    #[test]
+    fn worker_jitter_is_stable_and_bounded() {
+        let path = PathBuf::from("C:/tmp/gitgov/outbox.jsonl");
+        let max = 5_000;
+        let jitter1 = Outbox::stable_worker_jitter_ms(&path, max);
+        let jitter2 = Outbox::stable_worker_jitter_ms(&path, max);
+        assert_eq!(jitter1, jitter2);
+        assert!(jitter1 < max);
+    }
+
+    #[test]
+    fn global_coordination_wait_is_stable_and_bounded() {
+        let identity = "api-key:test-key";
+        let now_ms = 123_456_789_i64;
+        let wait1 = Outbox::global_coordination_wait_ms(identity, now_ms, 60_000, 15_000);
+        let wait2 = Outbox::global_coordination_wait_ms(identity, now_ms, 60_000, 15_000);
+        assert_eq!(wait1, wait2);
+        assert!(wait1 <= 15_000);
+    }
+
+    #[test]
+    fn global_coordination_wait_is_zero_when_slot_already_elapsed() {
+        let identity = "api-key:test-key";
+        let window = 10_000_u64;
+        let max_deferral = 2_000_u64;
+        let mut found = false;
+        for elapsed in 0..window {
+            let now_ms = (42 * window + elapsed) as i64;
+            let wait = Outbox::global_coordination_wait_ms(identity, now_ms, window, max_deferral);
+            if wait == 0 {
+                found = true;
+                break;
+            }
+        }
+        assert!(found);
+    }
+
+    #[test]
+    fn global_coordination_identity_does_not_expose_raw_api_key() {
+        let path = PathBuf::from("C:/tmp/gitgov/outbox.jsonl");
+        let identity = Outbox::global_coordination_identity(Some("secret-key-123"), &path);
+        assert!(identity.starts_with("api-key-hash:"));
+        assert!(!identity.contains("secret-key-123"));
+    }
 }

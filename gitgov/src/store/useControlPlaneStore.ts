@@ -405,6 +405,7 @@ interface ControlPlaneActions {
   loadStats: () => Promise<void>
   loadDailyActivity: (days?: number) => Promise<void>
   loadLogs: (limit?: number, offset?: number) => Promise<void>
+  loadLogsIncremental: (limit?: number) => Promise<void>
   loadActiveDevs7d: () => Promise<void>
   setLogsPage: (page: number) => void
   loadJenkinsCorrelations: (limit?: number) => Promise<void>
@@ -440,8 +441,8 @@ interface ControlPlaneActions {
   previewOrgInvitation: (token: string) => Promise<OrgInvitation | null>
   acceptOrgInvitation: (payload: { token: string; login?: string }) => Promise<AcceptOrgInvitationResponse | null>
   setTeamFilters: (filters: { days?: number; status?: '' | 'active' | 'disabled' }) => void
-  loadTeamOverview: (params?: { orgName?: string; days?: number; status?: '' | 'active' | 'disabled'; limit?: number; offset?: number }) => Promise<void>
-  loadTeamRepos: (params?: { orgName?: string; days?: number; limit?: number; offset?: number }) => Promise<void>
+  loadTeamOverview: (params?: { orgName?: string; days?: number; status?: '' | 'active' | 'disabled'; limit?: number; offset?: number; append?: boolean }) => Promise<void>
+  loadTeamRepos: (params?: { orgName?: string; days?: number; limit?: number; offset?: number; append?: boolean }) => Promise<void>
   refreshForCurrentRole: (options?: { forceHeavy?: boolean }) => Promise<void>
   loadApiKeys: () => Promise<void>
   revokeApiKey: (keyId: string) => Promise<boolean>
@@ -472,11 +473,18 @@ const FOUNDER_GITHUB_LOGIN = (
   ''
 ).trim()
 
-// Compatibility fallback: existing desktop setups relied on this default key.
-// Keep it as last-resort fallback so the dashboard/logs continue working.
-const LEGACY_DEFAULT_API_KEY = '57f1ed59-371d-46ef-9fdf-508f59bc4963'
+// Compatibility fallback: can be provided explicitly via env when needed.
+const LEGACY_DEFAULT_API_KEY = (import.meta.env.VITE_LEGACY_DEFAULT_API_KEY || '').trim()
+const ALLOW_LEGACY_DEFAULT_API_KEY = (() => {
+  const raw = (import.meta.env.VITE_ALLOW_LEGACY_DEFAULT_API_KEY || '').trim().toLowerCase()
+  if (raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on') return true
+  if (raw === '0' || raw === 'false' || raw === 'no' || raw === 'off') return false
+  return IS_DEV_MODE
+})()
 const DEV_ACTIVITY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 const HEAVY_DASHBOARD_REFRESH_MS = 5 * 60 * 1000
+const LOGS_KEYSET_PAGE_SIZE = 500
+const LOGS_KEYSET_MAX_PAGES = 64
 const MAX_CHAT_SESSIONS = 8
 const MAX_CHAT_MESSAGES_PER_SESSION = 80
 const DEFAULT_CHAT_SESSION_TITLE = 'Chat nuevo'
@@ -522,6 +530,110 @@ function buildActiveDevs7dFromLogs(logs: CombinedEvent[], now: number): ActiveDe
       }
     })
     .sort((a, b) => b.events - a.events || b.last_seen - a.last_seen)
+}
+
+function compareCombinedEventDesc(a: CombinedEvent, b: CombinedEvent): number {
+  if (a.created_at !== b.created_at) return b.created_at - a.created_at
+  return b.id.localeCompare(a.id)
+}
+
+function mergeRecentLogs(existing: CombinedEvent[], incoming: CombinedEvent[], limit: number): CombinedEvent[] {
+  if (incoming.length === 0) return existing.slice(0, limit)
+  const merged = [...incoming, ...existing]
+  merged.sort(compareCombinedEventDesc)
+
+  const deduped: CombinedEvent[] = []
+  const seen = new Set<string>()
+  for (const item of merged) {
+    if (seen.has(item.id)) continue
+    seen.add(item.id)
+    deduped.push(item)
+    if (deduped.length >= limit) break
+  }
+  return deduped
+}
+
+interface LogsKeysetCursor {
+  before_created_at: number
+  before_id: string
+}
+
+function getOldestLogsCursor(events: CombinedEvent[]): LogsKeysetCursor | null {
+  if (events.length === 0) return null
+  const tail = events[events.length - 1]
+  if (!tail?.id || !Number.isFinite(tail.created_at)) return null
+  return {
+    before_created_at: tail.created_at,
+    before_id: tail.id,
+  }
+}
+
+function sanitizeLogsWindow(limit: number, offset: number): { safeLimit: number; safeOffset: number } {
+  const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.floor(limit))) : 500
+  const safeOffset = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0
+  return { safeLimit, safeOffset }
+}
+
+async function fetchLogsByFilter(
+  serverConfig: ServerConfig,
+  filter: Record<string, unknown>,
+): Promise<CombinedEvent[]> {
+  return tauriInvoke<CombinedEvent[]>('cmd_server_get_logs', {
+    config: serverConfig,
+    filter,
+  })
+}
+
+async function fetchLogsKeysetWindow(
+  serverConfig: ServerConfig,
+  limit: number,
+  offset: number,
+): Promise<CombinedEvent[]> {
+  const { safeLimit, safeOffset } = sanitizeLogsWindow(limit, offset)
+  if (safeOffset === 0) {
+    return fetchLogsByFilter(serverConfig, { limit: safeLimit, offset: 0 })
+  }
+
+  let remainingOffset = safeOffset
+  const collected: CombinedEvent[] = []
+  let cursor: LogsKeysetCursor | null = null
+  let pageCount = 0
+
+  while (pageCount < LOGS_KEYSET_MAX_PAGES && collected.length < safeLimit) {
+    pageCount += 1
+    const requested = Math.min(LOGS_KEYSET_PAGE_SIZE, safeLimit + remainingOffset)
+    const filter: Record<string, unknown> = {
+      limit: requested,
+      offset: 0,
+    }
+    if (cursor) {
+      filter.before_created_at = cursor.before_created_at
+      filter.before_id = cursor.before_id
+    }
+
+    const page = await fetchLogsByFilter(serverConfig, filter)
+    if (page.length === 0) break
+
+    let consumeFrom = 0
+    if (remainingOffset > 0) {
+      const skipped = Math.min(remainingOffset, page.length)
+      remainingOffset -= skipped
+      consumeFrom = skipped
+    }
+    if (consumeFrom < page.length) {
+      collected.push(...page.slice(consumeFrom))
+    }
+
+    cursor = getOldestLogsCursor(page)
+    if (!cursor || page.length < requested) break
+  }
+
+  // Compatibility fallback for very deep legacy offsets.
+  if (remainingOffset > 0) {
+    return fetchLogsByFilter(serverConfig, { limit: safeLimit, offset: safeOffset })
+  }
+
+  return collected.slice(0, safeLimit)
 }
 
 function normalizeLoopbackUrl(url: string): string {
@@ -772,64 +884,108 @@ function readStoredChatState(): { sessions: ChatSession[]; activeSessionId: stri
 }
 
 let chatPersistTimeoutId: number | null = null
+let chatPersistIdleId: number | null = null
 let checkConnectionInFlight: Promise<void> | null = null
 let refreshForCurrentRoleInFlight: Promise<void> | null = null
 let lastHeavyDashboardRefreshAt = 0
 const initialChatState = readStoredChatState()
 
+function clearPendingChatPersistJob() {
+  if (chatPersistTimeoutId !== null) {
+    window.clearTimeout(chatPersistTimeoutId)
+    chatPersistTimeoutId = null
+  }
+  if (chatPersistIdleId !== null && typeof window.cancelIdleCallback === 'function') {
+    window.cancelIdleCallback(chatPersistIdleId)
+    chatPersistIdleId = null
+  }
+}
+
 function persistChatState(sessions: ChatSession[], activeSessionId: string) {
   try {
     const userScopedKey = getActiveChatStorageKey()
-    if (chatPersistTimeoutId !== null) {
-      window.clearTimeout(chatPersistTimeoutId)
-      chatPersistTimeoutId = null
-    }
-    const compactSessions = sessions.slice(-MAX_CHAT_SESSIONS).map((session) => {
-      const compactMessages = session.messages.slice(-MAX_CHAT_MESSAGES_PER_SESSION).map((msg) => {
-        const trimmedContent = msg.content.length > 4000 ? `${msg.content.slice(0, 4000)}\n...[recortado para rendimiento]` : msg.content
-        if (!msg.response) {
-          return { ...msg, content: trimmedContent }
-        }
-        const trimmedAnswer =
-          msg.response.answer.length > 4000
-            ? `${msg.response.answer.slice(0, 4000)}\n...[recortado para rendimiento]`
-            : msg.response.answer
+    clearPendingChatPersistJob()
+
+    const writeToStorage = () => {
+      const compactSessions = sessions.slice(-MAX_CHAT_SESSIONS).map((session) => {
+        const compactMessages = session.messages.slice(-MAX_CHAT_MESSAGES_PER_SESSION).map((msg) => {
+          const trimmedContent = msg.content.length > 4000 ? `${msg.content.slice(0, 4000)}\n...[recortado para rendimiento]` : msg.content
+          if (!msg.response) {
+            return { ...msg, content: trimmedContent }
+          }
+          const trimmedAnswer =
+            msg.response.answer.length > 4000
+              ? `${msg.response.answer.slice(0, 4000)}\n...[recortado para rendimiento]`
+              : msg.response.answer
+          return {
+            ...msg,
+            content: trimmedContent,
+            response: {
+              ...msg.response,
+              answer: trimmedAnswer,
+              data_refs: msg.response.data_refs.slice(0, 12),
+            },
+          }
+        })
+        const fallbackTitle = compactMessages.find((m) => m.role === 'user')?.content ?? session.title
         return {
-          ...msg,
-          content: trimmedContent,
-          response: {
-            ...msg.response,
-            answer: trimmedAnswer,
-            data_refs: msg.response.data_refs.slice(0, 12),
-          },
+          ...session,
+          title: normalizeChatTitle(session.title || fallbackTitle),
+          messages: compactMessages,
         }
       })
-      const fallbackTitle = compactMessages.find((m) => m.role === 'user')?.content ?? session.title
-      return {
-        ...session,
-        title: normalizeChatTitle(session.title || fallbackTitle),
-        messages: compactMessages,
+      const payload: StoredChatStateV2 = {
+        version: 2,
+        active_session_id: activeSessionId,
+        sessions: compactSessions,
       }
-    })
-    const payload: StoredChatStateV2 = {
-      version: 2,
-      active_session_id: activeSessionId,
-      sessions: compactSessions,
-    }
-    const serialized = JSON.stringify(payload)
-    // Write storage out of the immediate render turn to reduce UI hitching.
-    chatPersistTimeoutId = window.setTimeout(() => {
       try {
-        window.localStorage.setItem(userScopedKey, serialized)
+        window.localStorage.setItem(userScopedKey, JSON.stringify(payload))
       } catch {
         // ignore
-      } finally {
-        chatPersistTimeoutId = null
       }
-    }, 0)
+    }
+
+    const schedulePersist = () => {
+      chatPersistTimeoutId = null
+      writeToStorage()
+    }
+
+    // Defer heavy serialization to idle/debounced time to avoid UI hitch while typing.
+    if (typeof window.requestIdleCallback === 'function') {
+      chatPersistIdleId = window.requestIdleCallback(() => {
+        chatPersistIdleId = null
+        schedulePersist()
+      }, { timeout: 500 })
+      return
+    }
+    chatPersistTimeoutId = window.setTimeout(schedulePersist, 120)
   } catch {
     // ignore
   }
+}
+
+function parseRetryAfterSeconds(message: string): number | null {
+  const quoted = message.match(/"retry_after_seconds"\s*:\s*(\d+)/i)
+  if (quoted) return Number.parseInt(quoted[1], 10)
+  const plain = message.match(/retry[_ -]?after[_ -]?seconds?\s*[:=]?\s*(\d+)/i)
+  if (plain) return Number.parseInt(plain[1], 10)
+  return null
+}
+
+function formatChatErrorMessage(rawMessage: string): string {
+  const isRateLimited =
+    /429/.test(rawMessage) ||
+    /RATE_LIMITED/i.test(rawMessage) ||
+    /Too many requests/i.test(rawMessage)
+
+  if (!isRateLimited) return rawMessage
+
+  const retryAfter = parseRetryAfterSeconds(rawMessage)
+  if (retryAfter && Number.isFinite(retryAfter) && retryAfter > 0) {
+    return `El chat está recibiendo demasiadas solicitudes ahora. Reintenta en ${retryAfter} segundos.`
+  }
+  return 'El chat está recibiendo demasiadas solicitudes ahora. Reintenta en unos segundos.'
 }
 
 function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: ServerConfig | null): ServerConfig {
@@ -849,7 +1005,7 @@ function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: Se
     previous?.api_key?.trim() ||
     envApiKey ||
     stored?.api_key?.trim() ||
-    LEGACY_DEFAULT_API_KEY
+    (ALLOW_LEGACY_DEFAULT_API_KEY ? LEGACY_DEFAULT_API_KEY : '')
 
   return {
     url: normalizeLoopbackUrl(url),
@@ -1130,7 +1286,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       await Promise.all([
         get().loadStats(),
         get().loadDailyActivity(14),
-        get().loadLogs(params?.logLimit ?? 500),
+        get().loadLogsIncremental(params?.logLimit ?? 500),
       ])
 
       const shouldRunHeavyRefresh =
@@ -1191,13 +1347,41 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
     const { serverConfig } = get()
     if (!serverConfig) return
     try {
-      const logs = await tauriInvoke<CombinedEvent[]>('cmd_server_get_logs', {
-        config: serverConfig,
-        filter: { limit, offset },
-      })
+      const logs = await fetchLogsKeysetWindow(serverConfig, limit, offset)
       set({ serverLogs: logs })
     } catch (e) {
       set({ error: parseCommandError(String(e)).message })
+    }
+  },
+
+  loadLogsIncremental: async (limit = 500) => {
+    const { serverConfig, serverLogs } = get()
+    if (!serverConfig) return
+
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)))
+    if (serverLogs.length === 0) {
+      await get().loadLogs(safeLimit, 0)
+      return
+    }
+
+    const latestTs = Math.max(...serverLogs.map((log) => log.created_at))
+    try {
+      const incoming = await tauriInvoke<CombinedEvent[]>('cmd_server_get_logs', {
+        config: serverConfig,
+        filter: {
+          limit: Math.min(200, safeLimit),
+          offset: 0,
+          start_date: latestTs,
+        },
+      })
+
+      if (incoming.length === 0) return
+      const merged = mergeRecentLogs(serverLogs, incoming, safeLimit)
+      set({ serverLogs: merged })
+    } catch (e) {
+      set({ error: parseCommandError(String(e)).message })
+      // Conservative fallback: recover with full window if incremental call fails.
+      await get().loadLogs(safeLimit, 0)
     }
   },
 
@@ -1677,9 +1861,25 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
         limit: params?.limit ?? 100,
         offset: params?.offset ?? 0,
       })
-      set({
-        teamOverview: response.entries,
-        teamOverviewTotal: response.total,
+      set((state) => {
+        if (!params?.append) {
+          return {
+            teamOverview: response.entries,
+            teamOverviewTotal: response.total,
+          }
+        }
+
+        const merged = [...state.teamOverview]
+        const seen = new Set(merged.map((entry) => entry.login))
+        for (const entry of response.entries) {
+          if (seen.has(entry.login)) continue
+          seen.add(entry.login)
+          merged.push(entry)
+        }
+        return {
+          teamOverview: merged,
+          teamOverviewTotal: response.total,
+        }
       })
     } catch (e) {
       set({ error: parseCommandError(String(e)).message })
@@ -1699,9 +1899,25 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
         limit: params?.limit ?? 100,
         offset: params?.offset ?? 0,
       })
-      set({
-        teamRepos: response.entries,
-        teamReposTotal: response.total,
+      set((state) => {
+        if (!params?.append) {
+          return {
+            teamRepos: response.entries,
+            teamReposTotal: response.total,
+          }
+        }
+
+        const merged = [...state.teamRepos]
+        const seen = new Set(merged.map((entry) => entry.repo_name))
+        for (const entry of response.entries) {
+          if (seen.has(entry.repo_name)) continue
+          seen.add(entry.repo_name)
+          merged.push(entry)
+        }
+        return {
+          teamRepos: merged,
+          teamReposTotal: response.total,
+        }
       })
     } catch (e) {
       set({ error: parseCommandError(String(e)).message })
@@ -1724,7 +1940,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
         return
       }
 
-      await get().loadLogs(500, 0)
+      await get().loadLogsIncremental(500)
     })()
 
     refreshForCurrentRoleInFlight = run
@@ -1896,11 +2112,13 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       })
       return response
     } catch (e) {
+      const parsedError = parseCommandError(String(e))
+      const userFacingError = formatChatErrorMessage(parsedError.message)
       const errMsg: ChatMessage = {
         id: crypto.randomUUID(),
         role: 'assistant',
-        content: `Error: ${parseCommandError(String(e)).message}`,
-        response: { status: 'error', answer: parseCommandError(String(e)).message, can_report_feature: false, data_refs: [] },
+        content: `Error: ${userFacingError}`,
+        response: { status: 'error', answer: userFacingError, can_report_feature: false, data_refs: [] },
         timestamp: Date.now(),
       }
       set((s) => {

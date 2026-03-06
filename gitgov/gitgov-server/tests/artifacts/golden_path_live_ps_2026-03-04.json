@@ -1,0 +1,48 @@
+﻿{
+    "health":  {
+                   "body":  {
+                                "status":  "ok",
+                                "version":  "0.1.0",
+                                "database":  "supabase"
+                            },
+                   "ok":  true
+               },
+    "stats":  {
+                  "has_client_events":  true,
+                  "ok":  true
+              },
+    "logs":  {
+                 "ok":  true,
+                 "events_count":  5
+             },
+    "golden_path":  {
+                        "visible_attempt":  true,
+                        "visible_success":  true,
+                        "accepted_stage":  true,
+                        "accepted_success":  true,
+                        "accepted_attempt":  true,
+                        "accepted_commit":  true,
+                        "visible_stage":  true,
+                        "visible_commit":  true
+                    },
+    "duplicate":  {
+                      "ok":  true
+                  },
+    "daily":  {
+                  "count":  14,
+                  "ok":  true
+              },
+    "chat":  {
+                 "ok":  true,
+                 "has_answer":  true,
+                 "status":  "ok"
+             },
+    "admin_audit_log":  {
+                            "has_entries":  true,
+                            "ok":  true
+                        },
+    "summary":  {
+                    "passed":  true,
+                    "timestamp_ms":  1772675949316
+                }
+}

@@ -67,10 +67,10 @@ cd gitgov/gitgov-server && make smoke
 cd gitgov/gitgov-server/tests && ./e2e_flow_test.sh
 
 # Jenkins integration test
-cd gitgov/gitgov-server/tests && API_KEY="57f1ed59-371d-46ef-9fdf-508f59bc4963" ./jenkins_integration_test.sh
+cd gitgov/gitgov-server/tests && API_KEY="<YOUR_API_KEY>" ./jenkins_integration_test.sh
 
 # Jira integration test
-cd gitgov/gitgov-server/tests && API_KEY="57f1ed59-371d-46ef-9fdf-508f59bc4963" ./jira_integration_test.sh
+cd gitgov/gitgov-server/tests && API_KEY="<YOUR_API_KEY>" ./jira_integration_test.sh
 
 # Tests unitarios Desktop (vitest)
 cd gitgov && npm test
@@ -280,7 +280,7 @@ cd gitgov && npm run lint && npm run typecheck
 - `GITGOV_SERVER_URL` — URL del server para el backend Tauri (leído en lib.rs al arrancar)
 - `GITGOV_API_KEY` — API key del servidor para el backend Tauri
 
-> **IMPORTANTE:** Existen DOS fuentes de config del server URL: `VITE_SERVER_URL` (frontend React) y `GITGOV_SERVER_URL` (Tauri Rust). El store `useControlPlaneStore` tiene prioridad: input > previous > env > localStorage > default `127.0.0.1:3000`. Hay un fallback legacy hardcodeado: `'57f1ed59-371d-46ef-9fdf-508f59bc4963'`.
+> **IMPORTANTE:** Existen DOS fuentes de config del server URL: `VITE_SERVER_URL` (frontend React) y `GITGOV_SERVER_URL` (Tauri Rust). El store `useControlPlaneStore` tiene prioridad: input > previous > env > localStorage > default `127.0.0.1:3000`. El fallback legacy de API key debe configurarse solo por env (`VITE_LEGACY_DEFAULT_API_KEY`) si se necesita compatibilidad.
 
 ### Web App (`gitgov-web/.env.local`) — producción en Vercel
 - No requiere variables de entorno especiales actualmente

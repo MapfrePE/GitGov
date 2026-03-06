@@ -44,6 +44,7 @@
 - [ ] Widget `Pipeline Health (7 días)` carga (aunque muestre vacío si no hay datos)
 
 ## E. Chatbot Control Plane (admin)
+- [ ] Regla no negociable: si se pregunta por logs/eventos, el bot responde con datos exactos/verificables de backend o `insufficient_data` (nunca inventa)
 - [ ] `POST /chat/ask` responde `200` (sin freeze en UI)
 - [ ] Respuestas analíticas usan datos reales (`/stats`, `/logs`, queries DB), no texto genérico inventado
 - [ ] Si faltan datos, devuelve `insufficient_data` con motivo explícito (no números ficticios)

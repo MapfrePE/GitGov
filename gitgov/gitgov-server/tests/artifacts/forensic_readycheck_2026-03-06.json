@@ -1,0 +1,467 @@
+{
+  "timestamp_ms": 1772777538981,
+  "server_url": "http://127.0.0.1:3000",
+  "working_tree": {
+    "total_findings": 8,
+    "by_kind": {
+      "google_api_key": 2,
+      "gemini_env_assignment": 2,
+      "supabase_anon_assignment": 1,
+      "supabase_service_assignment": 1,
+      "github_pat_token": 1,
+      "github_pat_assignment": 1
+    }
+  },
+  "git_history": {
+    "max_commits_scanned": 50,
+    "total_findings": 54,
+    "by_kind": {
+      "history_secret_marker": 52,
+      "github_pat_token": 2
+    }
+  },
+  "logs": {
+    "log_files_scanned": 38,
+    "marker_counts": {
+      "max_clients_session_mode": 195,
+      "db_error_fail_open": 0,
+      "unexpected_401": 0,
+      "auth_backend_unavailable": 0
+    },
+    "files_with_hits": {
+      "max_clients_session_mode": [
+        "tmp_tuning_server_3030.out.log",
+        "tmp_tuning_server_3031.out.log"
+      ],
+      "db_error_fail_open": [],
+      "unexpected_401": [],
+      "auth_backend_unavailable": []
+    }
+  },
+  "runtime": {
+    "health_status": 200,
+    "health_ok": true,
+    "stats_status": 200,
+    "stats_ok": true,
+    "logs_status": 200,
+    "logs_ok": true,
+    "events_first_status": 200,
+    "events_second_status": 200,
+    "dedup_first_accepted": true,
+    "dedup_second_duplicate": true,
+    "dedup_ok": true,
+    "runtime_ok": true
+  },
+  "samples": {
+    "working_tree_first_50": [
+      {
+        "kind": "google_api_key",
+        "file": ".env",
+        "line": 3,
+        "source": "working_tree",
+        "commit": null
+      },
+      {
+        "kind": "gemini_env_assignment",
+        "file": ".env",
+        "line": 3,
+        "source": "working_tree",
+        "commit": null
+      },
+      {
+        "kind": "supabase_anon_assignment",
+        "file": "gitgov-server/.env",
+        "line": 6,
+        "source": "working_tree",
+        "commit": null
+      },
+      {
+        "kind": "supabase_service_assignment",
+        "file": "gitgov-server/.env",
+        "line": 7,
+        "source": "working_tree",
+        "commit": null
+      },
+      {
+        "kind": "github_pat_token",
+        "file": "gitgov-server/.env",
+        "line": 26,
+        "source": "working_tree",
+        "commit": null
+      },
+      {
+        "kind": "github_pat_assignment",
+        "file": "gitgov-server/.env",
+        "line": 26,
+        "source": "working_tree",
+        "commit": null
+      },
+      {
+        "kind": "google_api_key",
+        "file": "gitgov-server/.env",
+        "line": 34,
+        "source": "working_tree",
+        "commit": null
+      },
+      {
+        "kind": "gemini_env_assignment",
+        "file": "gitgov-server/.env",
+        "line": 34,
+        "source": "working_tree",
+        "commit": null
+      }
+    ],
+    "git_history_first_50": [
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers/chat_handler.rs",
+        "line": 1897,
+        "source": "git_history",
+        "commit": "a73a563db58446a5d984a67524230fa037f5a266"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers/chat_handler.rs",
+        "line": 1902,
+        "source": "git_history",
+        "commit": "a73a563db58446a5d984a67524230fa037f5a266"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers/conversational/core.rs",
+        "line": 258,
+        "source": "git_history",
+        "commit": "a73a563db58446a5d984a67524230fa037f5a266"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers/conversational/core.rs",
+        "line": 392,
+        "source": "git_history",
+        "commit": "a73a563db58446a5d984a67524230fa037f5a266"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers/github_webhook.rs",
+        "line": 456,
+        "source": "git_history",
+        "commit": "a73a563db58446a5d984a67524230fa037f5a266"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers/prelude_health.rs",
+        "line": 59,
+        "source": "git_history",
+        "commit": "a73a563db58446a5d984a67524230fa037f5a266"
+      },
+      {
+        "kind": "github_pat_token",
+        "file": "gitgov-server/src/handlers/tests.rs",
+        "line": 308,
+        "source": "git_history",
+        "commit": "a73a563db58446a5d984a67524230fa037f5a266"
+      },
+      {
+        "kind": "github_pat_token",
+        "file": "gitgov-server/src/handlers/tests.rs",
+        "line": 309,
+        "source": "git_history",
+        "commit": "a73a563db58446a5d984a67524230fa037f5a266"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 243,
+        "source": "git_history",
+        "commit": "a73a563db58446a5d984a67524230fa037f5a266"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 428,
+        "source": "git_history",
+        "commit": "a73a563db58446a5d984a67524230fa037f5a266"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 57,
+        "source": "git_history",
+        "commit": "54cdab4af1dfc1f79904011b54e7ec8c4e129f6c"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 1645,
+        "source": "git_history",
+        "commit": "54cdab4af1dfc1f79904011b54e7ec8c4e129f6c"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 4669,
+        "source": "git_history",
+        "commit": "54cdab4af1dfc1f79904011b54e7ec8c4e129f6c"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 4803,
+        "source": "git_history",
+        "commit": "54cdab4af1dfc1f79904011b54e7ec8c4e129f6c"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 5307,
+        "source": "git_history",
+        "commit": "54cdab4af1dfc1f79904011b54e7ec8c4e129f6c"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 5312,
+        "source": "git_history",
+        "commit": "54cdab4af1dfc1f79904011b54e7ec8c4e129f6c"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 243,
+        "source": "git_history",
+        "commit": "54cdab4af1dfc1f79904011b54e7ec8c4e129f6c"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 440,
+        "source": "git_history",
+        "commit": "54cdab4af1dfc1f79904011b54e7ec8c4e129f6c"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 56,
+        "source": "git_history",
+        "commit": "58696dbd07be544844ac0adba8e0323bacab15dd"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 1644,
+        "source": "git_history",
+        "commit": "58696dbd07be544844ac0adba8e0323bacab15dd"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 4765,
+        "source": "git_history",
+        "commit": "58696dbd07be544844ac0adba8e0323bacab15dd"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 4770,
+        "source": "git_history",
+        "commit": "58696dbd07be544844ac0adba8e0323bacab15dd"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 243,
+        "source": "git_history",
+        "commit": "58696dbd07be544844ac0adba8e0323bacab15dd"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 440,
+        "source": "git_history",
+        "commit": "58696dbd07be544844ac0adba8e0323bacab15dd"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 56,
+        "source": "git_history",
+        "commit": "05e0dcf7b47bb0db922b018db2675fa1e3fc3ffe"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 1642,
+        "source": "git_history",
+        "commit": "05e0dcf7b47bb0db922b018db2675fa1e3fc3ffe"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 4762,
+        "source": "git_history",
+        "commit": "05e0dcf7b47bb0db922b018db2675fa1e3fc3ffe"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 4767,
+        "source": "git_history",
+        "commit": "05e0dcf7b47bb0db922b018db2675fa1e3fc3ffe"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 243,
+        "source": "git_history",
+        "commit": "05e0dcf7b47bb0db922b018db2675fa1e3fc3ffe"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 440,
+        "source": "git_history",
+        "commit": "05e0dcf7b47bb0db922b018db2675fa1e3fc3ffe"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 56,
+        "source": "git_history",
+        "commit": "69d1c6598df0df61ba9348f68c6c41af53699671"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 1642,
+        "source": "git_history",
+        "commit": "69d1c6598df0df61ba9348f68c6c41af53699671"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 4762,
+        "source": "git_history",
+        "commit": "69d1c6598df0df61ba9348f68c6c41af53699671"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 4767,
+        "source": "git_history",
+        "commit": "69d1c6598df0df61ba9348f68c6c41af53699671"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 243,
+        "source": "git_history",
+        "commit": "69d1c6598df0df61ba9348f68c6c41af53699671"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 440,
+        "source": "git_history",
+        "commit": "69d1c6598df0df61ba9348f68c6c41af53699671"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 1628,
+        "source": "git_history",
+        "commit": "b5aa6fa9ed1240a86b95cdd5742d7f8d71be0717"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 235,
+        "source": "git_history",
+        "commit": "b5aa6fa9ed1240a86b95cdd5742d7f8d71be0717"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 1628,
+        "source": "git_history",
+        "commit": "f3cafd49dde78bcf2e0a08b22e93af54467535ea"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 235,
+        "source": "git_history",
+        "commit": "f3cafd49dde78bcf2e0a08b22e93af54467535ea"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 1628,
+        "source": "git_history",
+        "commit": "dc10549d8f0295fee3b8938873dee557bb9344af"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 235,
+        "source": "git_history",
+        "commit": "dc10549d8f0295fee3b8938873dee557bb9344af"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 1628,
+        "source": "git_history",
+        "commit": "36704b5a4535d90268a89449e173d65a966ff741"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 232,
+        "source": "git_history",
+        "commit": "36704b5a4535d90268a89449e173d65a966ff741"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 1628,
+        "source": "git_history",
+        "commit": "05938a23813ffa29137844bc7d845289b32ccc29"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 232,
+        "source": "git_history",
+        "commit": "05938a23813ffa29137844bc7d845289b32ccc29"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 1625,
+        "source": "git_history",
+        "commit": "7633cbe9942fa30eba0eb35a4d2b461aff20d657"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 232,
+        "source": "git_history",
+        "commit": "7633cbe9942fa30eba0eb35a4d2b461aff20d657"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/handlers.rs",
+        "line": 1624,
+        "source": "git_history",
+        "commit": "c7f8b6933b82807e9345d5d5bc6b1b25aa3c22a2"
+      },
+      {
+        "kind": "history_secret_marker",
+        "file": "gitgov-server/src/main.rs",
+        "line": 225,
+        "source": "git_history",
+        "commit": "c7f8b6933b82807e9345d5d5bc6b1b25aa3c22a2"
+      }
+    ]
+  }
+}

@@ -30,7 +30,7 @@ impl IntoResponse for AuthError {
                 "code": "UNAUTHORIZED"
             })),
         )
-        .into_response()
+            .into_response()
     }
 }
 
@@ -51,16 +51,30 @@ pub async fn auth_middleware(
 
     let key_hash = format!("{:x}", sha2::Sha256::digest(token.as_bytes()));
 
-    let auth_user = db
-        .validate_api_key(&key_hash)
-        .await
-        .map_err(|e| {
-            tracing::error!("Authentication backend error: {}", e);
-            AuthError("Authentication backend unavailable".to_string())
-        })?
+    let path = req.uri().path().to_string();
+    let auth_validation = db.validate_api_key(&key_hash).await.map_err(|e| {
+        tracing::error!("Authentication backend error: {}", e);
+        AuthError("Authentication backend unavailable".to_string())
+    })?;
+    let auth_user = auth_validation
+        .auth
         .ok_or_else(|| AuthError("Invalid or expired API key".to_string()))?;
 
     let (client_id, role, org_id) = auth_user;
+    if auth_validation.used_stale_cache
+        && role == UserRole::Admin
+        && is_sensitive_admin_path(path.as_str())
+    {
+        tracing::warn!(
+            path = %path,
+            client_id = %client_id,
+            "Blocking stale auth cache for sensitive admin endpoint"
+        );
+        return Err(AuthError(
+            "Authentication temporarily unavailable for this admin endpoint; retry shortly"
+                .to_string(),
+        ));
+    }
 
     let user = AuthUser {
         client_id,
@@ -71,6 +85,13 @@ pub async fn auth_middleware(
     req.extensions_mut().insert(user);
 
     Ok(next.run(req).await)
+}
+
+fn is_sensitive_admin_path(path: &str) -> bool {
+    path.starts_with("/api-keys")
+        || path.starts_with("/dashboard")
+        || path.starts_with("/jobs/metrics")
+        || path.starts_with("/outbox/lease/metrics")
 }
 
 pub fn require_admin(user: &AuthUser) -> Result<(), AuthError> {
@@ -136,5 +157,16 @@ mod tests {
     #[test]
     fn require_same_user_or_admin_blocks_different_user() {
         assert!(require_same_user_or_admin(&dev_user("dev1"), "dev2").is_err());
+    }
+
+    #[test]
+    fn sensitive_admin_path_detection_matches_expected_routes() {
+        assert!(is_sensitive_admin_path("/api-keys"));
+        assert!(is_sensitive_admin_path("/api-keys/revoke"));
+        assert!(is_sensitive_admin_path("/dashboard"));
+        assert!(is_sensitive_admin_path("/jobs/metrics"));
+        assert!(is_sensitive_admin_path("/outbox/lease/metrics"));
+        assert!(!is_sensitive_admin_path("/logs"));
+        assert!(!is_sensitive_admin_path("/stats"));
     }
 }

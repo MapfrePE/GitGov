@@ -1,8 +1,11 @@
 use crate::models::*;
 use sha2::Digest;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, QueryBuilder, Row};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -20,6 +23,71 @@ pub enum DbError {
 #[derive(Clone)]
 pub struct Database {
     pool: PgPool,
+    auth_cache: Arc<Mutex<HashMap<String, CachedApiKeyAuth>>>,
+    auth_cache_ttl: Duration,
+    auth_cache_stale_max: Duration,
+    auth_cache_max_entries: usize,
+    auth_db_failure_streak: Arc<AtomicU32>,
+    auth_stale_fail_closed_after: u32,
+}
+
+#[derive(Clone)]
+struct CachedApiKeyAuth {
+    value: Option<(String, UserRole, Option<String>)>,
+    cached_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiKeyAuthValidation {
+    pub auth: Option<(String, UserRole, Option<String>)>,
+    pub used_stale_cache: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DistributedRateLimitCheck {
+    pub allowed: bool,
+    pub retry_after_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OutboxLeaseDecision {
+    pub granted: bool,
+    pub wait_ms: u64,
+}
+
+const SIMULATE_AUTH_DB_FAILURE_ENV: &str = "GITGOV_SIMULATE_AUTH_DB_FAILURE";
+const SIMULATE_AUTH_DB_FAILURE_FLAG_FILE_ENV: &str = "GITGOV_SIMULATE_AUTH_DB_FAILURE_FLAG_FILE";
+
+fn parse_bool_like(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn auth_db_failure_simulation_enabled() -> bool {
+    if !cfg!(debug_assertions) {
+        return false;
+    }
+
+    let force_failure = std::env::var(SIMULATE_AUTH_DB_FAILURE_ENV)
+        .ok()
+        .as_deref()
+        .map(parse_bool_like)
+        .unwrap_or(false);
+    if force_failure {
+        return true;
+    }
+
+    let Some(flag_file) = std::env::var(SIMULATE_AUTH_DB_FAILURE_FLAG_FILE_ENV).ok() else {
+        return false;
+    };
+    let trimmed = flag_file.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    std::path::Path::new(trimmed).exists()
 }
 
 pub struct NoncomplianceSignalsQuery<'a> {
@@ -61,20 +129,419 @@ pub struct AcceptedOrgInvitation {
 
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self, DbError> {
+        let runtime_env = std::env::var("GITGOV_ENV")
+            .unwrap_or_else(|_| "dev".to_string())
+            .trim()
+            .to_ascii_lowercase();
+        let is_dev_env = matches!(
+            runtime_env.as_str(),
+            "dev" | "development" | "local" | "test"
+        );
+        let max_connections = std::env::var("GITGOV_DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(20)
+            .max(1);
+        let min_connections = std::env::var("GITGOV_DB_MIN_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(2)
+            .min(max_connections);
+        let acquire_timeout_secs = std::env::var("GITGOV_DB_ACQUIRE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(8)
+            .max(1);
+        let idle_timeout_secs = std::env::var("GITGOV_DB_IDLE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300)
+            .max(10);
+        let max_lifetime_secs = std::env::var("GITGOV_DB_MAX_LIFETIME_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1800)
+            .max(60);
+        let auth_cache_ttl_secs = std::env::var("GITGOV_AUTH_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(20)
+            .clamp(1, 300);
+        let auth_cache_max_entries = std::env::var("GITGOV_AUTH_CACHE_MAX_ENTRIES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4096)
+            .max(64);
+        let auth_cache_stale_max_secs = std::env::var("GITGOV_AUTH_CACHE_STALE_MAX_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(if is_dev_env { 120 } else { 30 })
+            .clamp(auth_cache_ttl_secs, 900);
+        let auth_stale_fail_closed_after =
+            std::env::var("GITGOV_AUTH_STALE_FAIL_CLOSED_AFTER_DB_ERRORS")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(if is_dev_env { 0 } else { 3 })
+                .min(10_000);
+
         let pool = PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(max_connections)
+            .min_connections(min_connections)
+            .acquire_timeout(Duration::from_secs(acquire_timeout_secs))
+            .idle_timeout(Some(Duration::from_secs(idle_timeout_secs)))
+            .max_lifetime(Some(Duration::from_secs(max_lifetime_secs)))
             .connect(database_url)
             .await
             .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            auth_cache: Arc::new(Mutex::new(HashMap::new())),
+            auth_cache_ttl: Duration::from_secs(auth_cache_ttl_secs),
+            auth_cache_stale_max: Duration::from_secs(auth_cache_stale_max_secs),
+            auth_cache_max_entries,
+            auth_db_failure_streak: Arc::new(AtomicU32::new(0)),
+            auth_stale_fail_closed_after,
+        })
+    }
+
+    fn get_cached_api_key_auth_with_max_age(
+        &self,
+        key_hash: &str,
+        max_age: Duration,
+    ) -> Option<Option<(String, UserRole, Option<String>)>> {
+        let cache = self.auth_cache.lock().ok()?;
+        let entry = cache.get(key_hash).cloned()?;
+        if entry.cached_at.elapsed() <= max_age {
+            return Some(entry.value);
+        }
+        None
+    }
+
+    fn get_cached_api_key_auth(
+        &self,
+        key_hash: &str,
+    ) -> Option<Option<(String, UserRole, Option<String>)>> {
+        self.get_cached_api_key_auth_with_max_age(key_hash, self.auth_cache_ttl)
+    }
+
+    fn get_stale_cached_api_key_auth(
+        &self,
+        key_hash: &str,
+    ) -> Option<((String, UserRole, Option<String>), u64)> {
+        let mut cache = self.auth_cache.lock().ok()?;
+        let entry = cache.get(key_hash).cloned()?;
+        let age = entry.cached_at.elapsed();
+        if age <= self.auth_cache_stale_max {
+            return entry.value.map(|auth| (auth, age.as_secs()));
+        }
+        cache.remove(key_hash);
+        None
+    }
+
+    fn put_cached_api_key_auth(
+        &self,
+        key_hash: &str,
+        value: Option<(String, UserRole, Option<String>)>,
+    ) {
+        if let Ok(mut cache) = self.auth_cache.lock() {
+            if cache.len() >= self.auth_cache_max_entries && !cache.contains_key(key_hash) {
+                if let Some(stale_key) = cache.iter().find_map(|(k, v)| {
+                    (v.cached_at.elapsed() > self.auth_cache_ttl).then(|| k.clone())
+                }) {
+                    cache.remove(&stale_key);
+                } else if let Some(first_key) = cache.keys().next().cloned() {
+                    cache.remove(&first_key);
+                }
+            }
+
+            cache.insert(
+                key_hash.to_string(),
+                CachedApiKeyAuth {
+                    value,
+                    cached_at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    fn invalidate_auth_cache_key(&self, key_hash: &str) {
+        if let Ok(mut cache) = self.auth_cache.lock() {
+            cache.remove(key_hash);
+        }
+    }
+
+    fn invalidate_auth_cache_all(&self) {
+        if let Ok(mut cache) = self.auth_cache.lock() {
+            cache.clear();
+        }
+    }
+
+    fn note_auth_db_failure(&self) -> (u32, bool) {
+        let streak = self
+            .auth_db_failure_streak
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        let should_fail_closed =
+            self.auth_stale_fail_closed_after > 0 && streak >= self.auth_stale_fail_closed_after;
+        (streak, should_fail_closed)
+    }
+
+    fn reset_auth_db_failure_streak(&self) {
+        self.auth_db_failure_streak.store(0, Ordering::Relaxed);
+    }
+
+    pub async fn ensure_rate_limit_storage(&self) -> Result<(), DbError> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS rate_limit_counters (
+                limiter_name TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                window_start TIMESTAMPTZ NOT NULL,
+                count INTEGER NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (limiter_name, scope_key, window_start)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_rate_limit_counters_updated_at
+            ON rate_limit_counters (updated_at)
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub async fn ensure_outbox_lease_storage(&self) -> Result<(), DbError> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS outbox_flush_leases (
+                lease_key TEXT PRIMARY KEY,
+                holder TEXT NOT NULL,
+                lease_until TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_outbox_flush_leases_updated_at
+            ON outbox_flush_leases (updated_at)
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub async fn try_acquire_outbox_flush_lease(
+        &self,
+        lease_key: &str,
+        holder: &str,
+        lease_ttl: Duration,
+    ) -> Result<OutboxLeaseDecision, DbError> {
+        let ttl_ms = lease_ttl.as_millis().clamp(1, i64::MAX as u128) as i64;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO outbox_flush_leases (lease_key, holder, lease_until, updated_at)
+            VALUES (
+                $1::text,
+                $2::text,
+                NOW() + ($3::bigint * INTERVAL '1 millisecond'),
+                NOW()
+            )
+            ON CONFLICT (lease_key) DO UPDATE
+            SET
+                holder = CASE
+                    WHEN outbox_flush_leases.lease_until <= NOW()
+                        OR outbox_flush_leases.holder = EXCLUDED.holder
+                    THEN EXCLUDED.holder
+                    ELSE outbox_flush_leases.holder
+                END,
+                lease_until = CASE
+                    WHEN outbox_flush_leases.lease_until <= NOW()
+                        OR outbox_flush_leases.holder = EXCLUDED.holder
+                    THEN EXCLUDED.lease_until
+                    ELSE outbox_flush_leases.lease_until
+                END,
+                updated_at = NOW()
+            RETURNING holder, lease_until, NOW() AS now_ts
+            "#,
+        )
+        .bind(lease_key)
+        .bind(holder)
+        .bind(ttl_ms)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let granted_holder: String = row
+            .try_get("holder")
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        let lease_until: chrono::DateTime<chrono::Utc> = row
+            .try_get("lease_until")
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        let now_ts: chrono::DateTime<chrono::Utc> = row
+            .try_get("now_ts")
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let granted = granted_holder == holder;
+        let wait_ms = if granted {
+            0
+        } else {
+            lease_until
+                .signed_duration_since(now_ts)
+                .num_milliseconds()
+                .max(1) as u64
+        };
+
+        Ok(OutboxLeaseDecision { granted, wait_ms })
+    }
+
+    pub async fn prune_rate_limit_counters(&self, retention: Duration) -> Result<u64, DbError> {
+        if retention.is_zero() {
+            return Ok(0);
+        }
+        let retention_secs = retention.as_secs().min(i64::MAX as u64) as i64;
+        let result = sqlx::query(
+            r#"
+            DELETE FROM rate_limit_counters
+            WHERE updated_at < NOW() - make_interval(secs => $1)
+            "#,
+        )
+        .bind(retention_secs)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn check_distributed_rate_limit(
+        &self,
+        limiter_name: &str,
+        scope_key: &str,
+        limit: u32,
+        window: Duration,
+    ) -> Result<DistributedRateLimitCheck, DbError> {
+        if limit == 0 {
+            return Ok(DistributedRateLimitCheck {
+                allowed: true,
+                retry_after_secs: 0,
+            });
+        }
+
+        let window_secs = window.as_secs().max(1).min(i64::MAX as u64) as i64;
+        let limit_i64 = limit as i64;
+
+        let row = sqlx::query(
+            r#"
+            WITH params AS (
+                SELECT
+                    $1::text AS limiter_name,
+                    $2::text AS scope_key,
+                    $3::bigint AS limit_count,
+                    $4::bigint AS window_secs,
+                    NOW() AS now_ts
+            ),
+            bucket AS (
+                SELECT
+                    limiter_name,
+                    scope_key,
+                    limit_count,
+                    window_secs,
+                    now_ts,
+                    to_timestamp(floor(extract(epoch FROM now_ts) / window_secs) * window_secs) AS window_start
+                FROM params
+            ),
+            upsert AS (
+                INSERT INTO rate_limit_counters (limiter_name, scope_key, window_start, count, updated_at)
+                SELECT limiter_name, scope_key, window_start, 1, now_ts
+                FROM bucket
+                ON CONFLICT (limiter_name, scope_key, window_start)
+                DO UPDATE
+                SET count = rate_limit_counters.count + 1,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING count, window_start
+            )
+            SELECT
+                upsert.count::bigint AS current_count,
+                upsert.window_start,
+                bucket.now_ts,
+                bucket.window_secs,
+                bucket.limit_count
+            FROM upsert
+            CROSS JOIN bucket
+            "#,
+        )
+        .bind(limiter_name)
+        .bind(scope_key)
+        .bind(limit_i64)
+        .bind(window_secs)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let current_count: i64 = row
+            .try_get("current_count")
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        let window_start: chrono::DateTime<chrono::Utc> = row
+            .try_get("window_start")
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        let now_ts: chrono::DateTime<chrono::Utc> = row
+            .try_get("now_ts")
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        let window_secs_row: i64 = row
+            .try_get("window_secs")
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        let limit_count: i64 = row
+            .try_get("limit_count")
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        if current_count <= limit_count {
+            return Ok(DistributedRateLimitCheck {
+                allowed: true,
+                retry_after_secs: 0,
+            });
+        }
+
+        let elapsed_secs = now_ts
+            .signed_duration_since(window_start)
+            .num_seconds()
+            .max(0);
+        let retry_after_secs = (window_secs_row - elapsed_secs).max(1) as u64;
+
+        Ok(DistributedRateLimitCheck {
+            allowed: false,
+            retry_after_secs,
+        })
     }
 
     // ========================================================================
     // ORGANIZATIONS
     // ========================================================================
 
-    pub async fn upsert_org(&self, github_id: i64, login: &str, name: Option<&str>, avatar_url: Option<&str>) -> Result<String, DbError> {
+    pub async fn upsert_org(
+        &self,
+        github_id: i64,
+        login: &str,
+        name: Option<&str>,
+        avatar_url: Option<&str>,
+    ) -> Result<String, DbError> {
         let result = sqlx::query(
             r#"
             INSERT INTO orgs (github_id, login, name, avatar_url)
@@ -276,18 +743,23 @@ impl Database {
         .await;
 
         match result {
-            Ok(res) if res.rows_affected() == 0 => {
-                Err(DbError::Duplicate(format!("delivery_id: {}", event.delivery_id)))
-            }
+            Ok(res) if res.rows_affected() == 0 => Err(DbError::Duplicate(format!(
+                "delivery_id: {}",
+                event.delivery_id
+            ))),
             Ok(_) => Ok(()),
-            Err(e) if e.to_string().contains("duplicate") => {
-                Err(DbError::Duplicate(format!("delivery_id: {}", event.delivery_id)))
-            }
+            Err(e) if e.to_string().contains("duplicate") => Err(DbError::Duplicate(format!(
+                "delivery_id: {}",
+                event.delivery_id
+            ))),
             Err(e) => Err(DbError::DatabaseError(e.to_string())),
         }
     }
 
-    pub async fn get_github_events(&self, filter: &EventFilter) -> Result<Vec<GitHubEvent>, DbError> {
+    pub async fn get_github_events(
+        &self,
+        filter: &EventFilter,
+    ) -> Result<Vec<GitHubEvent>, DbError> {
         let limit = if filter.limit == 0 { 100 } else { filter.limit } as i64;
         let offset = filter.offset as i64;
 
@@ -297,7 +769,9 @@ impl Database {
             None
         };
         let repo_id = if let Some(repo_full_name) = filter.repo_full_name.as_deref() {
-            self.get_repo_by_full_name(repo_full_name).await?.map(|r| r.id)
+            self.get_repo_by_full_name(repo_full_name)
+                .await?
+                .map(|r| r.id)
         } else {
             None
         };
@@ -325,11 +799,17 @@ impl Database {
             param_count += 1;
         }
         if filter.start_date.is_some() {
-            conditions.push(format!("created_at >= to_timestamp(${0}/1000.0)", param_count));
+            conditions.push(format!(
+                "created_at >= to_timestamp(${0}/1000.0)",
+                param_count
+            ));
             param_count += 1;
         }
         if filter.end_date.is_some() {
-            conditions.push(format!("created_at <= to_timestamp(${0}/1000.0)", param_count));
+            conditions.push(format!(
+                "created_at <= to_timestamp(${0}/1000.0)",
+                param_count
+            ));
             param_count += 1;
         }
         if filter.user_login.is_some() {
@@ -350,7 +830,11 @@ impl Database {
             query.push_str(&conditions.join(" AND "));
         }
 
-        query.push_str(&format!(" ORDER BY created_at DESC LIMIT ${} OFFSET ${}", param_count, param_count + 1));
+        query.push_str(&format!(
+            " ORDER BY created_at DESC LIMIT ${} OFFSET ${}",
+            param_count,
+            param_count + 1
+        ));
 
         let mut sql_query = sqlx::query(&query);
 
@@ -450,18 +934,23 @@ impl Database {
         .await;
 
         match result {
-            Ok(res) if res.rows_affected() == 0 => {
-                Err(DbError::Duplicate(format!("event_uuid: {}", event.event_uuid)))
-            }
+            Ok(res) if res.rows_affected() == 0 => Err(DbError::Duplicate(format!(
+                "event_uuid: {}",
+                event.event_uuid
+            ))),
             Ok(_) => Ok(()),
-            Err(e) if e.to_string().contains("duplicate") => {
-                Err(DbError::Duplicate(format!("event_uuid: {}", event.event_uuid)))
-            }
+            Err(e) if e.to_string().contains("duplicate") => Err(DbError::Duplicate(format!(
+                "event_uuid: {}",
+                event.event_uuid
+            ))),
             Err(e) => Err(DbError::DatabaseError(e.to_string())),
         }
     }
 
-    pub async fn insert_client_events_batch(&self, events: &[ClientEvent]) -> Result<ClientEventResponse, DbError> {
+    pub async fn insert_client_events_batch(
+        &self,
+        events: &[ClientEvent],
+    ) -> Result<ClientEventResponse, DbError> {
         let mut in_batch_seen = HashSet::new();
         let mut deduped_events: Vec<&ClientEvent> = Vec::with_capacity(events.len());
         let mut duplicates: Vec<String> = Vec::new();
@@ -512,6 +1001,15 @@ impl Database {
         &self,
         events: &[&ClientEvent],
     ) -> Result<ClientEventResponse, DbError> {
+        struct PreparedBatchEvent<'a> {
+            id: uuid::Uuid,
+            org_id: Option<uuid::Uuid>,
+            repo_id: Option<uuid::Uuid>,
+            files_json: serde_json::Value,
+            created_at: chrono::DateTime<chrono::Utc>,
+            event: &'a ClientEvent,
+        }
+
         let mut tx = self
             .pool
             .begin()
@@ -521,9 +1019,61 @@ impl Database {
         let mut accepted = Vec::new();
         let mut duplicates = Vec::new();
         let mut errors = Vec::new();
+        let mut prepared_events: Vec<PreparedBatchEvent<'_>> = Vec::with_capacity(events.len());
 
         for event in events {
-            let files_json = match serde_json::to_string(&event.files) {
+            let id = match uuid::Uuid::parse_str(&event.id) {
+                Ok(id) => id,
+                Err(e) => {
+                    errors.push(EventError {
+                        event_uuid: event.event_uuid.clone(),
+                        error: DbError::SerializationError(format!(
+                            "invalid event id uuid '{}': {}",
+                            event.id, e
+                        ))
+                        .to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            let org_id = match event.org_id.as_deref() {
+                Some(raw) => match uuid::Uuid::parse_str(raw) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        errors.push(EventError {
+                            event_uuid: event.event_uuid.clone(),
+                            error: DbError::SerializationError(format!(
+                                "invalid org_id uuid '{}': {}",
+                                raw, e
+                            ))
+                            .to_string(),
+                        });
+                        continue;
+                    }
+                },
+                None => None,
+            };
+
+            let repo_id = match event.repo_id.as_deref() {
+                Some(raw) => match uuid::Uuid::parse_str(raw) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        errors.push(EventError {
+                            event_uuid: event.event_uuid.clone(),
+                            error: DbError::SerializationError(format!(
+                                "invalid repo_id uuid '{}': {}",
+                                raw, e
+                            ))
+                            .to_string(),
+                        });
+                        continue;
+                    }
+                },
+                None => None,
+            };
+
+            let files_json = match serde_json::to_value(&event.files) {
                 Ok(json) => json,
                 Err(e) => {
                     errors.push(EventError {
@@ -534,42 +1084,83 @@ impl Database {
                 }
             };
 
-            let result = sqlx::query(
+            let created_at =
+                match chrono::DateTime::<chrono::Utc>::from_timestamp_millis(event.created_at) {
+                    Some(ts) => ts,
+                    None => {
+                        errors.push(EventError {
+                            event_uuid: event.event_uuid.clone(),
+                            error: DbError::SerializationError(format!(
+                                "invalid created_at timestamp millis '{}'",
+                                event.created_at
+                            ))
+                            .to_string(),
+                        });
+                        continue;
+                    }
+                };
+
+            prepared_events.push(PreparedBatchEvent {
+                id,
+                org_id,
+                repo_id,
+                files_json,
+                created_at,
+                event,
+            });
+        }
+
+        if !prepared_events.is_empty() {
+            let mut query_builder: QueryBuilder<'_, sqlx::Postgres> = QueryBuilder::new(
                 r#"
                 INSERT INTO client_events (
                     id, org_id, repo_id, event_uuid, event_type, user_login, user_name,
                     branch, commit_sha, files, status, reason, metadata, client_version, created_at
                 )
-                VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb, $14, to_timestamp($15::bigint / 1000.0))
-                ON CONFLICT (event_uuid) DO NOTHING
                 "#,
-            )
-            .bind(&event.id)
-            .bind(&event.org_id)
-            .bind(&event.repo_id)
-            .bind(&event.event_uuid)
-            .bind(event.event_type.as_str())
-            .bind(&event.user_login)
-            .bind(&event.user_name)
-            .bind(&event.branch)
-            .bind(&event.commit_sha)
-            .bind(&files_json)
-            .bind(event.status.as_str())
-            .bind(&event.reason)
-            .bind(&event.metadata)
-            .bind(&event.client_version)
-            .bind(event.created_at)
-            .execute(&mut *tx)
-            .await;
+            );
 
-            match result {
-                Ok(res) if res.rows_affected() == 0 => duplicates.push(event.event_uuid.clone()),
-                Ok(_) => accepted.push(event.event_uuid.clone()),
-                Err(e) if e.to_string().contains("duplicate") => duplicates.push(event.event_uuid.clone()),
+            query_builder.push_values(&prepared_events, |mut builder, row| {
+                builder
+                    .push_bind(row.id)
+                    .push_bind(row.org_id)
+                    .push_bind(row.repo_id)
+                    .push_bind(&row.event.event_uuid)
+                    .push_bind(row.event.event_type.as_str())
+                    .push_bind(&row.event.user_login)
+                    .push_bind(&row.event.user_name)
+                    .push_bind(&row.event.branch)
+                    .push_bind(&row.event.commit_sha)
+                    .push_bind(&row.files_json)
+                    .push_bind(row.event.status.as_str())
+                    .push_bind(&row.event.reason)
+                    .push_bind(&row.event.metadata)
+                    .push_bind(&row.event.client_version)
+                    .push_bind(row.created_at);
+            });
+
+            query_builder.push(" ON CONFLICT (event_uuid) DO NOTHING RETURNING event_uuid");
+
+            let inserted_event_uuids = match query_builder
+                .build_query_scalar::<String>()
+                .fetch_all(&mut *tx)
+                .await
+            {
+                Ok(rows) => rows,
                 Err(e) => {
                     // Abort fast so caller can retry with per-row path preserving legacy behavior.
                     let _ = tx.rollback().await;
                     return Err(DbError::DatabaseError(e.to_string()));
+                }
+            };
+
+            let inserted_set: HashSet<&str> =
+                inserted_event_uuids.iter().map(String::as_str).collect();
+            for row in &prepared_events {
+                if inserted_set.contains(row.event.event_uuid.as_str()) {
+                    accepted.push(row.event.event_uuid.clone());
+                } else {
+                    duplicates.push(row.event.event_uuid.clone());
                 }
             }
         }
@@ -585,7 +1176,10 @@ impl Database {
         })
     }
 
-    pub async fn get_client_events(&self, filter: &EventFilter) -> Result<Vec<ClientEvent>, DbError> {
+    pub async fn get_client_events(
+        &self,
+        filter: &EventFilter,
+    ) -> Result<Vec<ClientEvent>, DbError> {
         let limit = if filter.limit == 0 { 100 } else { filter.limit } as i64;
         let offset = filter.offset as i64;
 
@@ -595,7 +1189,9 @@ impl Database {
             None
         };
         let repo_id = if let Some(repo_full_name) = filter.repo_full_name.as_deref() {
-            self.get_repo_by_full_name(repo_full_name).await?.map(|r| r.id)
+            self.get_repo_by_full_name(repo_full_name)
+                .await?
+                .map(|r| r.id)
         } else {
             None
         };
@@ -623,11 +1219,17 @@ impl Database {
             param_count += 1;
         }
         if filter.start_date.is_some() {
-            conditions.push(format!("created_at >= to_timestamp(${0}/1000.0)", param_count));
+            conditions.push(format!(
+                "created_at >= to_timestamp(${0}/1000.0)",
+                param_count
+            ));
             param_count += 1;
         }
         if filter.end_date.is_some() {
-            conditions.push(format!("created_at <= to_timestamp(${0}/1000.0)", param_count));
+            conditions.push(format!(
+                "created_at <= to_timestamp(${0}/1000.0)",
+                param_count
+            ));
             param_count += 1;
         }
         if filter.user_login.is_some() {
@@ -652,7 +1254,11 @@ impl Database {
             query.push_str(&conditions.join(" AND "));
         }
 
-        query.push_str(&format!(" ORDER BY created_at DESC LIMIT ${} OFFSET ${}", param_count, param_count + 1));
+        query.push_str(&format!(
+            " ORDER BY created_at DESC LIMIT ${} OFFSET ${}",
+            param_count,
+            param_count + 1
+        ));
 
         let mut sql_query = sqlx::query(&query);
 
@@ -710,7 +1316,8 @@ impl Database {
                     files: serde_json::from_str(&files_json).unwrap_or_default(),
                     status: EventStatus::from_str(&status_str),
                     reason: row.get("reason"),
-                    metadata: serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null),
+                    metadata: serde_json::from_str(&metadata_json)
+                        .unwrap_or(serde_json::Value::Null),
                     client_version: row.get("client_version"),
                     created_at: created_at.timestamp_millis(),
                 }
@@ -724,7 +1331,10 @@ impl Database {
     // COMBINED EVENTS (for dashboard)
     // ========================================================================
 
-    pub async fn get_combined_events(&self, filter: &EventFilter) -> Result<Vec<CombinedEvent>, DbError> {
+    pub async fn get_combined_events(
+        &self,
+        filter: &EventFilter,
+    ) -> Result<Vec<CombinedEvent>, DbError> {
         let limit = if filter.limit == 0 { 100 } else { filter.limit } as i32;
         let offset = filter.offset as i32;
 
@@ -736,7 +1346,9 @@ impl Database {
         };
 
         let repo_id = if let Some(repo_full_name) = filter.repo_full_name.as_deref() {
-            self.get_repo_by_full_name(repo_full_name).await?.map(|r| r.id)
+            self.get_repo_by_full_name(repo_full_name)
+                .await?
+                .map(|r| r.id)
         } else {
             None
         };
@@ -754,6 +1366,9 @@ impl Database {
             .and_then(chrono::DateTime::from_timestamp_millis);
         let end_date = filter
             .end_date
+            .and_then(chrono::DateTime::from_timestamp_millis);
+        let before_created_at = filter
+            .before_created_at
             .and_then(chrono::DateTime::from_timestamp_millis);
 
         let result = sqlx::query(
@@ -799,10 +1414,19 @@ impl Database {
                     r.full_name AS repo_name,
                     c.branch,
                     c.status,
-                    jsonb_build_object(
-                        'reason', c.reason,
-                        'files', c.files,
-                        'event_uuid', c.event_uuid
+                    jsonb_strip_nulls(
+                        jsonb_build_object(
+                            'reason', c.reason,
+                            'files', c.files,
+                            'event_uuid', c.event_uuid,
+                            'commit_sha', c.commit_sha,
+                            'user_name', c.user_name
+                        )
+                        || CASE
+                            WHEN jsonb_typeof(COALESCE(c.metadata, '{}'::jsonb)) = 'object'
+                                THEN COALESCE(c.metadata, '{}'::jsonb)
+                            ELSE jsonb_build_object('metadata', COALESCE(c.metadata, 'null'::jsonb))
+                        END
                     ) AS details
                 FROM client_events c
                 LEFT JOIN repos r ON c.repo_id = r.id
@@ -819,7 +1443,12 @@ impl Database {
                   AND ($8::timestamptz IS NULL OR c.created_at <= $8)
                   AND ($9::text IS NULL OR c.status = $9)
             ) combined
-            ORDER BY created_at DESC
+            WHERE (
+                $12::timestamptz IS NULL
+                OR combined.created_at < $12
+                OR ($13::text IS NOT NULL AND combined.created_at = $12 AND combined.id < $13::text)
+            )
+            ORDER BY created_at DESC, id DESC
             LIMIT $10 OFFSET $11
             "#
         )
@@ -834,11 +1463,13 @@ impl Database {
         .bind(&filter.status)
         .bind(limit)
         .bind(offset)
+        .bind(before_created_at)
+        .bind(&filter.before_id)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
-        let mut events: Vec<CombinedEvent> = result
+        let events: Vec<CombinedEvent> = result
             .iter()
             .map(|row| {
                 let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
@@ -858,91 +1489,20 @@ impl Database {
             })
             .collect();
 
-        // Enrich client event details with metadata/commit_sha/user_name directly from client_events.
-        // This avoids depending on DB function migrations for UI-visible fields like commit_message.
-        let client_event_ids: Vec<uuid::Uuid> = events
-            .iter()
-            .filter(|e| e.source == "client")
-            .filter_map(|e| uuid::Uuid::parse_str(&e.id).ok())
-            .collect();
-
-        if !client_event_ids.is_empty() {
-            let rows = sqlx::query(
-                r#"
-                SELECT id::text, commit_sha, user_name, COALESCE(metadata, '{}'::jsonb) as metadata
-                FROM client_events
-                WHERE id = ANY($1::uuid[])
-                "#,
-            )
-            .bind(&client_event_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
-
-            let mut enrichment: HashMap<String, (Option<String>, Option<String>, serde_json::Value)> =
-                HashMap::new();
-            for row in rows {
-                enrichment.insert(
-                    row.get("id"),
-                    (row.get("commit_sha"), row.get("user_name"), row.get("metadata")),
-                );
-            }
-
-            for event in events.iter_mut().filter(|e| e.source == "client") {
-                let Some((commit_sha, user_name, metadata)) = enrichment.get(&event.id) else {
-                    continue;
-                };
-
-                let existing_details =
-                    std::mem::replace(&mut event.details, serde_json::Value::Object(serde_json::Map::new()));
-
-                let mut details_obj = match existing_details {
-                    serde_json::Value::Object(map) => map,
-                    serde_json::Value::Null => serde_json::Map::new(),
-                    other => {
-                        let mut map = serde_json::Map::new();
-                        map.insert("legacy_details".to_string(), other);
-                        map
-                    }
-                };
-
-                if let Some(sha) = commit_sha {
-                    details_obj
-                        .entry("commit_sha".to_string())
-                        .or_insert_with(|| serde_json::Value::String(sha.clone()));
-                }
-
-                if let Some(name) = user_name {
-                    details_obj
-                        .entry("user_name".to_string())
-                        .or_insert_with(|| serde_json::Value::String(name.clone()));
-                }
-
-                match metadata {
-                    serde_json::Value::Object(meta_obj) => {
-                        for (k, v) in meta_obj {
-                            details_obj.entry(k.clone()).or_insert_with(|| v.clone());
-                        }
-                    }
-                    serde_json::Value::Null => {}
-                    other => {
-                        details_obj
-                            .entry("metadata".to_string())
-                            .or_insert_with(|| other.clone());
-                    }
-                }
-
-                event.details = serde_json::Value::Object(details_obj);
-            }
-        }
-
         Ok(events)
     }
 
     /// Same as get_combined_events but without the 100-record default cap.
     /// Used for compliance exports — returns up to 50,000 records.
-    pub async fn get_events_for_export(&self, filter: &EventFilter) -> Result<Vec<CombinedEvent>, DbError> {
-        let limit = if filter.limit == 0 { 50_000_i32 } else { filter.limit.min(50_000) as i32 };
+    pub async fn get_events_for_export(
+        &self,
+        filter: &EventFilter,
+    ) -> Result<Vec<CombinedEvent>, DbError> {
+        let limit = if filter.limit == 0 {
+            50_000_i32
+        } else {
+            filter.limit.min(50_000) as i32
+        };
         let export_filter = EventFilter {
             limit: limit as usize,
             offset: 0,
@@ -1007,8 +1567,10 @@ impl Database {
         let artifacts_json = serde_json::to_value(&event.artifacts)
             .map_err(|e| DbError::SerializationError(e.to_string()))?;
 
-        let ingested_at = chrono::DateTime::from_timestamp_millis(event.ingested_at)
-            .ok_or_else(|| DbError::SerializationError("Invalid ingested_at timestamp".to_string()))?;
+        let ingested_at =
+            chrono::DateTime::from_timestamp_millis(event.ingested_at).ok_or_else(|| {
+                DbError::SerializationError("Invalid ingested_at timestamp".to_string())
+            })?;
 
         let result = sqlx::query(
             r#"
@@ -1051,7 +1613,9 @@ impl Database {
         }
     }
 
-    pub async fn get_jenkins_integration_status(&self) -> Result<JenkinsIntegrationStatusResponse, DbError> {
+    pub async fn get_jenkins_integration_status(
+        &self,
+    ) -> Result<JenkinsIntegrationStatusResponse, DbError> {
         let row = sqlx::query(
             r#"
             SELECT
@@ -1077,8 +1641,10 @@ impl Database {
     }
 
     pub async fn upsert_project_ticket(&self, ticket: &ProjectTicket) -> Result<(), DbError> {
-        let ingested_at = chrono::DateTime::from_timestamp_millis(ticket.ingested_at)
-            .ok_or_else(|| DbError::SerializationError("Invalid ingested_at timestamp".to_string()))?;
+        let ingested_at =
+            chrono::DateTime::from_timestamp_millis(ticket.ingested_at).ok_or_else(|| {
+                DbError::SerializationError("Invalid ingested_at timestamp".to_string())
+            })?;
         let created_at = ticket
             .created_at
             .and_then(chrono::DateTime::from_timestamp_millis);
@@ -1135,7 +1701,9 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get_jira_integration_status(&self) -> Result<JiraIntegrationStatusResponse, DbError> {
+    pub async fn get_jira_integration_status(
+        &self,
+    ) -> Result<JiraIntegrationStatusResponse, DbError> {
         let row = sqlx::query(
             r#"
             SELECT
@@ -1228,7 +1796,9 @@ impl Database {
         correlation: &CommitTicketCorrelation,
     ) -> Result<bool, DbError> {
         let created_at = chrono::DateTime::from_timestamp_millis(correlation.created_at)
-            .ok_or_else(|| DbError::SerializationError("Invalid created_at timestamp".to_string()))?;
+            .ok_or_else(|| {
+                DbError::SerializationError("Invalid created_at timestamp".to_string())
+            })?;
 
         let result = sqlx::query(
             r#"
@@ -1303,7 +1873,16 @@ impl Database {
         repo_full_name: Option<&str>,
         hours: i64,
         limit: i64,
-    ) -> Result<Vec<(String, Option<String>, Option<String>, serde_json::Value, Option<String>)>, DbError> {
+    ) -> Result<
+        Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            serde_json::Value,
+            Option<String>,
+        )>,
+        DbError,
+    > {
         let org_id = if let Some(name) = org_name {
             self.get_org_by_login(name).await?.map(|o| o.id)
         } else {
@@ -1532,7 +2111,9 @@ impl Database {
             None
         };
         let repo_id = if let Some(repo_full_name) = filter.repo_full_name.as_deref() {
-            self.get_repo_by_full_name(repo_full_name).await?.map(|r| r.id)
+            self.get_repo_by_full_name(repo_full_name)
+                .await?
+                .map(|r| r.id)
         } else {
             None
         };
@@ -1607,24 +2188,26 @@ impl Database {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                let pipeline = row
-                    .get::<Option<String>, _>("pipeline_event_id")
-                    .map(|pipeline_event_id| {
-                        let ingested_at = row
-                            .get::<Option<chrono::DateTime<chrono::Utc>>, _>("pipeline_ingested_at")
-                            .map(|dt| dt.timestamp_millis())
-                            .unwrap_or_default();
+                let pipeline =
+                    row.get::<Option<String>, _>("pipeline_event_id")
+                        .map(|pipeline_event_id| {
+                            let ingested_at = row
+                                .get::<Option<chrono::DateTime<chrono::Utc>>, _>(
+                                    "pipeline_ingested_at",
+                                )
+                                .map(|dt| dt.timestamp_millis())
+                                .unwrap_or_default();
 
-                        CommitPipelineRun {
-                            pipeline_event_id,
-                            pipeline_id: row.get("pipeline_id"),
-                            job_name: row.get("job_name"),
-                            status: row.get("pipeline_status"),
-                            duration_ms: row.get("pipeline_duration_ms"),
-                            triggered_by: row.get("triggered_by"),
-                            ingested_at,
-                        }
-                    });
+                            CommitPipelineRun {
+                                pipeline_event_id,
+                                pipeline_id: row.get("pipeline_id"),
+                                job_name: row.get("job_name"),
+                                status: row.get("pipeline_status"),
+                                duration_ms: row.get("pipeline_duration_ms"),
+                                triggered_by: row.get("triggered_by"),
+                                ingested_at,
+                            }
+                        });
 
                 CommitPipelineCorrelation {
                     commit_event_id: row.get("commit_event_id"),
@@ -1642,7 +2225,10 @@ impl Database {
         Ok(correlations)
     }
 
-    pub async fn get_pipeline_health_stats(&self, org_id: Option<&str>) -> Result<PipelineHealthStats, DbError> {
+    pub async fn get_pipeline_health_stats(
+        &self,
+        org_id: Option<&str>,
+    ) -> Result<PipelineHealthStats, DbError> {
         let row = sqlx::query(
             r#"
             SELECT
@@ -1690,7 +2276,7 @@ impl Database {
             .bind(org_id)
             .fetch_one(&self.pool)
             .await;
-        
+
         match result {
             Ok(row) => {
                 let stats_json: Option<sqlx::types::Json<AuditStats>> = row.get("stats");
@@ -1741,7 +2327,8 @@ impl Database {
               COALESCE(SUM(CASE WHEN ce.event_type = 'successful_push' THEN 1 ELSE 0 END), 0)::bigint AS pushes
             FROM series s
             LEFT JOIN client_events ce
-              ON (ce.created_at AT TIME ZONE 'UTC')::date = s.day_utc
+              ON ce.created_at >= s.day_utc::timestamp
+             AND ce.created_at < (s.day_utc::timestamp + INTERVAL '1 day')
              AND ($2::uuid IS NULL OR ce.org_id = $2::uuid)
             GROUP BY s.day_utc
             ORDER BY s.day_utc DESC
@@ -1769,9 +2356,15 @@ impl Database {
     // POLICIES
     // ========================================================================
 
-    pub async fn save_policy(&self, repo_id: &str, config: &GitGovConfig, checksum: &str, override_actor: &str) -> Result<(), DbError> {
-        let config_json = serde_json::to_value(config)
-            .map_err(|e| DbError::SerializationError(e.to_string()))?;
+    pub async fn save_policy(
+        &self,
+        repo_id: &str,
+        config: &GitGovConfig,
+        checksum: &str,
+        override_actor: &str,
+    ) -> Result<(), DbError> {
+        let config_json =
+            serde_json::to_value(config).map_err(|e| DbError::SerializationError(e.to_string()))?;
 
         sqlx::query(
             r#"
@@ -1856,7 +2449,11 @@ impl Database {
         Ok(result.get("id"))
     }
 
-    pub async fn mark_webhook_processed(&self, id: &str, error: Option<&str>) -> Result<(), DbError> {
+    pub async fn mark_webhook_processed(
+        &self,
+        id: &str,
+        error: Option<&str>,
+    ) -> Result<(), DbError> {
         sqlx::query(
             r#"
             UPDATE webhook_events 
@@ -1877,18 +2474,70 @@ impl Database {
     // API KEYS
     // ========================================================================
 
-    pub async fn validate_api_key(&self, key_hash: &str) -> Result<Option<(String, UserRole, Option<String>)>, DbError> {
-        let result = sqlx::query(
-            r#"
-            SELECT client_id, role, org_id::text, last_used
-            FROM api_keys
-            WHERE key_hash = $1 AND is_active = TRUE
-            "#,
-        )
-        .bind(key_hash)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+    pub async fn validate_api_key(&self, key_hash: &str) -> Result<ApiKeyAuthValidation, DbError> {
+        if let Some(cached) = self.get_cached_api_key_auth(key_hash) {
+            return Ok(ApiKeyAuthValidation {
+                auth: cached,
+                used_stale_cache: false,
+            });
+        }
+
+        let simulated_auth_db_failure = auth_db_failure_simulation_enabled();
+        if simulated_auth_db_failure {
+            tracing::warn!(
+                "Simulating auth DB query failure via debug failpoint (validate_api_key)"
+            );
+        }
+
+        let result = if simulated_auth_db_failure {
+            Err("Simulated auth DB failure (debug failpoint)".to_string())
+        } else {
+            sqlx::query(
+                r#"
+                SELECT client_id, role, org_id::text, last_used
+                FROM api_keys
+                WHERE key_hash = $1 AND is_active = TRUE
+                "#,
+            )
+            .bind(key_hash)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| e.to_string())
+        };
+
+        let result = match result {
+            Ok(row) => row,
+            Err(error_msg) => {
+                let (failure_streak, should_fail_closed) = self.note_auth_db_failure();
+                if should_fail_closed {
+                    tracing::warn!(
+                        error = %error_msg,
+                        failure_streak,
+                        fail_closed_threshold = self.auth_stale_fail_closed_after,
+                        "Auth DB failure threshold reached; stale auth fallback disabled"
+                    );
+                    return Err(DbError::DatabaseError(error_msg));
+                }
+                if let Some((stale_auth, stale_age_secs)) =
+                    self.get_stale_cached_api_key_auth(key_hash)
+                {
+                    tracing::warn!(
+                        error = %error_msg,
+                        client_id = %stale_auth.0,
+                        failure_streak,
+                        stale_age_secs,
+                        "Using stale API key auth cache due transient database error"
+                    );
+                    return Ok(ApiKeyAuthValidation {
+                        auth: Some(stale_auth),
+                        used_stale_cache: true,
+                    });
+                }
+                return Err(DbError::DatabaseError(error_msg));
+            }
+        };
+
+        self.reset_auth_db_failure_streak();
 
         match result {
             Some(row) => {
@@ -1896,6 +2545,7 @@ impl Database {
                 let role = UserRole::from_str(&role);
                 let client_id: String = row.get("client_id");
                 let org_id: Option<String> = row.get("org_id");
+                let auth_tuple = Some((client_id.clone(), role.clone(), org_id.clone()));
 
                 // Reduce write amplification on high-traffic endpoints.
                 // `last_used` is observability metadata, so update only every ~5 minutes.
@@ -1926,13 +2576,30 @@ impl Database {
                     }
                 }
 
-                Ok(Some((client_id, role, org_id)))
+                self.put_cached_api_key_auth(key_hash, auth_tuple.clone());
+                Ok(ApiKeyAuthValidation {
+                    auth: auth_tuple,
+                    used_stale_cache: false,
+                })
             }
-            None => Ok(None),
+            None => {
+                // Cache negative lookups briefly to reduce repeated DB hits on invalid tokens.
+                self.put_cached_api_key_auth(key_hash, None);
+                Ok(ApiKeyAuthValidation {
+                    auth: None,
+                    used_stale_cache: false,
+                })
+            }
         }
     }
 
-    pub async fn create_api_key(&self, key_hash: &str, client_id: &str, org_id: Option<&str>, role: &UserRole) -> Result<(), DbError> {
+    pub async fn create_api_key(
+        &self,
+        key_hash: &str,
+        client_id: &str,
+        org_id: Option<&str>,
+        role: &UserRole,
+    ) -> Result<(), DbError> {
         sqlx::query(
             r#"
             INSERT INTO api_keys (key_hash, client_id, org_id, role) VALUES ($1, $2, $3::uuid, $4)
@@ -1946,10 +2613,16 @@ impl Database {
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
+        self.invalidate_auth_cache_key(key_hash);
+
         Ok(())
     }
 
-    pub async fn ensure_admin_api_key(&self, key_hash: &str, client_id: &str) -> Result<(), DbError> {
+    pub async fn ensure_admin_api_key(
+        &self,
+        key_hash: &str,
+        client_id: &str,
+    ) -> Result<(), DbError> {
         sqlx::query(
             r#"
             INSERT INTO api_keys (key_hash, client_id, org_id, role, is_active)
@@ -1968,6 +2641,8 @@ impl Database {
         .execute(&self.pool)
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        self.invalidate_auth_cache_key(key_hash);
 
         Ok(())
     }
@@ -2036,7 +2711,13 @@ impl Database {
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
-        Ok(result.rows_affected() > 0)
+        let revoked = result.rows_affected() > 0;
+        if revoked {
+            // Revoke works by key id; safest is clearing auth cache to avoid stale entries.
+            self.invalidate_auth_cache_all();
+        }
+
+        Ok(revoked)
     }
 
     // ========================================================================
@@ -2069,13 +2750,15 @@ impl Database {
         .await;
 
         match result {
-            Ok(res) if res.rows_affected() == 0 => {
-                Err(DbError::Duplicate(format!("delivery_id: {}", record.delivery_id)))
-            }
+            Ok(res) if res.rows_affected() == 0 => Err(DbError::Duplicate(format!(
+                "delivery_id: {}",
+                record.delivery_id
+            ))),
             Ok(_) => Ok(()),
-            Err(e) if e.to_string().contains("duplicate") => {
-                Err(DbError::Duplicate(format!("delivery_id: {}", record.delivery_id)))
-            }
+            Err(e) if e.to_string().contains("duplicate") => Err(DbError::Duplicate(format!(
+                "delivery_id: {}",
+                record.delivery_id
+            ))),
             Err(e) => Err(DbError::DatabaseError(e.to_string())),
         }
     }
@@ -2281,7 +2964,7 @@ impl Database {
 
     pub async fn bootstrap_admin_key(&self) -> Result<Option<String>, DbError> {
         let count = self.count_api_keys().await?;
-        
+
         if count > 0 {
             return Ok(None);
         }
@@ -2290,7 +2973,8 @@ impl Database {
         let key_hash = format!("{:x}", sha2::Sha256::digest(api_key.as_bytes()));
         let client_id = "bootstrap-admin";
 
-        self.create_api_key(&key_hash, client_id, None, &UserRole::Admin).await?;
+        self.create_api_key(&key_hash, client_id, None, &UserRole::Admin)
+            .await?;
 
         Ok(Some(api_key))
     }
@@ -2300,10 +2984,11 @@ impl Database {
     // ========================================================================
 
     pub async fn health_check(&self) -> Result<(bool, i64), DbError> {
-        let result = sqlx::query("SELECT COUNT(*) as count FROM client_events WHERE status = 'pending'")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        let result =
+            sqlx::query("SELECT COUNT(*) as count FROM client_events WHERE status = 'pending'")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
         let count: i64 = result.get("count");
         Ok((true, count))
@@ -2351,10 +3036,13 @@ impl Database {
             format!(" WHERE {}", conditions.join(" AND "))
         };
 
-        let count_query = format!("SELECT COUNT(*) as total FROM noncompliance_signals ns{}", where_clause);
-        
+        let count_query = format!(
+            "SELECT COUNT(*) as total FROM noncompliance_signals ns{}",
+            where_clause
+        );
+
         let mut count_sql = sqlx::query(&count_query);
-        
+
         if let Some(org) = filter.org_id {
             count_sql = count_sql.bind(org);
         }
@@ -2397,7 +3085,7 @@ impl Database {
         );
 
         let mut data_sql = sqlx::query(&data_query);
-        
+
         if let Some(org) = filter.org_id {
             data_sql = data_sql.bind(org);
         }
@@ -2424,7 +3112,8 @@ impl Database {
             .iter()
             .map(|row| {
                 let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
-                let investigated_at: Option<chrono::DateTime<chrono::Utc>> = row.get("investigated_at");
+                let investigated_at: Option<chrono::DateTime<chrono::Utc>> =
+                    row.get("investigated_at");
 
                 NoncomplianceSignal {
                     id: row.get("id"),
@@ -2508,7 +3197,9 @@ impl Database {
                 let insert_err_msg = insert_err.to_string();
 
                 // Fallback for older schemas without signal_decisions table.
-                if insert_err_msg.contains("signal_decisions") && insert_err_msg.contains("does not exist") {
+                if insert_err_msg.contains("signal_decisions")
+                    && insert_err_msg.contains("does not exist")
+                {
                     sqlx::query(
                         r#"
                         UPDATE noncompliance_signals 
@@ -2535,7 +3226,10 @@ impl Database {
         }
     }
 
-    pub async fn get_signal_by_id(&self, signal_id: &str) -> Result<Option<NoncomplianceSignal>, DbError> {
+    pub async fn get_signal_by_id(
+        &self,
+        signal_id: &str,
+    ) -> Result<Option<NoncomplianceSignal>, DbError> {
         let result = sqlx::query(
             r#"
             SELECT ns.id::text, ns.org_id::text, ns.repo_id::text, ns.github_event_id::text, ns.client_event_id::text,
@@ -2564,8 +3258,9 @@ impl Database {
         match result {
             Some(row) => {
                 let created_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
-                let investigated_at: Option<chrono::DateTime<chrono::Utc>> = row.get("investigated_at");
-                
+                let investigated_at: Option<chrono::DateTime<chrono::Utc>> =
+                    row.get("investigated_at");
+
                 Ok(Some(NoncomplianceSignal {
                     id: row.get("id"),
                     org_id: row.get("org_id"),
@@ -2596,7 +3291,9 @@ impl Database {
         confirmed_by: &str,
         severity: &str,
     ) -> Result<String, DbError> {
-        let signal = self.get_signal_by_id(signal_id).await?
+        let signal = self
+            .get_signal_by_id(signal_id)
+            .await?
             .ok_or_else(|| DbError::NotFound(format!("Signal not found: {}", signal_id)))?;
 
         let violation_id = uuid::Uuid::new_v4().to_string();
@@ -2662,13 +3359,11 @@ impl Database {
     }
 
     pub async fn detect_noncompliance_signals(&self, org_id: &str) -> Result<i64, DbError> {
-        let result = sqlx::query(
-            "SELECT detect_noncompliance_signals($1::uuid) as count"
-        )
-        .bind(org_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        let result = sqlx::query("SELECT detect_noncompliance_signals($1::uuid) as count")
+            .bind(org_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
         Ok(result.get("count"))
     }
@@ -2677,14 +3372,15 @@ impl Database {
     // COMPLIANCE DASHBOARD
     // ========================================================================
 
-    pub async fn get_compliance_dashboard(&self, org_id: &str) -> Result<ComplianceDashboard, DbError> {
-        let row = sqlx::query(
-            "SELECT get_compliance_dashboard($1::uuid) as dashboard"
-        )
-        .bind(org_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+    pub async fn get_compliance_dashboard(
+        &self,
+        org_id: &str,
+    ) -> Result<ComplianceDashboard, DbError> {
+        let row = sqlx::query("SELECT get_compliance_dashboard($1::uuid) as dashboard")
+            .bind(org_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
         let dashboard: sqlx::types::Json<ComplianceDashboard> = row.get("dashboard");
 
@@ -2696,13 +3392,11 @@ impl Database {
     // ========================================================================
 
     pub async fn get_policy_history(&self, repo_id: &str) -> Result<Vec<PolicyHistory>, DbError> {
-        let rows = sqlx::query(
-            "SELECT * FROM get_policy_history($1::uuid)"
-        )
-        .bind(repo_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        let rows = sqlx::query("SELECT * FROM get_policy_history($1::uuid)")
+            .bind(repo_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
         let history: Vec<PolicyHistory> = rows
             .iter()
@@ -2784,18 +3478,23 @@ impl Database {
         .await;
 
         match result {
-            Ok(res) if res.rows_affected() == 0 => {
-                Err(DbError::Duplicate(format!("delivery_id: {}", event.delivery_id)))
-            }
+            Ok(res) if res.rows_affected() == 0 => Err(DbError::Duplicate(format!(
+                "delivery_id: {}",
+                event.delivery_id
+            ))),
             Ok(_) => Ok(()),
-            Err(e) if e.to_string().contains("duplicate") => {
-                Err(DbError::Duplicate(format!("delivery_id: {}", event.delivery_id)))
-            }
+            Err(e) if e.to_string().contains("duplicate") => Err(DbError::Duplicate(format!(
+                "delivery_id: {}",
+                event.delivery_id
+            ))),
             Err(e) => Err(DbError::DatabaseError(e.to_string())),
         }
     }
 
-    pub async fn insert_governance_events_batch(&self, events: &[GovernanceEvent]) -> Result<(i32, Vec<String>), DbError> {
+    pub async fn insert_governance_events_batch(
+        &self,
+        events: &[GovernanceEvent],
+    ) -> Result<(i32, Vec<String>), DbError> {
         let mut accepted = 0;
         let mut errors = Vec::new();
 
@@ -2983,7 +3682,7 @@ impl Database {
                 let org_id: String = r.get("org_id");
                 let job_type: String = r.get("job_type");
                 let attempts: i32 = r.get("attempts");
-                
+
                 tracing::info!(
                     job_id = %job_id,
                     org_id = %org_id,
@@ -2997,7 +3696,7 @@ impl Database {
                 let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
                 let locked_at: Option<chrono::DateTime<chrono::Utc>> = r.get("locked_at");
                 let started_at: Option<chrono::DateTime<chrono::Utc>> = r.get("started_at");
-                
+
                 Ok(Some(Job {
                     id: job_id,
                     org_id,
@@ -3211,17 +3910,15 @@ impl Database {
     /// This is idempotent - uses ingested_at cursor.
     pub async fn execute_detect_signals(&self, org_id: &str) -> Result<i64, DbError> {
         let start = std::time::Instant::now();
-        
-        let result = sqlx::query(
-            "SELECT detect_noncompliance_signals($1::uuid) as count"
-        )
-        .bind(org_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let result = sqlx::query("SELECT detect_noncompliance_signals($1::uuid) as count")
+            .bind(org_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
         let count: i64 = result.get("count");
-        
+
         tracing::info!(
             org_id = %org_id,
             signals_created = count,
@@ -3369,14 +4066,14 @@ impl Database {
                 row.get("decision_id")
             }
         };
-        
+
         tracing::info!(
             violation_id = %violation_id,
             decision_type = %decision_type,
             decided_by = %decided_by,
             "Violation decision recorded"
         );
-        
+
         Ok(decision_id)
     }
 
@@ -3594,10 +4291,8 @@ impl Database {
                     client_id: r.get("client_id"),
                     org_id: r.get("org_id"),
                     last_seen_at: last_seen_ms,
-                    device_metadata: serde_json::from_str(
-                        r.get::<&str, _>("device_metadata"),
-                    )
-                    .unwrap_or_default(),
+                    device_metadata: serde_json::from_str(r.get::<&str, _>("device_metadata"))
+                        .unwrap_or_default(),
                     created_at: r.get("created_at_ms"),
                     is_active: last_seen_ms > (now_ms - 86_400_000), // active = seen in last 24h
                 }
@@ -4034,7 +4729,8 @@ impl Database {
             .iter()
             .map(|row| {
                 let repos_json: serde_json::Value = row.get("repos");
-                let repos: Vec<TeamRepoSummary> = serde_json::from_value(repos_json).unwrap_or_default();
+                let repos: Vec<TeamRepoSummary> =
+                    serde_json::from_value(repos_json).unwrap_or_default();
                 TeamDeveloperOverview {
                     login: row.get("login"),
                     display_name: row.get("display_name"),
@@ -4476,7 +5172,12 @@ impl Database {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(ToOwned::to_owned)
-            .or_else(|| invitation.invite_login.clone().map(|s| s.trim().to_string()))
+            .or_else(|| {
+                invitation
+                    .invite_login
+                    .clone()
+                    .map(|s| s.trim().to_string())
+            })
             .or_else(|| {
                 invitation
                     .invite_email
@@ -5155,4 +5856,221 @@ pub struct ViolationDecision {
     pub notes: Option<String>,
     pub evidence: serde_json::Value,
     pub created_at: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn set_env_var(key: &str, value: &str) {
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+
+    fn remove_env_var(key: &str) {
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    fn set_or_clear_env(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => set_env_var(key, v),
+            None => remove_env_var(key),
+        }
+    }
+
+    struct EnvGuard {
+        simulate_auth_db_failure: Option<String>,
+        simulate_auth_db_failure_flag_file: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn apply(simulate_auth_db_failure: &str, flag_file: Option<&std::path::Path>) -> Self {
+            let guard = Self {
+                simulate_auth_db_failure: std::env::var(SIMULATE_AUTH_DB_FAILURE_ENV).ok(),
+                simulate_auth_db_failure_flag_file: std::env::var(
+                    SIMULATE_AUTH_DB_FAILURE_FLAG_FILE_ENV,
+                )
+                .ok(),
+            };
+            set_env_var(SIMULATE_AUTH_DB_FAILURE_ENV, simulate_auth_db_failure);
+            match flag_file {
+                Some(path) => set_env_var(
+                    SIMULATE_AUTH_DB_FAILURE_FLAG_FILE_ENV,
+                    &path.as_os_str().to_string_lossy(),
+                ),
+                None => remove_env_var(SIMULATE_AUTH_DB_FAILURE_FLAG_FILE_ENV),
+            }
+            guard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            set_or_clear_env(
+                SIMULATE_AUTH_DB_FAILURE_ENV,
+                self.simulate_auth_db_failure.as_deref(),
+            );
+            set_or_clear_env(
+                SIMULATE_AUTH_DB_FAILURE_FLAG_FILE_ENV,
+                self.simulate_auth_db_failure_flag_file.as_deref(),
+            );
+        }
+    }
+
+    struct TempFileGuard {
+        path: std::path::PathBuf,
+    }
+
+    impl TempFileGuard {
+        fn create() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "gitgov-auth-db-failpoint-{}.flag",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::write(&path, b"1").expect("failed to create temp failpoint flag file");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempFileGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn auth_db_failure_simulation_enabled_reads_bool_env() {
+        let _env_lock = env_lock().lock().expect("env lock poisoned");
+        let _env_guard = EnvGuard::apply("true", None);
+        assert!(auth_db_failure_simulation_enabled());
+    }
+
+    #[test]
+    fn auth_db_failure_simulation_enabled_reads_flag_file() {
+        let _env_lock = env_lock().lock().expect("env lock poisoned");
+        let flag = TempFileGuard::create();
+        let _env_guard = EnvGuard::apply("false", Some(&flag.path));
+        assert!(auth_db_failure_simulation_enabled());
+    }
+
+    fn build_test_db(
+        auth_cache_ttl_secs: u64,
+        auth_cache_stale_max_secs: u64,
+        auth_stale_fail_closed_after: u32,
+    ) -> Database {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://gitgov:gitgov@127.0.0.1/gitgov")
+            .expect("failed to build lazy pg pool for auth cache tests");
+        Database {
+            pool,
+            auth_cache: std::sync::Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
+            auth_cache_ttl: Duration::from_secs(auth_cache_ttl_secs),
+            auth_cache_stale_max: Duration::from_secs(auth_cache_stale_max_secs),
+            auth_cache_max_entries: 64,
+            auth_db_failure_streak: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            auth_stale_fail_closed_after,
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_fresh_cache_entry_remains_available_for_stale_lookup() {
+        let db = build_test_db(1, 120, 0);
+        db.put_cached_api_key_auth(
+            "k",
+            Some((
+                "admin".to_string(),
+                UserRole::Admin,
+                Some("org1".to_string()),
+            )),
+        );
+
+        {
+            let mut cache = db.auth_cache.lock().expect("auth cache poisoned");
+            let entry = cache.get_mut("k").expect("missing cached entry");
+            entry.cached_at = Instant::now() - Duration::from_secs(2);
+        }
+
+        assert!(db.get_cached_api_key_auth("k").is_none());
+
+        let stale = db
+            .get_stale_cached_api_key_auth("k")
+            .expect("stale auth cache should be available");
+        assert_eq!(stale.0 .0, "admin");
+        assert!(stale.1 >= 1);
+    }
+
+    #[tokio::test]
+    async fn stale_cache_entry_older_than_max_age_is_evicted() {
+        let db = build_test_db(1, 2, 0);
+        db.put_cached_api_key_auth(
+            "k",
+            Some((
+                "admin".to_string(),
+                UserRole::Admin,
+                Some("org1".to_string()),
+            )),
+        );
+
+        {
+            let mut cache = db.auth_cache.lock().expect("auth cache poisoned");
+            let entry = cache.get_mut("k").expect("missing cached entry");
+            entry.cached_at = Instant::now() - Duration::from_secs(3);
+        }
+
+        assert!(db.get_cached_api_key_auth("k").is_none());
+        assert!(db.get_stale_cached_api_key_auth("k").is_none());
+        let cache = db.auth_cache.lock().expect("auth cache poisoned");
+        assert!(cache.get("k").is_none());
+    }
+
+    #[tokio::test]
+    async fn auth_db_failure_threshold_trips_fail_closed_mode() {
+        let db = build_test_db(1, 120, 3);
+        let (streak1, fail_closed1) = db.note_auth_db_failure();
+        let (streak2, fail_closed2) = db.note_auth_db_failure();
+        let (streak3, fail_closed3) = db.note_auth_db_failure();
+
+        assert_eq!(streak1, 1);
+        assert_eq!(streak2, 2);
+        assert_eq!(streak3, 3);
+        assert!(!fail_closed1);
+        assert!(!fail_closed2);
+        assert!(fail_closed3);
+    }
+
+    #[tokio::test]
+    async fn auth_db_failure_threshold_zero_keeps_stale_enabled() {
+        let db = build_test_db(1, 120, 0);
+        for _ in 0..5 {
+            let (_, fail_closed) = db.note_auth_db_failure();
+            assert!(!fail_closed);
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_db_failure_streak_resets_after_success_signal() {
+        let db = build_test_db(1, 120, 2);
+        let (_, fail_closed1) = db.note_auth_db_failure();
+        assert!(!fail_closed1);
+
+        db.reset_auth_db_failure_streak();
+
+        let (streak_after_reset, fail_closed_after_reset) = db.note_auth_db_failure();
+        assert_eq!(streak_after_reset, 1);
+        assert!(!fail_closed_after_reset);
+    }
 }

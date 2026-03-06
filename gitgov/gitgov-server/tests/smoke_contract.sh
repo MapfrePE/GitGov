@@ -12,7 +12,12 @@
 # Exit 0 = all checks pass, Exit 1 = one or more failed.
 
 SERVER_URL="${SERVER_URL:-http://127.0.0.1:3000}"
-API_KEY="${API_KEY:-57f1ed59-371d-46ef-9fdf-508f59bc4963}"
+API_KEY="${API_KEY:-${GITGOV_API_KEY:-}}"
+
+if [ -z "$API_KEY" ]; then
+  echo "❌ Missing API key. Set API_KEY or GITGOV_API_KEY."
+  exit 1
+fi
 
 FAILED=0
 PASS=0
@@ -29,10 +34,19 @@ echo ""
 
 # ── UUID helper ──────────────────────────────────────────────────────────────
 new_uuid() {
-  uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' ||
-  powershell.exe -NoProfile -Command "[System.Guid]::NewGuid().ToString()" 2>/dev/null | tr -d '\r\n' ||
-  cat /proc/sys/kernel/random/uuid 2>/dev/null ||
-  printf '%08x-%04x-%04x-%04x-%012x' $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM
+  local u=""
+  u=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r\n' || true)
+  if [ -n "$u" ]; then echo "$u"; return 0; fi
+  u=$(powershell.exe -NoProfile -Command "[System.Guid]::NewGuid().ToString().ToLowerInvariant()" 2>/dev/null | tr -d '\r\n' || true)
+  if [ -n "$u" ]; then echo "$u"; return 0; fi
+  u=$(python - <<'PY' 2>/dev/null || true
+import uuid
+print(str(uuid.uuid4()))
+PY
+)
+  u=$(echo "$u" | tr -d '\r\n')
+  if [ -n "$u" ]; then echo "$u"; return 0; fi
+  cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '\r\n' || true
 }
 
 echo "── Section A: Pagination defaults ──────────────────────────────────────"
@@ -94,7 +108,7 @@ UUID_COMMIT=$(new_uuid)
 UUID_PUSH_ATTEMPT=$(new_uuid)
 UUID_PUSH_OK=$(new_uuid)
 GP_BRANCH="feat/smoke-golden-path"
-GP_USER="smoke-test-user"
+GP_USER="manual_check"
 GP_REPO="MapfrePE/GitGov"
 
 send_event() {
@@ -146,6 +160,7 @@ echo "$RES" | grep -q "\"$UUID_PUSH_OK\"" \
 sleep 1
 LOGS=$(curl -s -H "Authorization: Bearer $API_KEY" "$SERVER_URL/logs?limit=20")
 for uuid in "$UUID_STAGE" "$UUID_COMMIT" "$UUID_PUSH_ATTEMPT" "$UUID_PUSH_OK"; do
+  [ -z "$uuid" ] && fail "Generated UUID is empty (environment issue)"
   echo "$LOGS" | grep -q "$uuid" \
     && pass "GP event $uuid visible in /logs" \
     || fail "GP event $uuid NOT found in /logs"
@@ -153,7 +168,8 @@ done
 
 # GP-6: duplicate rejection — re-send successful_push UUID, expect in duplicates[]
 RES=$(send_event "$UUID_PUSH_OK" "successful_push" "")
-echo "$RES" | grep -q '"duplicates":\["' \
+echo "$RES" | grep -q "\"$UUID_PUSH_OK\"" \
+  && echo "$RES" | grep -q '"duplicates"' \
   && pass "GP duplicate UUID correctly rejected (in duplicates[])" \
   || fail "GP duplicate not detected: ${RES:0:150}"
 

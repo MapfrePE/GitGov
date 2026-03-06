@@ -1,8 +1,8 @@
 use crate::audit::AuditDatabase;
 use crate::config::{load_config, validate_commit_message};
 use crate::git::{
-    create_commit, get_working_tree_changes, has_staged_changes, open_repository,
-    stage_files, unstage_all, unstage_files,
+    create_commit, get_working_tree_changes, has_staged_changes, open_repository, stage_files,
+    unstage_all, unstage_files,
 };
 use crate::models::AuditStatus;
 use crate::models::FileChange;
@@ -25,10 +25,7 @@ fn to_command_error(e: impl std::fmt::Display, code: &str) -> String {
 }
 
 fn trigger_flush(outbox: &Arc<Outbox>) {
-    let outbox_clone = Arc::clone(outbox);
-    std::thread::spawn(move || {
-        let _ = outbox_clone.flush();
-    });
+    outbox.notify_flush();
 }
 
 fn infer_repo_full_name(repo: &Repository) -> Option<String> {
@@ -104,7 +101,10 @@ fn normalize_ignore_rule(rule: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-fn resolve_ignore_target_path(repo: &Repository, target: &str) -> Result<std::path::PathBuf, String> {
+fn resolve_ignore_target_path(
+    repo: &Repository,
+    target: &str,
+) -> Result<std::path::PathBuf, String> {
     let workdir = repo_workdir(repo)?;
     let normalized_target = target.trim().to_lowercase();
     match normalized_target.as_str() {
@@ -160,7 +160,8 @@ pub fn cmd_apply_ignore_rules(
             .open(&target_path)
             .map_err(|e| to_command_error(e, "IO_ERROR"))?;
 
-        let needs_leading_newline = file_existed && !existing_raw.is_empty() && !existing_raw.ends_with('\n');
+        let needs_leading_newline =
+            file_existed && !existing_raw.is_empty() && !existing_raw.ends_with('\n');
         if needs_leading_newline {
             writeln!(file).map_err(|e| to_command_error(e, "IO_ERROR"))?;
         }
@@ -220,8 +221,12 @@ pub fn cmd_remove_ignore_rules(
         }));
     }
 
-    let existing_raw = fs::read_to_string(&target_path).map_err(|e| to_command_error(e, "IO_ERROR"))?;
-    let to_remove: HashSet<String> = rules.into_iter().filter_map(|r| normalize_ignore_rule(&r)).collect();
+    let existing_raw =
+        fs::read_to_string(&target_path).map_err(|e| to_command_error(e, "IO_ERROR"))?;
+    let to_remove: HashSet<String> = rules
+        .into_iter()
+        .filter_map(|r| normalize_ignore_rule(&r))
+        .collect();
     if to_remove.is_empty() {
         return Ok(serde_json::json!({
             "target": normalized_target,
@@ -461,7 +466,9 @@ pub fn cmd_commit(
 #[tauri::command]
 pub fn cmd_get_git_identity(repo_path: String) -> Result<serde_json::Value, String> {
     let repo = open_repository(&repo_path).map_err(|e| to_command_error(e, "GIT_ERROR"))?;
-    let config = repo.config().map_err(|e| to_command_error(e, "GIT_ERROR"))?;
+    let config = repo
+        .config()
+        .map_err(|e| to_command_error(e, "GIT_ERROR"))?;
     let name = config.get_string("user.name").ok();
     let email = config.get_string("user.email").ok();
     Ok(serde_json::json!({
@@ -483,9 +490,7 @@ pub fn cmd_push(
     use uuid::Uuid;
 
     let repo_context = open_repository(&repo_path).ok();
-    let repo_full_name = repo_context
-        .as_ref()
-        .and_then(infer_repo_full_name);
+    let repo_full_name = repo_context.as_ref().and_then(infer_repo_full_name);
     let org_name = repo_full_name
         .as_deref()
         .and_then(infer_org_name_from_full_name);
@@ -495,7 +500,8 @@ pub fn cmd_push(
         developer_login.clone(),
         Some(branch.clone()),
         AuditStatus::Success,
-    ).with_metadata(serde_json::json!({"device": device_metadata()}));
+    )
+    .with_metadata(serde_json::json!({"device": device_metadata()}));
     if let Some(full_name) = repo_full_name.clone() {
         attempt_event = attempt_event.with_repo(full_name);
     }
@@ -573,7 +579,8 @@ pub fn cmd_push(
                 developer_login.clone(),
                 Some(branch.clone()),
                 AuditStatus::Success,
-            ).with_metadata(serde_json::json!({"device": device_metadata()}));
+            )
+            .with_metadata(serde_json::json!({"device": device_metadata()}));
             if let Some(full_name) = repo_full_name.clone() {
                 success_event = success_event.with_repo(full_name);
             }

@@ -277,7 +277,7 @@ Cuando la desktop app quiere enviar eventos al servidor:
 │  Desktop                                                    │
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │ Tiene una API key guardada en configuración         │   │
-│  │ Ejemplo: 57f1ed59-371d-46ef-9fdf-508f59bc4963       │   │
+│  │ Ejemplo: <YOUR_API_KEY>                             │   │
 │  └──────────────────────┬──────────────────────────────┘   │
 │                         │                                   │
 │                         ▼                                   │

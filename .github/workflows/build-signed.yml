@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  GITGOV_ENV: prod
 
 jobs:
   build-windows:
@@ -17,6 +18,17 @@ jobs:
         working-directory: gitgov
     steps:
       - uses: actions/checkout@v4
+      - name: Assert explicit runtime env
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GITGOV_ENV)) {
+            throw "GITGOV_ENV must be set explicitly in CI/deploy."
+          }
+          $allowed = @('dev','development','local','test','testing','ci','staging','prod','production')
+          if (-not ($allowed -contains $env:GITGOV_ENV.ToLowerInvariant())) {
+            throw "Unsupported GITGOV_ENV '$($env:GITGOV_ENV)'. Allowed: $($allowed -join ', ')"
+          }
+          Write-Host "GITGOV_ENV='$($env:GITGOV_ENV)' validated for CI/deploy."
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -133,6 +145,8 @@ jobs:
         working-directory: gitgov
     steps:
       - uses: actions/checkout@v4
+      - name: Assert explicit runtime env
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/assert-gitgov-env.sh"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -183,6 +197,8 @@ jobs:
         working-directory: gitgov
     steps:
       - uses: actions/checkout@v4
+      - name: Assert explicit runtime env
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/assert-gitgov-env.sh"
 
       - uses: dtolnay/rust-toolchain@stable
 

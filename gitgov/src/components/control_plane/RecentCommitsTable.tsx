@@ -21,6 +21,9 @@ interface CommitPipelineRun {
   ingested_at: number
 }
 
+const SHORT_SHA_MIN_LEN = 7
+const SHORT_SHA_MAX_LEN = 12
+
 function isLikelySyntheticEvent(log: CombinedEvent): boolean {
   const login = (log.user_login ?? '').trim()
   const syntheticLogin = /^(alias_|erase_ok_|hb_user_|user_[0-9a-f]{6,}|test_?user|golden_?test|smoke|manual-check|victim_)/i.test(login)
@@ -66,6 +69,17 @@ export function RecentCommitsTable() {
     ),
     [jenkinsCorrelations],
   )
+  const pipelineByCommitShaPrefix = useMemo(() => {
+    const index = new Map<string, CommitPipelineRun>()
+    for (const [sha, pipeline] of pipelineByCommitSha.entries()) {
+      const max = Math.min(SHORT_SHA_MAX_LEN, sha.length)
+      for (let len = SHORT_SHA_MIN_LEN; len <= max; len++) {
+        const key = sha.slice(0, len)
+        if (!index.has(key)) index.set(key, pipeline)
+      }
+    }
+    return index
+  }, [pipelineByCommitSha])
   const prEvidenceByHeadSha = useMemo(
     () => new Map(
       prMergeEvidence
@@ -74,6 +88,19 @@ export function RecentCommitsTable() {
     ),
     [prMergeEvidence],
   )
+  const prEvidenceByHeadShaPrefix = useMemo(() => {
+    const index = new Map<string, { approvals_count: number; pr_number: number }>()
+    for (const [sha, entry] of prEvidenceByHeadSha.entries()) {
+      const max = Math.min(SHORT_SHA_MAX_LEN, sha.length)
+      for (let len = SHORT_SHA_MIN_LEN; len <= max; len++) {
+        const key = sha.slice(0, len)
+        if (!index.has(key)) {
+          index.set(key, { approvals_count: entry.approvals_count, pr_number: entry.pr_number })
+        }
+      }
+    }
+    return index
+  }, [prEvidenceByHeadSha])
 
   const findPipelineForLog = useCallback((log: CombinedEvent): CommitPipelineRun | null => {
     const sha = readDetailString(log, 'commit_sha')
@@ -81,11 +108,17 @@ export function RecentCommitsTable() {
     const normalized = sha.toLowerCase()
     const exact = pipelineByCommitSha.get(normalized)
     if (exact) return exact
+    if (normalized.length >= SHORT_SHA_MIN_LEN) {
+      const key = normalized.slice(0, Math.min(SHORT_SHA_MAX_LEN, normalized.length))
+      const fromPrefix = pipelineByCommitShaPrefix.get(key)
+      if (fromPrefix) return fromPrefix
+    }
+    // Preserve legacy fallback for very short shas or unusual truncations.
     for (const [fullSha, p] of pipelineByCommitSha.entries()) {
       if (fullSha.startsWith(normalized) || normalized.startsWith(fullSha)) return p
     }
     return null
-  }, [pipelineByCommitSha])
+  }, [pipelineByCommitSha, pipelineByCommitShaPrefix])
 
   const findPrEvidenceForLog = useCallback((log: CombinedEvent): { approvals_count: number; pr_number: number } | null => {
     const sha = readDetailString(log, 'commit_sha')
@@ -93,13 +126,19 @@ export function RecentCommitsTable() {
     const normalized = sha.toLowerCase()
     const exact = prEvidenceByHeadSha.get(normalized)
     if (exact) return { approvals_count: exact.approvals_count, pr_number: exact.pr_number }
+    if (normalized.length >= SHORT_SHA_MIN_LEN) {
+      const key = normalized.slice(0, Math.min(SHORT_SHA_MAX_LEN, normalized.length))
+      const fromPrefix = prEvidenceByHeadShaPrefix.get(key)
+      if (fromPrefix) return fromPrefix
+    }
+    // Preserve legacy fallback for very short shas or unusual truncations.
     for (const [fullSha, entry] of prEvidenceByHeadSha.entries()) {
       if (fullSha.startsWith(normalized) || normalized.startsWith(fullSha)) {
         return { approvals_count: entry.approvals_count, pr_number: entry.pr_number }
       }
     }
     return null
-  }, [prEvidenceByHeadSha])
+  }, [prEvidenceByHeadSha, prEvidenceByHeadShaPrefix])
 
   const selectedTicketDetails = selectedTicketId
     ? (jiraTicketDetails[selectedTicketId] ?? (ticketCoverage?.tickets_without_commits ?? []).find((t) => typeof t.ticket_id === 'string' && t.ticket_id === selectedTicketId) ?? null)
@@ -157,6 +196,8 @@ export function RecentCommitsTable() {
               const prEvidence = isCommit ? findPrEvidenceForLog(log) : null
               const ticketIds = isCommit ? extractTicketIdsFromCommitLog(log) : []
               const isSynthetic = isLikelySyntheticEvent(log)
+              const shortCommitSha = isCommit ? getShortCommitSha(log) : null
+              const detailPreview = getLogDetailPreview(log)
               return (
                 <Fragment key={log.id}>
                   <tr className="hover:bg-white/1.5 transition-colors">
@@ -167,7 +208,7 @@ export function RecentCommitsTable() {
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <Badge variant="neutral">{log.event_type}</Badge>
                           {isSynthetic && <Badge variant="neutral">aparente test</Badge>}
-                          {isCommit && getShortCommitSha(log) && <code className="text-[11px] text-surface-300 mono-data">{getShortCommitSha(log)}</code>}
+                          {isCommit && shortCommitSha && <code className="text-[11px] text-surface-300 mono-data">{shortCommitSha}</code>}
                           {pipelineRun && <Badge variant={pipelineRun.status === 'success' ? 'success' : pipelineRun.status === 'failure' ? 'danger' : 'warning'}>ci:{pipelineRun.status}</Badge>}
                           {prEvidence && <Badge variant={prEvidence.approvals_count >= 2 ? 'success' : 'danger'}>PR #{prEvidence.pr_number}</Badge>}
                           {ticketIds.slice(0, 2).map((ticketId) => (
@@ -183,7 +224,7 @@ export function RecentCommitsTable() {
                             </button>
                           )}
                         </div>
-                        {getLogDetailPreview(log) && <div className="text-xs text-surface-300 max-w-64 truncate" title={getLogDetailPreview(log) ?? undefined}>{getLogDetailPreview(log)}</div>}
+                        {detailPreview && <div className="text-xs text-surface-300 max-w-64 truncate" title={detailPreview}>{detailPreview}</div>}
                       </div>
                     </td>
                     <td className="py-2.5 pr-4 text-xs text-surface-300">{log.repo_name || '-'}</td>

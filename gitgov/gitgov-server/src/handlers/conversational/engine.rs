@@ -269,9 +269,34 @@ fn finalize_chat_response(
     conversation_key: &str,
     session: &mut ConversationState,
     nlp: &NlpAnalysis,
-    status_code: StatusCode,
+    mut status_code: StatusCode,
     mut response: ChatAskResponse,
 ) -> (StatusCode, Json<ChatAskResponse>) {
+    if status_code == StatusCode::INTERNAL_SERVER_ERROR {
+        // Degrade gracefully on transient backend failures so chat UX does not look like an app crash.
+        status_code = StatusCode::OK;
+        if response.status == "error" {
+            response.status = "insufficient_data".to_string();
+        }
+        if response.answer.trim().is_empty() {
+            response.answer = if nlp.entities.language == "en" {
+                "I could not complete that query due to temporary backend pressure. Please retry in a few seconds.".to_string()
+            } else {
+                "No pude completar esa consulta por presión temporal del backend. Reintenta en unos segundos.".to_string()
+            };
+        } else if nlp.entities.language == "en" {
+            response.answer = format!(
+                "{} Retry in a few seconds.",
+                response.answer.trim()
+            );
+        } else {
+            response.answer = format!(
+                "{} Reintenta en unos segundos.",
+                response.answer.trim()
+            );
+        }
+    }
+
     response.answer = sanitize_chat_answer_text(&response.answer);
     update_learning(session, nlp.intent, &response.status);
     push_turn(session, "assistant", &response.answer, nlp.intent.as_str());

@@ -11,7 +11,7 @@
 .PHONY: check test smoke chat-bench all
 
 SERVER_URL ?= http://127.0.0.1:3000
-API_KEY    ?= 57f1ed59-371d-46ef-9fdf-508f59bc4963
+API_KEY    ?=
 CHAT_REQUESTS ?= 120
 CHAT_CONCURRENCY ?= 12
 CHAT_SCENARIO ?= mixed
@@ -24,6 +24,7 @@ test:
 	cargo test
 
 smoke:
+	@if [ -z "$(API_KEY)" ]; then echo "API_KEY is required (export API_KEY=... or pass API_KEY=...)"; exit 1; fi
 	@echo ""
 	@echo "Running smoke/contract test against $(SERVER_URL)"
 	@echo "Requires server to be running. Start with: cargo run"
@@ -31,6 +32,7 @@ smoke:
 	SERVER_URL=$(SERVER_URL) API_KEY=$(API_KEY) bash tests/smoke_contract.sh
 
 chat-bench:
+	@if [ -z "$(API_KEY)" ]; then echo "API_KEY is required (export API_KEY=... or pass API_KEY=...)"; exit 1; fi
 	@echo ""
 	@echo "Running chat capacity benchmark against $(SERVER_URL)"
 	@echo "Requests=$(CHAT_REQUESTS) Concurrency=$(CHAT_CONCURRENCY) Scenario=$(CHAT_SCENARIO)"

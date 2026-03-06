@@ -1,0 +1,237 @@
+{
+  "timestamp_ms": 1772762299574,
+  "server_url": "http://127.0.0.1:3030",
+  "scope": "tuning-live-20260305",
+  "requests_per_ttl": 220,
+  "concurrency": 16,
+  "holders": 20,
+  "runs": [
+    {
+      "lease_ttl_ms": 2500,
+      "total_requests": 220,
+      "granted": 56,
+      "denied": 164,
+      "denied_ratio": 0.7454545454545455,
+      "http_counts": {
+        "200": 220
+      },
+      "mode_counts": {
+        "server_lease": 170,
+        "db_error_fail_open": 50
+      },
+      "wait_ms": {
+        "avg": 1488.509090909091,
+        "p50": 1817.5,
+        "p95": 2407.9499999999994,
+        "p99": 2499.0,
+        "max": 2499.0,
+        "denied_avg": 1996.780487804878,
+        "denied_p95": 2491.0
+      },
+      "latency_ms": {
+        "avg": 382.56778864094736,
+        "p95": 772.4163749953731,
+        "p99": 1000.7543670060113,
+        "max": 1003.2369999680668
+      },
+      "duration_sec": 5.735908000031486,
+      "throughput_rps": 38.354869010938174,
+      "server_metrics_delta": {
+        "total_requests": 220,
+        "granted_requests": 56,
+        "denied_requests": 164,
+        "fail_open_disabled_requests": 0,
+        "fail_open_db_error_requests": 50,
+        "ttl_clamped_requests": 0,
+        "wait_clamped_requests": 0,
+        "avg_wait_ms_after": 1488,
+        "max_wait_ms_after": 2499
+      },
+      "score": 9535.38872954453
+    },
+    {
+      "lease_ttl_ms": 4000,
+      "total_requests": 220,
+      "granted": 7,
+      "denied": 13,
+      "denied_ratio": 0.05909090909090909,
+      "http_counts": {
+        "200": 20,
+        "429": 113,
+        "0": 87
+      },
+      "mode_counts": {
+        "server_lease": 13,
+        "http_error": 113,
+        "network_error": 87,
+        "db_error_fail_open": 7
+      },
+      "wait_ms": {
+        "avg": 726.9,
+        "p50": 1117.0,
+        "p95": 1121.0,
+        "p99": 1121.0,
+        "max": 1121.0,
+        "denied_avg": 1118.3076923076924,
+        "denied_p95": 1121.0
+      },
+      "latency_ms": {
+        "avg": 37.35222772864456,
+        "p95": 205.45109498198144,
+        "p99": 736.0378100129311,
+        "max": 755.243799998425
+      },
+      "duration_sec": 0.9597013999009505,
+      "throughput_rps": 229.23796925033756,
+      "server_metrics_delta": {
+        "total_requests": 20,
+        "granted_requests": 7,
+        "denied_requests": 13,
+        "fail_open_disabled_requests": 0,
+        "fail_open_db_error_requests": 7,
+        "ttl_clamped_requests": 0,
+        "wait_clamped_requests": 0,
+        "avg_wait_ms_after": 1425,
+        "max_wait_ms_after": 2499
+      },
+      "score": 1528.7993099054872
+    },
+    {
+      "lease_ttl_ms": 5000,
+      "total_requests": 220,
+      "granted": 0,
+      "denied": 0,
+      "denied_ratio": 0.0,
+      "http_counts": {
+        "0": 136,
+        "429": 84
+      },
+      "mode_counts": {
+        "network_error": 136,
+        "http_error": 84
+      },
+      "wait_ms": {
+        "avg": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "denied_avg": 0.0,
+        "denied_p95": 0.0
+      },
+      "latency_ms": {
+        "avg": 5.093813635705208,
+        "p95": 7.502950046909971,
+        "p99": 8.670887966873124,
+        "max": 9.55029996111989
+      },
+      "duration_sec": 0.0819167000008747,
+      "throughput_rps": 2685.6550617597004,
+      "server_metrics_delta": {
+        "total_requests": 0,
+        "granted_requests": 0,
+        "denied_requests": 0,
+        "fail_open_disabled_requests": 0,
+        "fail_open_db_error_requests": 0,
+        "ttl_clamped_requests": 0,
+        "wait_clamped_requests": 0,
+        "avg_wait_ms_after": 1425,
+        "max_wait_ms_after": 2499
+      },
+      "score": 1.5005900093819944
+    },
+    {
+      "lease_ttl_ms": 7000,
+      "total_requests": 220,
+      "granted": 0,
+      "denied": 0,
+      "denied_ratio": 0.0,
+      "http_counts": {
+        "0": 148,
+        "429": 72
+      },
+      "mode_counts": {
+        "network_error": 148,
+        "http_error": 72
+      },
+      "wait_ms": {
+        "avg": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "denied_avg": 0.0,
+        "denied_p95": 0.0
+      },
+      "latency_ms": {
+        "avg": 4.804375000425022,
+        "p95": 7.381965004606168,
+        "p99": 8.705622047418728,
+        "max": 8.954499964602292
+      },
+      "duration_sec": 0.07774999993853271,
+      "throughput_rps": 2829.5819958061315,
+      "server_metrics_delta": {
+        "total_requests": 0,
+        "granted_requests": 0,
+        "denied_requests": 0,
+        "fail_open_disabled_requests": 0,
+        "fail_open_db_error_requests": 0,
+        "ttl_clamped_requests": 0,
+        "wait_clamped_requests": 0,
+        "avg_wait_ms_after": 1425,
+        "max_wait_ms_after": 2499
+      },
+      "score": 1.4763930009212336
+    }
+  ],
+  "best": {
+    "lease_ttl_ms": 7000,
+    "total_requests": 220,
+    "granted": 0,
+    "denied": 0,
+    "denied_ratio": 0.0,
+    "http_counts": {
+      "0": 148,
+      "429": 72
+    },
+    "mode_counts": {
+      "network_error": 148,
+      "http_error": 72
+    },
+    "wait_ms": {
+      "avg": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "max": 0.0,
+      "denied_avg": 0.0,
+      "denied_p95": 0.0
+    },
+    "latency_ms": {
+      "avg": 4.804375000425022,
+      "p95": 7.381965004606168,
+      "p99": 8.705622047418728,
+      "max": 8.954499964602292
+    },
+    "duration_sec": 0.07774999993853271,
+    "throughput_rps": 2829.5819958061315,
+    "server_metrics_delta": {
+      "total_requests": 0,
+      "granted_requests": 0,
+      "denied_requests": 0,
+      "fail_open_disabled_requests": 0,
+      "fail_open_db_error_requests": 0,
+      "ttl_clamped_requests": 0,
+      "wait_clamped_requests": 0,
+      "avg_wait_ms_after": 1425,
+      "max_wait_ms_after": 2499
+    },
+    "score": 1.4763930009212336
+  },
+  "recommended_env": {
+    "GITGOV_OUTBOX_SERVER_LEASE_TTL_MS": 7000,
+    "GITGOV_OUTBOX_GLOBAL_COORD_WINDOW_MS": 42000,
+    "GITGOV_OUTBOX_GLOBAL_COORD_MAX_DEFERRAL_MS": 2800
+  }
+}

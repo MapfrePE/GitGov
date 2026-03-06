@@ -188,11 +188,7 @@ pub fn get_branch_sync_status(
         }
     };
 
-    let upstream_name = upstream_branch
-        .name()
-        .ok()
-        .flatten()
-        .map(|s| s.to_string());
+    let upstream_name = upstream_branch.name().ok().flatten().map(|s| s.to_string());
 
     let upstream_oid = match upstream_branch.get().target() {
         Some(oid) => oid,

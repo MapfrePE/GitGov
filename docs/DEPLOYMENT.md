@@ -68,7 +68,7 @@ Si ya existe el volumen, los scripts **no** se vuelven a ejecutar.
 | Recurso | Valor |
 |---------|-------|
 | Server Docker | `http://localhost:3001` |
-| API Key admin (dev) | `57f1ed59-371d-46ef-9fdf-508f59bc4963` |
+| API Key admin (dev) | `<YOUR_API_KEY>` |
 | PostgreSQL host | `localhost:5433` |
 | PostgreSQL db/user | `gitgov` / `gitgov` |
 | PostgreSQL password | `gitgov_dev_password` |
@@ -77,7 +77,7 @@ Si ya existe el volumen, los scripts **no** se vuelven a ejecutar.
 
 En la configuración del Control Plane:
 - URL: `http://127.0.0.1:3001` (server Docker)
-- API Key: `57f1ed59-371d-46ef-9fdf-508f59bc4963`
+- API Key: `<YOUR_API_KEY>`
 
 > **Golden Path diario (server local nativo):** usar `http://127.0.0.1:3000` para evitar split-brain.
 
@@ -92,7 +92,7 @@ docker compose up --build -d
 
 ```bash
 curl http://localhost:3001/health
-curl -H "Authorization: Bearer 57f1ed59-371d-46ef-9fdf-508f59bc4963" http://localhost:3001/stats
+curl -H "Authorization: Bearer <YOUR_API_KEY>" http://localhost:3001/stats
 ```
 
 ---

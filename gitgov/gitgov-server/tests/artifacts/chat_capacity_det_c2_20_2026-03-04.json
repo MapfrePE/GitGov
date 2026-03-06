@@ -1,0 +1,195 @@
+{
+  "config": {
+    "server_url": "http://127.0.0.1:3000",
+    "requests": 20,
+    "concurrency": 2,
+    "timeout_sec": 25.0,
+    "scenario": "deterministic"
+  },
+  "summary": {
+    "total_requests": 20,
+    "duration_sec": 5.0908820000477135,
+    "throughput_rps": 3.9285923342581017,
+    "http_counts": {
+      "200": 20
+    },
+    "chat_status_counts": {
+      "ok": 19,
+      "insufficient_data": 1
+    },
+    "error_counts": {},
+    "latency_ms": {
+      "min": 196.27160002710298,
+      "max": 1174.5277000009082,
+      "avg": 505.6864849932026,
+      "p50": 494.4637499866076,
+      "p95": 1013.1328649877106,
+      "p99": 1142.2487329982685,
+      "ok_p50": 494.4637499866076,
+      "ok_p95": 1013.1328649877106,
+      "ok_p99": 1142.2487329982685
+    }
+  },
+  "samples": [
+    {
+      "idx": 0,
+      "question": "¿Cuántos pushes bloqueados tuvo el equipo este mes?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 1174.53,
+      "error_kind": null
+    },
+    {
+      "idx": 1,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 1004.64,
+      "error_kind": null
+    },
+    {
+      "idx": 2,
+      "question": "qué rol tiene el usuario mapfrepe?",
+      "http_code": 200,
+      "chat_status": "insufficient_data",
+      "latency_ms": 489.84,
+      "error_kind": null
+    },
+    {
+      "idx": 3,
+      "question": "y del usuario mapfrepe en todo el historial?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 500.89,
+      "error_kind": null
+    },
+    {
+      "idx": 4,
+      "question": "y del usuario mapfrepe en todo el historial?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 494.15,
+      "error_kind": null
+    },
+    {
+      "idx": 5,
+      "question": "Muéstrame todos los commits de dev1 entre 2026-01-01 y 2026-03-01",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 718.43,
+      "error_kind": null
+    },
+    {
+      "idx": 6,
+      "question": "¿Cuántos pushes bloqueados tuvo el equipo este mes?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 492.61,
+      "error_kind": null
+    },
+    {
+      "idx": 7,
+      "question": "que es un webhook?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 223.09,
+      "error_kind": null
+    },
+    {
+      "idx": 8,
+      "question": "¿Cuántos pushes bloqueados tuvo el equipo este mes?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 518.08,
+      "error_kind": null
+    },
+    {
+      "idx": 9,
+      "question": "en que me puedes ayudar?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 196.27,
+      "error_kind": null
+    },
+    {
+      "idx": 10,
+      "question": "pushes sin ticket del usuario mapfrepe",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 760.05,
+      "error_kind": null
+    },
+    {
+      "idx": 11,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 425.09,
+      "error_kind": null
+    },
+    {
+      "idx": 12,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 501.65,
+      "error_kind": null
+    },
+    {
+      "idx": 13,
+      "question": "¿Cuántos pushes bloqueados tuvo el equipo este mes?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 494.78,
+      "error_kind": null
+    },
+    {
+      "idx": 14,
+      "question": "y del usuario mapfrepe en todo el historial?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 499.23,
+      "error_kind": null
+    },
+    {
+      "idx": 15,
+      "question": "y del usuario mapfrepe en todo el historial?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 496.92,
+      "error_kind": null
+    },
+    {
+      "idx": 16,
+      "question": "que es un webhook?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 219.52,
+      "error_kind": null
+    },
+    {
+      "idx": 17,
+      "question": "en que me puedes ayudar?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 208.66,
+      "error_kind": null
+    },
+    {
+      "idx": 18,
+      "question": "¿Quién hizo push a main esta semana sin ticket de Jira?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 443.75,
+      "error_kind": null
+    },
+    {
+      "idx": 19,
+      "question": "que es un webhook?",
+      "http_code": 200,
+      "chat_status": "ok",
+      "latency_ms": 251.55,
+      "error_kind": null
+    }
+  ]
+}

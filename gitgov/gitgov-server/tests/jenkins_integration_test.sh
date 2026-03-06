@@ -5,11 +5,16 @@
 set -e
 
 SERVER_URL="${SERVER_URL:-http://localhost:3000}"
-API_KEY="${API_KEY:-57f1ed59-371d-46ef-9fdf-508f59bc4963}"
+API_KEY="${API_KEY:-${GITGOV_API_KEY:-}}"
 JENKINS_SECRET="${JENKINS_SECRET:-}"
 REPO_FULL_NAME="${REPO_FULL_NAME:-MapfrePE/GitGov}"
 BRANCH="${BRANCH:-main}"
 COMMIT_SHA="${COMMIT_SHA:-abc123def4567890}"
+
+if [ -z "$API_KEY" ]; then
+  echo "✗ Missing API key. Set API_KEY or GITGOV_API_KEY."
+  exit 1
+fi
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -174,4 +179,3 @@ main() {
 }
 
 main "$@"
-

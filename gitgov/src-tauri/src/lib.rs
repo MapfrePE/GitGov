@@ -16,7 +16,11 @@ fn embedded_window_icon() -> Option<tauri::image::Image<'static>> {
     let decoded = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png).ok()?;
     let rgba = decoded.into_rgba8();
     let (width, height) = rgba.dimensions();
-    Some(tauri::image::Image::new_owned(rgba.into_raw(), width, height))
+    Some(tauri::image::Image::new_owned(
+        rgba.into_raw(),
+        width,
+        height,
+    ))
 }
 
 fn normalize_loopback_url(url: &str) -> String {
@@ -29,10 +33,9 @@ fn normalize_loopback_url(url: &str) -> String {
         return trimmed.to_string();
     };
 
-    if parsed.host_str() == Some("localhost")
-        && parsed.set_host(Some("127.0.0.1")).is_ok() {
-            return parsed.to_string();
-        }
+    if parsed.host_str() == Some("localhost") && parsed.set_host(Some("127.0.0.1")).is_ok() {
+        return parsed.to_string();
+    }
 
     trimmed.to_string()
 }
@@ -55,6 +58,19 @@ pub fn run() {
         .with_target(false)
         .with_thread_ids(false)
         .init();
+
+    // Best-effort migration of legacy local token files into keyring.
+    // Never block startup: failures are logged by auth module and can be retried on login.
+    let migration_report = github::migrate_legacy_tokens_from_disk();
+    if migration_report.scanned_files > 0 {
+        tracing::info!(
+            scanned_files = migration_report.scanned_files,
+            migrated_tokens = migration_report.migrated_tokens,
+            skipped_files = migration_report.skipped_files,
+            failed_files = migration_report.failed_files,
+            "Legacy token migration sweep executed at startup"
+        );
+    }
 
     let app_data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -112,21 +128,18 @@ pub fn run() {
     // Reads current_user.json from disk (same location as auth_commands.rs uses).
     let outbox_hb = Arc::clone(&outbox);
     std::thread::spawn(move || {
-        const HEARTBEAT_INTERVAL: std::time::Duration =
-            std::time::Duration::from_secs(600); // 10 minutes
+        const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600); // 10 minutes
         loop {
             std::thread::sleep(HEARTBEAT_INTERVAL);
             let user_file = dirs::data_local_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join("gitgov")
                 .join("current_user.json");
-            let login_opt = std::fs::read_to_string(&user_file)
-                .ok()
-                .and_then(|json| {
-                    serde_json::from_str::<models::AuthenticatedUser>(&json)
-                        .ok()
-                        .map(|u| u.login)
-                });
+            let login_opt = std::fs::read_to_string(&user_file).ok().and_then(|json| {
+                serde_json::from_str::<models::AuthenticatedUser>(&json)
+                    .ok()
+                    .map(|u| u.login)
+            });
             if let Some(user_login) = login_opt {
                 let event = outbox::OutboxEvent::new(
                     "heartbeat".to_string(),

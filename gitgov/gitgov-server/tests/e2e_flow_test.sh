@@ -5,7 +5,12 @@
 set -e
 
 SERVER_URL="${SERVER_URL:-http://localhost:3000}"
-API_KEY="${API_KEY:-57f1ed59-371d-46ef-9fdf-508f59bc4963}"
+API_KEY="${API_KEY:-${GITGOV_API_KEY:-}}"
+
+if [ -z "$API_KEY" ]; then
+    echo "❌ Missing API key. Set API_KEY or GITGOV_API_KEY."
+    exit 1
+fi
 
 echo "========================================="
 echo "GitGov E2E Flow Test"
@@ -20,6 +25,22 @@ NC='\033[0m'
 
 pass() { echo -e "${GREEN}✅ $1${NC}"; }
 fail() { echo -e "${RED}❌ $1${NC}"; exit 1; }
+
+new_uuid() {
+  local u=""
+  u=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '\r\n' || true)
+  if [ -n "$u" ]; then echo "$u"; return 0; fi
+  u=$(powershell.exe -NoProfile -Command "[System.Guid]::NewGuid().ToString().ToLowerInvariant()" 2>/dev/null | tr -d '\r\n' || true)
+  if [ -n "$u" ]; then echo "$u"; return 0; fi
+  u=$(python - <<'PY' 2>/dev/null || true
+import uuid
+print(str(uuid.uuid4()))
+PY
+)
+  u=$(echo "$u" | tr -d '\r\n')
+  if [ -n "$u" ]; then echo "$u"; return 0; fi
+  cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '\r\n' || true
+}
 
 # 1. Health Check
 echo "1. Health Check..."
@@ -61,10 +82,8 @@ fi
 # 4. Send Client Event
 echo ""
 echo "4. Send Client Event..."
-EVENT_UUID=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || \
-  powershell.exe -NoProfile -Command "[System.Guid]::NewGuid().ToString()" 2>/dev/null | tr -d '\r\n' || \
-  cat /proc/sys/kernel/random/uuid 2>/dev/null || \
-  printf '%08x-%04x-%04x-%04x-%012x' $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM)
+EVENT_UUID=$(new_uuid)
+[ -n "$EVENT_UUID" ] || fail "UUID generation failed in this environment"
 TIMESTAMP=$(date +%s)000
 
 EVENT_RESPONSE=$(curl -s -X POST "$SERVER_URL/events" \
@@ -74,7 +93,7 @@ EVENT_RESPONSE=$(curl -s -X POST "$SERVER_URL/events" \
         \"events\": [{
             \"event_uuid\": \"$EVENT_UUID\",
             \"event_type\": \"successful_push\",
-            \"user_login\": \"test_user\",
+            \"user_login\": \"manual_check\",
             \"files\": [],
             \"branch\": \"feat/test\",
             \"status\": \"success\",

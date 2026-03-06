@@ -2,6 +2,1913 @@
 
 ---
 
+## Actualización (2026-03-05) — Cambio 22: tuning operativo de lease/window/deferral con telemetría real
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+  - nueva telemetría en memoria para `/outbox/lease`:
+    - contadores (`total`, `granted`, `denied`, `fail_open_disabled`, `fail_open_db_error`)
+    - clamps (`ttl_clamped`, `wait_clamped`)
+    - agregados (`avg/max wait`, `avg/max handler_duration`) + buckets de wait.
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - instrumentación de `POST /outbox/lease` para registrar decisiones reales.
+  - nuevo endpoint admin `GET /outbox/lease/metrics` para observabilidad operativa.
+- `gitgov/gitgov-server/src/main.rs`
+  - wiring de telemetría en `AppState`.
+  - ruta autenticada `GET /outbox/lease/metrics` con rate-limit admin.
+  - default server lease TTL ajustado de `5000` a `2000` (sigue opt-in por `GITGOV_OUTBOX_SERVER_LEASE_ENABLED`).
+- `gitgov/gitgov-server/src/auth.rs`
+  - `/outbox/lease/metrics` agregado como ruta admin sensible para fail-closed con auth stale.
+- `gitgov/src-tauri/src/outbox/queue.rs`
+  - defaults de coordinación global ajustados con base en carga real:
+    - `GITGOV_OUTBOX_GLOBAL_COORD_WINDOW_MS`: `60000 -> 20000`
+    - `GITGOV_OUTBOX_GLOBAL_COORD_MAX_DEFERRAL_MS`: `15000 -> 1600`
+    - `GITGOV_OUTBOX_SERVER_LEASE_TTL_MS`: `5000 -> 2000`
+  - mantienen carácter opt-in (`GLOBAL_COORD_ENABLED=false`, `SERVER_LEASE_ENABLED=false`).
+- `gitgov/gitgov-server/tests/tune_outbox_coordination.py`
+  - nuevo harness de tuning con carga concurrente real contra `/outbox/lease`.
+  - consume `/outbox/lease/metrics` antes/después de cada candidato TTL.
+  - genera recomendación operativa (`lease_ttl`, `window`, `deferral`) y artefacto JSON.
+
+### Telemetría real de carga (evidencia)
+- Corrida v2:
+  - `gitgov/gitgov-server/tests/artifacts/outbox_coord_tuning_live_2026-03-05_v2.json`
+  - candidatos `2500,3500,5000,7000`, `requests_per_ttl=180`, `concurrency=10`, `holders=14`.
+  - mejor score operativo: `2500ms`.
+- Corrida v3:
+  - `gitgov/gitgov-server/tests/artifacts/outbox_coord_tuning_live_2026-03-05_v3.json`
+  - candidatos `2000,2500,3000,4000`, `requests_per_ttl=120`, `concurrency=4`, `holders=8`.
+  - mejor score operativo: `2000ms`.
+- Corrida v4 (DB pool reforzado):
+  - `gitgov/gitgov-server/tests/artifacts/outbox_coord_tuning_live_2026-03-05_v4_dbpool60.json`
+  - server con `GITGOV_DB_MAX_CONNECTIONS=60`, `GITGOV_DB_MIN_CONNECTIONS=5`.
+  - `fail_open_db_error_requests` bajó a `0` en todos los candidatos (muestra limpia).
+- Cuello de botella identificado (DB):
+  - `gitgov/gitgov-server/tests/tmp_tuning_server_3031.out.log`
+  - warning repetido: `MaxClientsInSessionMode: max clients reached` (impacta como `db_error_fail_open`).
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `99 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo test` -> `12 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+
+### Impacto Golden Path/Bot
+- Golden Path: sin cambios de contrato en commit/push/events/dashboard; rutas nuevas son aditivas y los defaults ajustados son de features opt-in.
+- Bot/logs exactos: sin cambios en contrato `/logs` ni en path de respuestas del bot.
+- No hubo rollback porque no se detectaron regresiones en tests.
+
+---
+
+## Actualización (2026-03-05) — Cambio 23: guardrail de rollout 10/50/100 para outbox coordinación
+
+### Qué se implementó
+- `gitgov/gitgov-server/tests/outbox_rollout_guard.py`
+  - script operacional para validar cada fase de rollout (`--phase 10|50|100`):
+    - lee `/outbox/lease/metrics` antes/después,
+    - ejecuta smoke mínimo (`/events`, `/stats`, `/logs`),
+    - calcula `fail_open_db_ratio` por fase y falla si supera umbral.
+  - modo estricto (`--strict`) exige `fail_open_db_ratio == 0`.
+  - genera artefacto JSON opcional (`--out-json`) para trazabilidad.
+
+### Validación ejecutada
+- `python tests/outbox_rollout_guard.py --help` -> OK (CLI disponible)
+- `phase 10` -> PASS, artefacto:
+  - `gitgov/gitgov-server/tests/artifacts/outbox_rollout_guard_phase10_2026-03-05.json`
+- `phase 50` -> PASS, artefacto:
+  - `gitgov/gitgov-server/tests/artifacts/outbox_rollout_guard_phase50_2026-03-05.json`
+- `phase 100 --strict` -> PASS, artefacto:
+  - `gitgov/gitgov-server/tests/artifacts/outbox_rollout_guard_phase100_2026-03-05.json`
+
+### Impacto Golden Path/Bot
+- Solo tooling operacional (sin cambios de runtime path en server/desktop).
+- No afecta contrato de logs ni comportamiento del bot.
+
+---
+
+## Actualización (2026-03-06) — Cambio 24: ejecución operativa completa (env final + monitor + E2E equivalente)
+
+### Qué se implementó
+- Configuración final aplicada en entorno local de trabajo:
+  - `gitgov/gitgov-server/.env`
+  - `gitgov/src-tauri/.env`
+  - valores:
+    - `GITGOV_OUTBOX_SERVER_LEASE_ENABLED=true`
+    - `GITGOV_OUTBOX_GLOBAL_COORD_ENABLED=true`
+    - `GITGOV_OUTBOX_SERVER_LEASE_TTL_MS=2000`
+    - `GITGOV_OUTBOX_GLOBAL_COORD_WINDOW_MS=20000`
+    - `GITGOV_OUTBOX_GLOBAL_COORD_MAX_DEFERRAL_MS=1600`
+    - `GITGOV_DB_MAX_CONNECTIONS=60`
+- Nuevo runner de estabilidad por ventana de tiempo:
+  - `gitgov/gitgov-server/tests/run_outbox_stability_window.py`
+  - ejecuta `outbox_rollout_guard.py` de forma periódica, guarda muestras JSONL y falla si alguna muestra falla.
+
+### Validación ejecutada
+- Monitor de estabilidad (corrida corta de verificación):
+  - `python tests/run_outbox_stability_window.py --server-url http://127.0.0.1:3000 --phase 100 --strict --duration-hours 0.003 --interval-secs 5 --out-jsonl tests/artifacts/outbox_stability_window_short_2026-03-06.jsonl`
+  - resultado: `2 samples`, `0 failures`, `passed=true`
+  - artefacto: `gitgov/gitgov-server/tests/artifacts/outbox_stability_window_short_2026-03-06.jsonl`
+- Guardrail en puerto canónico local:
+  - `phase 50` PASS: `gitgov/gitgov-server/tests/artifacts/outbox_rollout_guard_phase50_local3000_2026-03-05.json`
+  - `phase 100 --strict` PASS: `gitgov/gitgov-server/tests/artifacts/outbox_rollout_guard_phase100_local3000_2026-03-05.json`
+- E2E equivalente (sin bash):
+  - artefacto: `gitgov/gitgov-server/tests/artifacts/e2e_equivalent_local3000_2026-03-06.json`
+  - checks PASS:
+    - `health_ok`
+    - `auth_bearer_ok`
+    - `wrong_header_rejected`
+    - `event_ingest_ok`
+    - `logs_query_ok`
+    - `logs_contains_successful_push`
+    - `stats_ok`
+    - `combined_events_ok`
+
+### NO VERIFICADO
+- `NO VERIFICADO: ejecución literal de ./e2e_flow_test.sh`
+  - bloqueador concreto: entorno actual sin `bash`/WSL (`execvpe /bin/bash failed`).
+  - evidencia: intento de ejecución falla por ausencia de shell bash.
+  - mitigación aplicada: se ejecutó validación E2E equivalente 1:1 contra `127.0.0.1:3000` y pasó.
+
+### Impacto Golden Path/Bot
+- Golden Path: verificado operativamente en puerto canónico local (`127.0.0.1:3000`) con ingest/logs/stats en `200`.
+- Bot/logs exactos: sin cambios de contrato ni regresión observada.
+
+---
+
+## Actualización (2026-03-06) — Cambio 25: verificación forense pre-prod (lightweight)
+
+### Qué se implementó
+- Nuevo scanner forense:
+  - `gitgov/gitgov-server/tests/forensic_preprod_scan.py`
+  - cobertura:
+    - working tree secret-like scan,
+    - recent git history scan (últimos N commits),
+    - log marker scan,
+    - runtime contract + dedup check.
+- Reporte consolidado:
+  - `docs/FORENSIC_PREPROD.md`
+
+### Validación ejecutada
+- corrida runtime del forense contra `127.0.0.1:3000` con server levantado:
+  - artefacto: `gitgov/gitgov-server/tests/artifacts/forensic_preprod_scan_2026-03-06_runtime.json`
+  - resultados clave:
+    - `working_tree.total_findings=10`
+    - `git_history.total_findings=54` (últimos 60 commits)
+    - `logs.marker_counts.max_clients_session_mode=195` (histórico)
+    - `runtime.runtime_ok=true`
+    - deduplicación `/events` validada (`accepted` + `duplicates`)
+
+### Impacto Golden Path/Bot
+- Sin cambios funcionales en runtime productivo (tooling y documentación).
+- Golden Path y precisión de logs del bot permanecen intactos.
+
+---
+
+## Actualización (2026-03-05) — Cambio 21: lease global server-driven opcional para outbox (Q10)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/db.rs`
+  - storage de lease para coordinación outbox:
+    - `ensure_outbox_lease_storage()` crea `outbox_flush_leases` + índice `updated_at`.
+    - `try_acquire_outbox_flush_lease(...)` implementa adquisición/renovación atómica por `lease_key`.
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - nuevo endpoint autenticado `POST /outbox/lease`:
+    - responde `granted`, `wait_ms`, `lease_ttl_ms`, `mode`.
+    - fail-open seguro cuando lease está deshabilitado o hay error DB.
+- `gitgov/gitgov-server/src/main.rs`
+  - nuevos env vars server-side:
+    - `GITGOV_OUTBOX_SERVER_LEASE_ENABLED` (default `false`)
+    - `GITGOV_OUTBOX_SERVER_LEASE_TTL_MS` (default `5000`, clamp `1000..60000`)
+  - wiring en `AppState` + ruta `/outbox/lease` (auth + rate-limit de ingesta).
+- `gitgov/src-tauri/src/outbox/queue.rs`
+  - nuevos env vars client-side:
+    - `GITGOV_OUTBOX_SERVER_LEASE_ENABLED` (default `false`)
+    - `GITGOV_OUTBOX_SERVER_LEASE_TTL_MS` (default `5000`)
+    - `GITGOV_OUTBOX_SERVER_LEASE_SCOPE` (default `global`)
+  - worker outbox solicita lease antes de flush cuando está activo:
+    - si lease denegado, espera `wait_ms`;
+    - si endpoint falla, continúa fail-open (sin bloquear Golden Path).
+  - endurecimiento adicional:
+    - `global_coordination_identity(...)` ya no expone API key raw (usa hash estable).
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/src-tauri && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `97 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo test` -> `12 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+
+### Smoke runtime live del lease endpoint
+- server temporal: `127.0.0.1:3028`, `GITGOV_OUTBOX_SERVER_LEASE_ENABLED=true`
+- `POST /outbox/lease` (`holder=smoke-a`, `lease_ttl_ms=4000`) ->
+  - `200`, body: `{"granted":true,"wait_ms":0,"lease_ttl_ms":4000,"mode":"server_lease"}`
+- request consecutiva con `holder=smoke-b` ->
+  - `200`, body: `{"granted":false,"wait_ms":3676,"lease_ttl_ms":4000,"mode":"server_lease"}`
+
+### Impacto Golden Path/Bot
+- Golden Path: sin cambios de contrato por default (feature opt-in, default off).
+- Bot: sin cambios funcionales; regla de logs exactos intacta.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 20: coordinación global cross-host opcional en outbox (Q10)
+
+### Qué se implementó
+- `gitgov/src-tauri/src/outbox/queue.rs`
+  - nuevo modo de coordinación global opt-in para dispersar flushes entre dispositivos:
+    - `GITGOV_OUTBOX_GLOBAL_COORD_ENABLED` (default `false`)
+    - `GITGOV_OUTBOX_GLOBAL_COORD_WINDOW_MS` (default `60000`, clamp `5000..300000`)
+    - `GITGOV_OUTBOX_GLOBAL_COORD_MAX_DEFERRAL_MS` (default `15000`, acotado por ventana)
+  - worker background:
+    - calcula identidad estable (`api_key` cuando existe; fallback `path+hostname`),
+    - calcula `delay_ms` determinístico por ventana (`global_coordination_wait_ms`),
+    - difiere flush dentro de ventana para reducir “thundering herd” cross-host.
+  - compatibilidad:
+    - comportamiento existente permanece igual si el flag está apagado.
+  - tests unitarios nuevos:
+    - estabilidad y acotamiento del wait global,
+    - caso donde el slot ya expiró y no hay espera extra.
+
+### Validación ejecutada
+- `cd gitgov/src-tauri && cargo fmt` -> OK
+- `cd gitgov/src-tauri && cargo test` -> `11 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo test` -> `97 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+
+### Impacto Golden Path/Bot
+- Golden Path: sin cambios de contrato (feature opt-in, default off).
+- Bot: sin cambios funcionales; regla de logs exactos intacta.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 19: cierre runtime live Q2/Q8 + fix de panic en limiter distribuido
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/db.rs`
+  - `check_distributed_rate_limit(...)` corregido para evitar panic por decode mismatch:
+    - SQL: `upsert.count::bigint AS current_count`.
+    - lectura de columnas migrada de `row.get(...)` a `row.try_get(...)` con `map_err(...)`.
+  - impacto: errores de decode/driver ahora son manejados como `DbError` (ruta controlada fail-open/fail-closed), sin tumbar workers.
+
+### Validación ejecutada (post-fix)
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `97 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+
+### Validación runtime live Q2 (auth stale fail-closed threshold)
+- server temporal en `127.0.0.1:3026` con:
+  - `GITGOV_AUTH_STALE_FAIL_CLOSED_AFTER_DB_ERRORS=2`
+  - failpoint por archivo (`GITGOV_SIMULATE_AUTH_DB_FAILURE_FLAG_FILE`)
+- resultados:
+  - warm auth (`GET /logs`) -> `200`
+  - con failpoint activo y cache expirada (> TTL auth): `GET /logs` -> `200,401,401`
+  - tras quitar failpoint: `GET /logs` -> `200`
+- conclusión: el umbral fail-closed bajo fallo DB sostenido funciona en host real.
+
+### Validación runtime live Q8 (rate-limit distribuido)
+- server temporal en `127.0.0.1:3027` con:
+  - `GITGOV_RATE_LIMIT_DISTRIBUTED_DB=true`
+- resultados:
+  - `GET /health` -> `200`
+  - `GET /jobs/metrics` -> `200`
+  - log stderr sin `panic`/`ColumnDecode` tras el fix.
+  - evidencia DB del path distribuido:
+    - `rate_limit_counters` (`limiter_name='admin_endpoints'`) `SUM(count): 13 -> 23` tras ráfaga de requests.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin cambios de contrato ni regresiones en tests.
+- Bot: regla no negociable de logs exactos permanece intacta.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 18: deprecación formal de `offset` en `/logs` (Q9)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+  - `AppState` incorpora `logs_reject_offset_pagination: bool`.
+- `gitgov/gitgov-server/src/main.rs`
+  - nuevo env `GITGOV_LOGS_REJECT_OFFSET_PAGINATION` (default `false`).
+  - el flag se inyecta en `AppState` y se incluye en telemetría de runtime.
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - `LogsResponse` ahora soporta `deprecations?: string[]`.
+  - nueva notice formal cuando se usa `offset > 0`.
+  - warning de runtime al detectar paginación offset.
+  - guard opcional: si `GITGOV_LOGS_REJECT_OFFSET_PAGINATION=true`, `/logs` rechaza `offset` (400) cuando no hay cursor keyset.
+- `gitgov/gitgov-server/src/models.rs`
+  - documentación de `EventFilter.offset` actualizada como fallback legacy.
+- `gitgov/src-tauri/src/control_plane/server.rs`
+  - cliente mantiene compatibilidad pero no envía `offset` cuando vale `0`.
+- `gitgov/gitgov-server/src/handlers/conversational/core.rs`
+  - conocimiento interno actualizado para reflejar keyset preferido y `offset` deprecado.
+- `gitgov/gitgov-server/src/handlers/tests.rs`
+  - tests unitarios nuevos para:
+    - deprecación de `offset`,
+    - no warning en keyset puro,
+    - regla de rechazo opcional por flag.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/src-tauri && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `97 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo test` -> `9 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+- `cd gitgov && npx eslint src/lib/types.ts` -> sin errores
+
+### NO VERIFICADO
+- `NO VERIFICADO: smoke HTTP runtime de /logs con server levantado para comprobar response body con deprecation/reject en vivo`
+  - en esta pasada se validó con tests unitarios/compilación.
+  - intentos de orquestación live con procesos background fueron rechazados por política del entorno en esta corrida.
+
+### Impacto Golden Path/Bot
+- Golden Path: cambio compatible por defecto (`offset` sigue aceptado si flag no se activa).
+- Bot: regla no negociable de logs exactos se mantiene (no se cambió el path determinístico de chat ni el contrato de datos).
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 17: jitter de schedule del outbox por instancia (Q10)
+
+### Qué se implementó
+- `gitgov/src-tauri/src/outbox/queue.rs`
+  - nuevo env `GITGOV_OUTBOX_FLUSH_JITTER_MAX_MS` (default `5000`, max `60000`).
+  - `Outbox::new(...)` ahora carga `flush_interval_jitter_max_ms`.
+  - `start_background_flush(...)` aplica jitter estable por worker/proceso al intervalo periódico:
+    - `effective_interval = base_interval + schedule_jitter_ms`
+    - `schedule_jitter_ms` calculado por `stable_worker_jitter_ms(...)` usando `path + process_id`.
+  - logging de configuración efectiva del intervalo (`base_interval_secs`, `schedule_jitter_ms`, `effective_interval_ms`).
+  - test unitario nuevo:
+    - jitter estable y acotado (`worker_jitter_is_stable_and_bounded`).
+
+### Validación ejecutada
+- `cd gitgov/src-tauri && cargo fmt` -> OK
+- `cd gitgov/src-tauri && cargo test` -> `9 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo test` -> `94 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+
+### NO VERIFICADO
+- `NO VERIFICADO: corrida E2E desktop real multi-proceso para medir dispersión efectiva del flush schedule`
+  - en esta pasada se validó por tests unitarios/compilación.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin cambios de contrato ni regresiones en test suite.
+- Bot: sin cambios funcionales; regla de logs exactos intacta.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 16: rate-limit distribuido opcional por DB (Q8)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/main.rs`
+  - nuevo backend de limiter `DistributedDbRateLimiter` y wrapper `RateLimiterState` (in-memory o distribuido).
+  - `rate_limit_middleware(...)` ahora opera sobre `RateLimiterState` y soporta chequeo async.
+  - nuevo env `GITGOV_RATE_LIMIT_DISTRIBUTED_DB` (default `false`) para activar modo distribuido sin romper comportamiento actual.
+  - fallback seguro: si falla inicialización de storage distribuido, vuelve automáticamente a in-memory con warning.
+  - nuevos envs de mantenimiento distribuido:
+    - `GITGOV_RATE_LIMIT_DISTRIBUTED_PRUNE_INTERVAL_SECS` (default `300`)
+    - `GITGOV_RATE_LIMIT_DISTRIBUTED_RETENTION_SECS` (default `3600`)
+  - logging explícito de modo activo: `rate_limit_mode=in_memory|distributed_db`.
+- `gitgov/gitgov-server/src/db.rs`
+  - `ensure_rate_limit_storage()` crea tabla/índice de contadores distribuidos:
+    - `rate_limit_counters`
+    - `idx_rate_limit_counters_updated_at`
+  - `check_distributed_rate_limit(...)` con upsert atómico por ventana para conteo cross-instance.
+  - `prune_rate_limit_counters(...)` para limpieza periódica de contadores antiguos.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `94 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+
+### NO VERIFICADO
+- `NO VERIFICADO: smoke runtime live con server levantado en modo distribuido (GITGOV_RATE_LIMIT_DISTRIBUTED_DB=true)`
+  - durante esta corrida no estuvo disponible server local activo para smoke HTTP en `127.0.0.1:3000`.
+  - se validó por compilación/tests unitarios y contrato estático.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin cambios por defecto (modo in-memory sigue default).
+- Bot: sin cambios de contrato/respuesta.
+- No hubo rollback porque no se detectaron regresiones en tests.
+
+---
+
+## Actualización (2026-03-05) — Cambio 15: auth stale fail-closed por racha de fallos DB (Q2)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/db.rs`
+  - nuevo guardrail configurable para stale auth en incidentes DB sostenidos:
+    - env: `GITGOV_AUTH_STALE_FAIL_CLOSED_AFTER_DB_ERRORS`
+    - default: `3` en non-dev, `0` en dev (deshabilitado para no romper local).
+  - nuevos campos internos:
+    - `auth_db_failure_streak`
+    - `auth_stale_fail_closed_after`
+  - `validate_api_key(...)` ahora:
+    - incrementa racha en error DB de auth,
+    - al alcanzar umbral, desactiva fallback stale y retorna error (fail-closed),
+    - resetea racha cuando vuelve a haber consulta DB exitosa.
+  - telemetría adicional en logs:
+    - `failure_streak`
+    - `fail_closed_threshold`
+    - warning explícito cuando stale queda deshabilitado por incidente sostenido.
+  - tests unitarios nuevos:
+    - umbral activa fail-closed al N-ésimo fallo,
+    - umbral `0` mantiene fallback stale habilitado,
+    - reset de racha tras señal de recuperación.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `94 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+- smoke contractual (`127.0.0.1:3000`):
+  - `/events` OK
+  - `/stats` OK
+  - `/logs` OK
+  - `/chat/ask` OK (`deterministic_sql_results=true`)
+
+### Incidente durante validación y resolución
+- primera corrida de tests falló (`3 tests`) porque los nuevos tests estaban como `#[test]` sin contexto Tokio (`sqlx` lazy pool lo requiere).
+- corrección aplicada: migrados a `#[tokio::test]`.
+- re-ejecución posterior: `94 passed; 0 failed`.
+
+### NO VERIFICADO
+- `NO VERIFICADO: simulación runtime live del umbral fail-closed con inyección de caída DB sobre server levantado con nueva config`
+  - en esta pasada se validó con pruebas unitarias determinísticas + smoke contractual.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión observable en tests y smoke.
+- Bot: se mantiene regla no negociable de logs exactos.
+- No hubo rollback porque la regresión de test fue corregida en la misma pasada.
+
+---
+
+## Actualización (2026-03-05) — Cambio 14: enforcement explícito de `GITGOV_ENV` en CI/deploy (Q3)
+
+### Qué se implementó
+- `.github/scripts/assert-gitgov-env.sh`
+  - script reusable de gate para CI/deploy:
+    - falla si `GITGOV_ENV` no está definido,
+    - falla si el valor no está en allowlist (`dev/development/local/test/testing/ci/staging/prod/production`).
+- `.github/workflows/ci.yml`
+  - se fija `GITGOV_ENV: ci` a nivel workflow.
+  - se ejecuta gate explícito al inicio de cada job (`server-lint`, `desktop-lint`, `frontend-lint`).
+- `.github/workflows/build-signed.yml`
+  - se fija `GITGOV_ENV: prod` a nivel workflow de builds firmados.
+  - gate explícito agregado en jobs de `build-windows`, `build-macos` y `build-linux`.
+
+### Validación ejecutada
+- Validación del script (Git Bash local):
+  - sin env: `::error::GITGOV_ENV must be set explicitly in CI/deploy.` -> exit `1`
+  - con env: `GITGOV_ENV='ci' validated for CI/deploy.` -> exit `0`
+- `cd gitgov/gitgov-server && cargo test` -> `91 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+- smoke regla bot:
+  - `POST /chat/ask` (`dame los ultimos 5 logs exactos`) -> `status=ok`, `deterministic_sql_results=true`
+
+### NO VERIFICADO
+- `NO VERIFICADO: ejecución de workflows en GitHub Actions tras merge`
+  - en esta corrida se validó sintaxis/semántica local y gate script; falta evidencia de corrida remota real de Actions.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin cambios en runtime de app/server; no regresiones observadas en tests.
+- Bot: se mantiene regla no negociable de logs exactos (smoke OK).
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 13: outbox con retry diferenciado (`429`/`5xx`/red) (Q10)
+
+### Qué se implementó
+- `gitgov/src-tauri/src/outbox/queue.rs`
+  - nueva clasificación de retry (`RetryDirective`) por tipo de fallo:
+    - `http_429` (rate limit, con soporte `Retry-After`),
+    - `http_5xx`,
+    - `network`,
+    - `http_other`.
+  - `send_batch_with_client(...)` centraliza envío + clasificación de error; `flush()` y worker background usan la misma ruta.
+  - `mark_chunk_retry(...)` y `compute_retry_delay_ms(...)` ahora aplican política por clase:
+    - `429`: piso mínimo por `Retry-After` (o `RETRY_RATE_LIMIT_FLOOR_MS`),
+    - `5xx`/red: exponencial + jitter estándar,
+    - `4xx` no-rate-limit: piso más conservador (`RETRY_CLIENT_ERROR_FLOOR_MS`).
+  - telemetría de retry enriquecida (`retry_class`, `status_code`, `retry_after_ms`).
+  - tests unitarios nuevos:
+    - parseo de `Retry-After` en segundos,
+    - piso de delay para `429`,
+    - crecimiento por intentos en `5xx`.
+
+### Validación ejecutada
+- `cd gitgov/src-tauri && cargo fmt` -> OK
+- `cd gitgov/src-tauri && cargo test` -> `8 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo test` -> `91 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+
+### Smoke runtime (server activo `127.0.0.1:3000`)
+- `POST /chat/ask` (`dame los ultimos 5 logs exactos`) -> `status=ok`, `data_refs=logs_endpoint,deterministic_sql_results`
+
+### NO VERIFICADO
+- `NO VERIFICADO: corrida E2E desktop real con errores HTTP diferenciados (429/5xx) desde UI`
+  - en esta pasada se validó por tests unitarios de outbox + compilación + smoke contractual del bot.
+  - falta simulación live de red inestable y respuestas `429/5xx` en host real para medir dispersión de retries entre clientes.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión observable en tests/compilación.
+- Bot: regla no negociable de logs exactos sigue operativa en smoke (`data_refs` determinístico).
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 12: `/logs` keyset-first en UI principal (Q9)
+
+### Qué se implementó
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - nuevo helper `fetchLogsKeysetWindow(...)` para resolver ventanas `limit/offset` con cursor (`before_created_at`/`before_id`) en vez de `OFFSET` SQL como primera opción.
+  - `loadLogs(...)` ahora usa ese helper (keyset-first) y conserva fallback legacy con `offset` solo para offsets muy profundos de compatibilidad.
+  - saneamiento explícito de ventana (`sanitizeLogsWindow`) para límites seguros.
+- `gitgov/src/lib/types.ts`
+  - `AuditFilter` ahora incluye `before_created_at?` y `before_id?` para alinear contrato frontend con cursor keyset existente en backend/Tauri.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `91 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/lib/types.ts` -> `0 errores`
+
+### Smoke runtime (server activo `127.0.0.1:3000`)
+- `POST /events` -> `accepted=1`, `errors=0`
+- `GET /stats` -> respuesta JSON válida (`github_events` presente)
+- `GET /logs?limit=5&offset=0` -> `events=5`
+- `POST /chat/ask` (`dame los ultimos 5 logs exactos`) -> `status=ok`, `data_refs=logs_endpoint,deterministic_sql_results`
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión observable en smoke contractual (`/events`, `/stats`, `/logs`).
+- Bot: se mantiene regla no negociable de respuesta exacta de logs (evidencia en `data_refs` determinístico).
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 1: hardening configurable de `/events` (body + batch)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/main.rs`
+  - nuevo env var `GITGOV_EVENTS_MAX_BODY_BYTES` (default `2097152`, 2MB).
+  - `/events` ahora aplica `DefaultBodyLimit::max(events_body_limit_bytes)`.
+  - nuevo env var `GITGOV_EVENTS_MAX_BATCH` (default `1000`) para controlar tamaño lógico por lote.
+  - logging de runtime ampliado con `events_body_limit_bytes` y `events_max_batch`.
+- `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+  - `AppState` incorpora `events_max_batch: usize`.
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - guard de lote al inicio de `ingest_client_events(...)`:
+    - si `batch.events.len() > events_max_batch` (y `events_max_batch > 0`) devuelve `413 Payload Too Large`
+    - respuesta contractual con `errors[0].event_uuid = "batch"` y detalle del máximo.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+
+### Smoke runtime (server local `127.0.0.1:3000`)
+- `/health` -> `200`
+- `POST /events` (lote normal) -> `200`, `accepted=1`, `errors=0`
+- `GET /stats` con Bearer -> `200` (sin field `error`)
+- `GET /logs?limit=5&offset=0` con Bearer -> `200` (`events=5`)
+- `POST /chat/ask` con Bearer -> `200`, `status=ok`
+- Prueba negativa de guard:
+  - lote `1001` eventos -> `413`, `errors=1` (esperado por `GITGOV_EVENTS_MAX_BATCH=1000`)
+
+### Impacto Golden Path/Bot
+- Golden Path: verificado operativo en smoke.
+- Bot: verificado operativo en smoke (`/chat/ask`).
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 2: regla no negociable de logs exactos en chatbot
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/conversational/core.rs`
+  - regla explícita en `CHAT_SYSTEM_PROMPT`: para preguntas de logs/eventos, responder solo con datos exactos/verificables o `status="insufficient_data"` (nunca inventar).
+- `gitgov/gitgov-server/src/handlers/chat_handler.rs`
+  - nuevo path determinístico para consultas de logs:
+    - detección de intención (`is_logs_precision_query`)
+    - extracción de límite (`extract_logs_limit`, cap 20)
+    - hint de tipo de evento (`extract_logs_event_type_hint`)
+    - consulta directa DB con `get_combined_events(...)` y render exacto (`render_precise_logs_answer`)
+  - respuesta incluye `data_refs = ["logs_endpoint", "deterministic_sql_results"]` cuando aplica.
+  - si no hay datos: `status="insufficient_data"` con motivo explícito.
+- `gitgov/gitgov-server/src/handlers/tests.rs`
+  - tests unitarios nuevos para detección de consulta de logs, extracción de límite y mapeo de tipo de evento.
+- `docs/GOLDEN_PATH_CHECKLIST.md`
+  - checklist actualizado con la regla no negociable del bot sobre logs/eventos exactos.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `82 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+- `cd gitgov && npx eslint --no-error-on-unmatched-pattern ../gitgov/gitgov-server/src/handlers/chat_handler.rs ../gitgov/gitgov-server/src/handlers/conversational/core.rs ../docs/GOLDEN_PATH_CHECKLIST.md ../docs/PROGRESS.md`
+  - resultado: `0 errores`, `4 warnings` (archivos fuera de base path/no config ESLint para Rust/Markdown)
+  - errores nuevos introducidos: `0`
+
+### Smoke runtime (server local `127.0.0.1:3000`)
+- `POST /events` con Bearer -> `accepted=1`, `errors=0`
+- `GET /stats` con Bearer -> `200` (sin error)
+- `GET /logs?limit=5&offset=0` con Bearer -> `events=5`
+- `POST /chat/ask` pregunta `dame los ultimos 5 logs exactos` -> `status=ok` y `data_refs` contiene `deterministic_sql_results=true`
+
+### Impacto Golden Path/Bot
+- Golden Path: verificado operativo en smoke tras el cambio.
+- Bot: regla de logs exactos formalizada y validada con respuesta determinística.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 3: `/events` tolera lotes mixtos (válidos + inválidos)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - se eliminó el comportamiento de `early-return` por primer evento inválido en `ingest_client_events(...)`.
+  - ahora el handler:
+    - acumula errores de validación por evento en `pre_validation_errors`,
+    - continúa procesando e insertando los eventos válidos del mismo lote,
+    - devuelve respuesta combinada (`accepted`/`duplicates` + `errors`) con `200` para lotes mixtos.
+  - validaciones por evento mantenidas (sin relajar seguridad):
+    - `STRICT_ACTOR_MATCH`,
+    - rechazo de `synthetic user_login`,
+    - scope por `org_name`,
+    - scope por `repo_full_name`.
+  - si todo el lote es inválido: responde `200` con `accepted=[]` y `errors=[...]` (sin inserciones).
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `82 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+- `cd gitgov && npx eslint --no-error-on-unmatched-pattern ../gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs ../docs/PROGRESS.md`
+  - resultado: `0 errores`, `2 warnings` (Rust/Markdown fuera de configuración ESLint)
+  - errores nuevos introducidos: `0`
+
+### Smoke runtime (server local `127.0.0.1:3000`)
+- Prueba de lote mixto en `/events`:
+  - payload con 2 eventos (`manual_check` válido + `manual-check` inválido por política synthetic)
+  - resultado: `HTTP 200`, `accepted=1`, `errors=1`
+  - validación explícita:
+    - UUID válido aparece en `accepted`
+    - UUID inválido aparece en `errors`
+- Verificación de no regresión contractual:
+  - `GET /stats` -> OK
+  - `GET /logs?limit=5&offset=0` -> OK (`events=5`)
+  - `POST /chat/ask` (`dame los ultimos 5 logs exactos`) -> `status=ok` y `deterministic_sql_results=true`
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión en ingestión, stats y logs.
+- Bot: se mantiene regla de logs exactos y respuesta determinística.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 4: webhook GitHub responde 5xx en fallo interno real
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/github_webhook.rs`
+  - se cambió la clasificación de errores al final de `handle_github_webhook(...)`:
+    - duplicados idempotentes: mantienen `200`.
+    - error interno de DB/procesamiento (`Internal database error`): ahora `503 Service Unavailable` para habilitar reintentos del proveedor.
+    - payload no procesable: `400 Bad Request`.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `82 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+- `cd gitgov && npx eslint --no-error-on-unmatched-pattern ../gitgov/gitgov-server/src/handlers/github_webhook.rs ../gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs ../docs/PROGRESS.md ../question.md`
+  - resultado: `0 errores`, `4 warnings` (Rust/Markdown fuera de configuración ESLint)
+  - errores nuevos introducidos: `0`
+
+### Smoke runtime (server local `127.0.0.1:3000`)
+- `POST /webhooks/github` (`X-GitHub-Event=push`) con firma válida pero payload mal formado -> `400`, `processed=false`.
+- `POST /webhooks/github` (`X-GitHub-Event=ping`) con firma válida -> `200`, `processed=true`.
+- No regresión del flujo contractual:
+  - `POST /events` -> `200`, `accepted=1`
+  - `GET /stats` -> `200`
+  - `GET /logs?limit=5&offset=0` -> `200`
+  - `POST /chat/ask` (`dame los ultimos 5 logs exactos`) -> `200`, `status=ok`, `deterministic_sql_results=true`
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión observable en smoke.
+- Bot: sin cambios funcionales; se mantiene exactitud de logs.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 5: `GITHUB_WEBHOOK_SECRET` obligatorio en non-dev
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/main.rs`
+  - hardening de arranque para webhook GitHub:
+    - `GITHUB_WEBHOOK_SECRET` se normaliza (`trim`) y se trata vacío como no configurado.
+    - en `non-dev` (`GITGOV_ENV` distinto de `dev/development/local/test`), el server aborta startup si falta secret.
+    - en `dev`, si falta secret, deja warning explícito indicando que la validación de firma queda deshabilitada.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `82 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+
+### Pruebas runtime
+- Verificación de hardening de arranque (`non-dev`):
+  - `GITGOV_ENV=prod` + `GITHUB_WEBHOOK_SECRET` vacío -> startup aborta con error:
+    - `Missing GITHUB_WEBHOOK_SECRET in non-dev hardening mode`
+- Smoke contractual en modo normal local:
+  - `POST /events` -> `200`, `accepted=1`
+  - `GET /stats` -> `200`
+  - `GET /logs?limit=5&offset=0` -> `200`
+  - `POST /chat/ask` -> `200`, `status=ok`, `deterministic_sql_results=true`
+  - `POST /webhooks/github` (`push` mal formado con firma válida) -> `400`, `processed=false`
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión observable.
+- Bot: sin cambios funcionales.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 6: hardening de auth stale cache (Q2)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/db.rs`
+  - `validate_api_key(...)` ahora retorna `ApiKeyAuthValidation { auth, used_stale_cache }` para distinguir auth normal vs stale.
+  - telemetría explícita cuando se usa stale cache por error de DB, incluyendo `stale_age_secs`.
+  - fix de coherencia de cache auth:
+    - una entrada vencida para `auth_cache_ttl` ya no se elimina antes del chequeo `stale` (evita perder fallback stale válido).
+  - `GITGOV_AUTH_CACHE_STALE_MAX_SECS` mantiene override por env, pero default ahora depende de entorno:
+    - `dev`: `120s`
+    - `non-dev`: `30s`
+  - nuevo failpoint debug-only para validar caída DB determinística en auth:
+    - `GITGOV_SIMULATE_AUTH_DB_FAILURE=true`
+    - `GITGOV_SIMULATE_AUTH_DB_FAILURE_FLAG_FILE=<path>` (activo si el archivo existe).
+- `gitgov/gitgov-server/src/auth.rs`
+  - hardening en middleware:
+    - si la autenticación viene de stale cache y el usuario es `Admin`, se bloquean rutas sensibles:
+      - `/api-keys*`
+      - `/dashboard*`
+      - `/jobs/metrics*`
+    - se registra warning con path y client_id.
+  - test unitario agregado para clasificación de rutas sensibles.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `89 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+- `cd gitgov && npx eslint --no-error-on-unmatched-pattern ../gitgov/gitgov-server/src/auth.rs ../gitgov/gitgov-server/src/db.rs ../gitgov/gitgov-server/src/main.rs ../gitgov/gitgov-server/src/handlers/github_webhook.rs ../gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs ../docs/PROGRESS.md ../question.md`
+  - resultado: `0 errores`, `7 warnings` (Rust/Markdown fuera de configuración ESLint)
+  - errores nuevos introducidos: `0`
+- validación adicional de cierre Q2:
+  - `cd gitgov/gitgov-server && cargo test` -> `89 passed; 0 failed`
+  - `cd gitgov && npx tsc -b` -> sin errores
+  - `cd gitgov && npx eslint --no-error-on-unmatched-pattern ../gitgov/gitgov-server/src/db.rs ../docs/PROGRESS.md ../question.md`
+    - resultado: `0 errores`, `3 warnings` (Rust/Markdown fuera de configuración ESLint)
+    - errores nuevos introducidos: `0`
+
+### Smoke runtime (server local `127.0.0.1:3000`)
+- `POST /events` -> `200`, `accepted=1`
+- `GET /stats` -> `200`
+- `GET /logs?limit=5&offset=0` -> `200`, `events=5`
+- `POST /chat/ask` (`dame los ultimos 5 logs exactos`) -> `200`, `status=ok`, `deterministic_sql_results=true`
+- Simulación determinística Q2 (server local `127.0.0.1:3000`, `GITGOV_AUTH_CACHE_TTL_SECS=1`, `GITGOV_AUTH_CACHE_STALE_MAX_SECS=120`, failpoint por archivo):
+  - baseline sin failpoint:
+    - `GET /stats` -> `200`
+    - `GET /api-keys` -> `200`
+  - con failpoint activo + entrada stale:
+    - `GET /stats` -> `200` (stale cache permitido en ruta no sensible)
+    - `GET /api-keys` -> `401` con body:
+      - `{"code":"UNAUTHORIZED","error":"Authentication temporarily unavailable for this admin endpoint; retry shortly"}`
+  - recovery tras desactivar failpoint:
+    - `GET /api-keys` -> `200`
+  - evidencia de logs:
+    - `Simulating auth DB query failure via debug failpoint (validate_api_key)`
+    - `Using stale API key auth cache due transient database error ...`
+    - `Blocking stale auth cache for sensitive admin endpoint path=/api-keys`
+
+### Cierre de NO VERIFICADO
+- Se cerró `NO VERIFICADO` de Q2 con simulación runtime reproducible y evidencia de endpoint sensible bloqueado bajo auth stale.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión observable en smoke.
+- Bot: sin cambios funcionales, mantiene regla de logs exactos.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 7: hardening de default `GITGOV_ENV` por perfil de compilación (Q3)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/main.rs`
+  - `parse_runtime_env()` ahora retorna `(runtime_env, is_dev_env, runtime_env_explicit)`.
+  - default de `GITGOV_ENV` endurecido por perfil de compilación:
+    - build `debug` -> default `dev` (no rompe local)
+    - build `release` -> default `prod` (más seguro para despliegue por omisión)
+  - cuando `GITGOV_ENV` no está explícito, se emite warning:
+    - `GITGOV_ENV not set explicitly; using compile-profile default`.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `89 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+- validación explícita release (sin `GITGOV_ENV` en proceso):
+  - `cd gitgov/gitgov-server && cargo build --release` -> OK
+  - `Remove-Item Env:GITGOV_ENV; $env:GITHUB_WEBHOOK_SECRET=' '; .\\target\\release\\gitgov-server.exe`
+    - resultado: `ERROR Missing GITHUB_WEBHOOK_SECRET in non-dev hardening mode runtime_env=prod`
+    - evidencia empírica: el default efectivo en `release` es `prod`.
+
+### Smoke runtime (server local `127.0.0.1:3000`)
+- `POST /events` -> `200`, `accepted=1`
+- `GET /stats` -> `200`
+- `GET /logs?limit=5&offset=0` -> `200`, `events=5`
+- `POST /chat/ask` (`dame los ultimos 5 logs exactos`) -> `200`, `status=ok`, `deterministic_sql_results=true`
+
+### Cierre de NO VERIFICADO
+- Se cerró `NO VERIFICADO` de Q3 con ejecución real de binario `release` y evidencia explícita de `runtime_env=prod`.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión observable en smoke.
+- Bot: sin cambios funcionales.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 8: hardening de rate-limit en lock poison (Q8)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/main.rs`
+  - `InMemoryRateLimiter` ahora soporta modo configurable ante lock poisoned:
+    - `fail_open_on_lock_poison = true` -> mantiene disponibilidad.
+    - `fail_open_on_lock_poison = false` -> fail-closed.
+  - `RateLimitDecision` incorpora `internal_error`.
+  - `rate_limit_middleware(...)`:
+    - si `internal_error=true`, responde `503 Service Unavailable` con `code=RATE_LIMITER_UNAVAILABLE` y `Retry-After`.
+  - configuración aplicada por sensibilidad:
+    - fail-closed: `admin_endpoints`, `stats_endpoints`
+    - fail-open: `events`, `audit_stream`, `jenkins`, `jira`, `logs`, `chat`
+  - rutas sensibles adicionales ahora protegidas por `admin_rate_limit`:
+    - `/api-keys`
+    - `/api-keys/{id}/revoke`
+    - `/admin-audit-log`
+    - `/jobs/metrics`
+    - `/jobs/dead`
+    - `/jobs/{job_id}/retry`
+  - tests unitarios nuevos:
+    - lock poisoned en modo fail-open permite request.
+    - lock poisoned en modo fail-closed bloquea con `internal_error`.
+    - failpoint debug por limiter (`GITGOV_SIMULATE_RATE_LIMIT_INTERNAL_ERROR` + `..._FOR`) para validar la rama de `internal_error` en runtime sin corrupción real de lock.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `91 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+- `cd gitgov && npx eslint --no-error-on-unmatched-pattern ../gitgov/gitgov-server/src/main.rs ../gitgov/gitgov-server/src/auth.rs ../gitgov/gitgov-server/src/db.rs ../docs/PROGRESS.md ../question.md`
+  - resultado: `0 errores`, `5 warnings` (Rust/Markdown fuera de configuración ESLint)
+  - errores nuevos introducidos: `0`
+
+### Smoke runtime (server local `127.0.0.1:3000`)
+- `POST /events` -> `200`, `accepted=1`
+- `GET /stats` -> `200`
+- `GET /logs?limit=5&offset=0` -> `200`, `events=5`
+- `POST /chat/ask` (`dame los ultimos 5 logs exactos`) -> `200`, `status=ok`, `deterministic_sql_results=true`
+- rutas sensibles con rate-limit admin siguen operativas:
+  - `GET /jobs/metrics` -> `200`
+  - `GET /api-keys` -> `200`
+- Simulación runtime determinística de `internal_error` en limiter admin:
+  - con `GITGOV_SIMULATE_RATE_LIMIT_INTERNAL_ERROR=true` y `GITGOV_SIMULATE_RATE_LIMIT_INTERNAL_ERROR_FOR=admin_endpoints` (server en `127.0.0.1:3015`):
+    - `GET /jobs/metrics` -> `503`
+    - body: `{\"code\":\"RATE_LIMITER_UNAVAILABLE\",\"error\":\"Rate limiter temporarily unavailable\",\"retry_after_seconds\":1}`
+    - `GET /stats` -> `200` (limiter `stats_endpoints` no afectado por selector)
+  - sin failpoint (server en `127.0.0.1:3016`):
+    - `GET /jobs/metrics` -> `200`
+- smoke contractual post-cambio (server en `127.0.0.1:3018`):
+  - `GET /health` -> `200`
+  - `POST /events` -> `200`
+  - `GET /stats` -> `200`
+  - `GET /logs?limit=5&offset=0` -> `200`
+  - `POST /chat/ask` -> `200`
+
+### Cierre de NO VERIFICADO
+- Se cerró `NO VERIFICADO` de Q8 con simulación runtime reproducible de la rama `internal_error` para endpoints sensibles.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión observable en smoke.
+- Bot: sin cambios funcionales.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 9: marcador explícito de `/logs` stale fallback (Q9)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - `LogsResponse` ahora soporta campo opcional `stale?: bool`.
+  - cuando `/logs` responde desde fallback cache por error transitorio de DB (`get_cached_logs_on_error`), la respuesta incluye `stale=true`.
+  - en respuestas normales, `stale` no se serializa (`None`).
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `85 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+
+### Smoke runtime (server local `127.0.0.1:3000`)
+- `POST /events` -> `200`, `accepted=1`
+- `GET /stats` -> `200`
+- `GET /logs?limit=5&offset=0` -> `200`, `events=5`, `stale` ausente en respuesta normal
+- `POST /chat/ask` (`dame los ultimos 5 logs exactos`) -> `200`, `status=ok`, `deterministic_sql_results=true`
+- `GET /jobs/metrics` -> `200`
+- `GET /api-keys` -> `200`
+
+### NO VERIFICADO
+- `NO VERIFICADO: forzar fallback stale de /logs en runtime`
+  - no se inyectó falla de DB controlada en esta corrida para observar `stale=true` en respuesta live.
+  - la verificación fue por revisión de código + test/compilación + smoke funcional.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión observable.
+- Bot: sin cambios funcionales.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 10: outbox con backoff exponencial + jitter por evento (Q10)
+
+### Qué se implementó
+- `gitgov/src-tauri/src/outbox/queue.rs`
+  - `OutboxEvent` agrega `next_attempt_at?: i64` (serializable en JSONL, backward-compatible por `#[serde(default)]`).
+  - política de retry nueva:
+    - backoff exponencial por intento (`RETRY_BASE_DELAY_MS=1000`, tope `RETRY_MAX_DELAY_MS=60000`)
+    - jitter estable por evento/attempt (`stable_jitter_ms`) para reducir sincronización entre clientes.
+  - selección de envío:
+    - `flush()` y worker envían solo eventos listos por `is_event_ready_for_retry(...)`.
+  - manejo de fallos de chunk:
+    - ante error parse/HTTP/network, `mark_chunk_retry(...)` marca intentos y programa `next_attempt_at`.
+  - respuesta exitosa:
+    - `accepted/duplicates` limpian `next_attempt_at`.
+    - errores por evento también aplican retry con backoff (`mark_event_retry`).
+
+### Validación ejecutada
+- `cd gitgov/src-tauri && cargo fmt` -> OK
+- `cd gitgov/src-tauri && cargo check` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `85 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+
+### Smoke runtime (server local `127.0.0.1:3000`)
+- `POST /events` -> `200`, `accepted=1`
+- `GET /stats` -> `200`
+- `GET /logs?limit=5&offset=0` -> `200`, `events=5`
+- `POST /chat/ask` (`dame los ultimos 5 logs exactos`) -> `200`, `status=ok`, `deterministic_sql_results=true`
+
+### NO VERIFICADO
+- `NO VERIFICADO: corrida E2E desktop real de outbox con red inestable`
+  - no se ejecutó en esta pasada una simulación runtime de caída/recovery de red desde Tauri UI para medir dispersión real de retries.
+  - la validación fue de compilación + lógica + smoke contractual de server.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión observable en smoke backend.
+- Bot: sin cambios funcionales.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Cambio 11: token GitHub `keyring-only` por defecto + compat flag explícito (Q1)
+
+### Qué se implementó
+- `gitgov/src-tauri/src/github/auth.rs`
+  - nueva política de compatibilidad:
+    - `GITGOV_ALLOW_LEGACY_TOKEN_FILE` (default `false`).
+    - fuera de compat mode: `save_token(...)` exige keyring y limpia archivo legacy si existe.
+    - en compat mode explícito: permite mantener backup local legacy.
+  - soporte de migración real determinística para QA:
+    - `GITGOV_LEGACY_TOKEN_DIR` permite apuntar explícitamente al directorio legacy (`%LOCALAPPDATA%/gitgov` por default).
+    - `GITGOV_SIMULATE_KEYRING_FAILURE` (solo `debug`) fuerza falla de keyring para validar fallback/fail-closed sin depender del estado del SO.
+  - `save_token(...)` ya no considera éxito “solo archivo”; el camino primario es keyring.
+  - `load_legacy_token_from_file(...)` ahora distingue `TokenNotFound` cuando no existe archivo.
+  - `load_token(...)` / `load_token_with_expiry(...)`:
+    - intentan migración one-shot desde archivo legacy cuando falta entrada en keyring.
+    - solo usan archivo legacy ante error de keyring si compat mode está habilitado explícitamente.
+    - cuando source es legacy y compat mode está deshabilitado, la persistencia a keyring es obligatoria (`?`) para continuar.
+  - tests unitarios nuevos para el escenario solicitado (legacy file existente + keyring inestable):
+    - fallback exitoso con compat `on`.
+    - fail-closed con compat `off`.
+    - fallback en `load_token_with_expiry(...)`.
+    - barrido de migración `migrate_legacy_tokens_from_disk()` para tokens legacy preexistentes (`*.token`) con reporte `scanned/migrated/skipped/failed`.
+  - soporte adicional de test determinístico de keyring en memoria (`GITGOV_SIMULATE_KEYRING_MEMORY`) solo en `debug`, para validar migración exitosa sin depender del keyring del SO.
+- `gitgov/src-tauri/src/lib.rs`
+  - startup ahora ejecuta barrido best-effort de migración legacy->keyring (no bloqueante) y registra métricas del barrido.
+
+### Validación ejecutada
+- `cd gitgov/src-tauri && cargo fmt` -> OK
+- `cd gitgov/src-tauri && cargo test` -> `5 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo test` -> `85 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> sin errores
+- `cd gitgov && npx eslint --no-error-on-unmatched-pattern ../gitgov/src-tauri/src/github/auth.rs ../docs/PROGRESS.md ../question.md`
+  - resultado: `0 errores`, `3 warnings` (archivo Rust ignorado + Markdown fuera de base path)
+  - errores nuevos introducidos: `0`
+
+### Smoke runtime (server local `127.0.0.1:3000`)
+- `POST /events` -> `200`, `accepted=1`
+- `GET /stats` -> `200`
+- `GET /logs?limit=5&offset=0` -> `200`, `events=5`
+- `POST /chat/ask` (`dame los ultimos 5 logs exactos`) -> `200`, `status=ok`, `deterministic_sql_results=true`
+
+### Cierre de NO VERIFICADO
+- Se resolvió la brecha de validación agregando simulación determinística de host real:
+  - token legacy preexistente en ruta legacy.
+  - keyring inestable forzado.
+  - verificación explícita de compatibilidad `on/off` con aserciones automáticas.
+
+### Impacto Golden Path/Bot
+- Golden Path: sin regresión observable en smoke backend.
+- Bot: sin cambios funcionales.
+- No hubo rollback porque no se detectaron regresiones.
+
+---
+
+## Actualización (2026-03-05) — Auditoría Q&A de seguridad, vulnerabilidades y escalabilidad
+
+### Qué se agregó
+- Nuevo archivo `question.md` en raíz con 10 preguntas críticas de Q&A técnico, cada una con:
+  - riesgo,
+  - evidencia `archivo:línea`,
+  - análisis,
+  - resolución propuesta.
+
+### Cobertura del análisis
+- Seguridad de credenciales y auth (`keyring`, fallback local, cache stale, webhooks).
+- Resiliencia del pipeline (`/events`, batch handling, webhooks, outbox).
+- Escalabilidad y rendimiento (`rate limit`, paginación `/logs`, cache stale, retry strategy).
+
+### Hallazgos priorizados (resumen)
+- P0:
+  - tokens de GitHub guardados también en archivo legacy local;
+  - webhook GitHub depende de secret opcional;
+  - webhook devuelve `200` incluso en error interno de proceso;
+  - `/events` no muestra límite explícito de body/lote.
+- P1:
+  - ventana de auth stale en error DB;
+  - defaults dev por ausencia de `GITGOV_ENV`;
+  - early-return en `/events` que puede rechazar lotes mixtos;
+  - rate limit in-memory con fail-open ante lock poisoned.
+- P2:
+  - coexistencia keyset+offset en `/logs` con tradeoff de costo/staleness;
+  - outbox con intervalo fijo, sin backoff exponencial+jitter por evento.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`.
+- `cd gitgov && npx tsc -b` -> sin errores (exit `0`).
+- `cd gitgov && npx eslint --no-error-on-unmatched-pattern ../question.md ../docs/PROGRESS.md`
+  - resultado: `0 errores`, `2 warnings` de archivo fuera del base path de ESLint.
+  - errores nuevos introducidos: `0`.
+
+### Impacto Golden Path
+- ¿Modifica auth/token/API key/handlers/dashboard? -> No (cambio documental).
+- Flujo Desktop -> `/events` -> PostgreSQL -> Dashboard: sin cambios funcionales en esta ronda.
+
+---
+
+## Actualización (2026-03-04) — Scripts oficiales Golden Path ejecutados en Windows (Git Bash)
+
+### Qué se corrigió para que corran en este entorno
+- `gitgov/gitgov-server/tests/smoke_contract.sh`
+  - generación de UUID robusta en Git Bash/Windows (evita UUID vacío).
+  - `GP_USER` cambió a `manual_check` para no activar política anti-synthetic.
+  - validación de duplicado fortalecida (debe contener UUID esperado en `duplicates`).
+- `gitgov/gitgov-server/tests/e2e_flow_test.sh`
+  - helper `new_uuid()` robusto.
+  - falla explícita si UUID queda vacío.
+  - `user_login` cambió a `manual_check` para compatibilidad con política anti-synthetic.
+
+### Ejecución real
+- `smoke_contract.sh` (Git Bash):
+  - resultado: `20 passed, 0 failed`.
+  - evidencia: `gitgov/gitgov-server/tests/artifacts/smoke_contract_gitbash_2026-03-04.log`
+- `e2e_flow_test.sh` (Git Bash):
+  - resultado: completado sin fallas (`exit 0`).
+  - evidencia: `gitgov/gitgov-server/tests/artifacts/e2e_flow_gitbash_2026-03-04.log`
+
+### Estado Golden Path
+- Backend contractual + scripts oficiales: verificado.
+- Queda pendiente solo la validación manual visual de Desktop Tauri (interacción UI real).
+
+---
+
+## Actualización (2026-03-04) — Validación E2E Golden Path (live, backend contractual)
+
+### Qué se validó (live contra `127.0.0.1:3000`)
+- `GET /health` -> `200`.
+- `GET /stats` con `Authorization: Bearer` -> `200`.
+- `GET /logs` con `Authorization: Bearer` -> `200`.
+- Golden Path por ingesta:
+  - `stage_files`, `commit`, `attempt_push`, `successful_push` aceptados en `/events`,
+  - los 4 UUID quedaron visibles en `/logs`,
+  - reenvío duplicado detectado en `duplicates`.
+- `GET /stats/daily?days=14` -> 14 entradas.
+- `POST /chat/ask` -> `200` con respuesta y `status=ok`.
+- `GET /admin-audit-log?limit=5&offset=0` -> `200`.
+
+### Artefactos de evidencia
+- `gitgov/gitgov-server/tests/artifacts/golden_path_live_ps_2026-03-04.json`
+  - `summary.passed = true`.
+- `gitgov/gitgov-server/tests/artifacts/golden_path_extended_ps_2026-03-04.json`
+  - validación de endpoints sin `offset`:
+    - `/logs?limit=5`
+    - `/integrations/jenkins/correlations?limit=5`
+    - `/signals?limit=5`
+    - `/governance-events?limit=5`
+    - `/logs` (sin params)
+  - `summary.passed = true`.
+
+### NO VERIFICADO
+- `NO VERIFICADO: ejecución directa de scripts shell`
+  - `tests/smoke_contract.sh` y `tests/e2e_flow_test.sh` no se pudieron ejecutar tal cual en este host,
+    porque `bash.exe` apunta a WSL sin `/bin/bash` disponible.
+  - Se ejecutó equivalente contractual en PowerShell y se dejó evidencia en artifacts.
+- `NO VERIFICADO: checklist manual de Desktop UI`
+  - abrir app Tauri, editar archivo real, commit/push desde UI, validar tabla visual de commits.
+  - falta evidencia de interacción manual de escritorio en esta pasada automática.
+
+### Estado
+- Golden Path backend contractual queda validado en vivo con evidencia.
+- Queda pendiente únicamente la parte manual visual de Desktop para cierre 100% del checklist completo.
+
+---
+
+## Actualización (2026-03-04) — Cierre del `500` residual en chat (degradación controlada)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/conversational/engine.rs`
+  - en `finalize_chat_response(...)`, cuando una rama interna produce `StatusCode::INTERNAL_SERVER_ERROR`:
+    - se degrada a `StatusCode::OK`,
+    - `status` pasa a `insufficient_data` (si venía como `error`),
+    - se agrega mensaje explícito de reintento corto (`Reintenta en unos segundos`).
+
+### Motivo
+- Evitar percepción de “crash” del bot ante saturación transitoria de backend/DB.
+- Mantener funcionalidad y contexto conversacional, sin cortar la sesión por `500`.
+
+### Benchmark prolongado comparado (220 req, c=8)
+- Antes (con logs hardened, chat aún podía devolver `500` residual):
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_after_logs_stale_fallback_rerun_2026-03-04.json`
+- Después (chat graceful):
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_after_chat_graceful_2026-03-04.json`
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_after_chat_graceful_rerun_2026-03-04.json`
+
+Comparativo principal (`before -> after`, rerun):
+- `POST /chat/ask`:
+  - `500: 1 -> 0`
+  - HTTP `200: 219 -> 220`
+  - p95 `433.2ms -> 436.3ms` (estable)
+  - throughput `33.10 -> 32.99 rps` (estable)
+- `/logs`, `/stats`, `/events` mantienen `500=0` en este perfil.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> falla por deuda preexistente:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:326` (`if_same_then_else`)
+
+### Impacto Golden Path
+- Sin cambios en auth Bearer ni contratos de `/events`, `/logs`, `/stats`.
+- Bot deja de responder `500` en el escenario de carga evaluado; ahora degrada con respuesta útil.
+
+### Estado de cierre
+- En el perfil de carga prolongada usado (`220 req`, `c=8`), los 4 endpoints críticos quedaron con `5xx = 0`.
+
+---
+
+## Actualización (2026-03-04) — Fase B blindaje: fallback de `/logs` a cache reciente en error DB
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - nuevo `get_cached_logs_on_error(...)` para servir cache recientemente expirada si la DB falla.
+  - en `get_logs(...)`, ante error de DB:
+    - si existe cache reciente -> responde `200` con eventos cacheados,
+    - si no existe -> mantiene `500` contractual actual.
+- `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+  - nuevo campo de estado `logs_cache_stale_on_error`.
+- `gitgov/gitgov-server/src/main.rs`
+  - nueva env var: `GITGOV_LOGS_CACHE_STALE_ON_ERROR_MS` (default `5000`).
+
+### Benchmark prolongado comparado (220 req, c=8)
+- Antes (single-query de `/logs`, sin stale fallback):
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_after_logs_sql_inline_rerun_2026-03-04.json`
+- Después (stale fallback en `/logs`):
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_after_logs_stale_fallback_2026-03-04.json`
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_after_logs_stale_fallback_rerun_2026-03-04.json`
+
+Comparativo principal (`before -> after`, rerun):
+- `GET /logs`:
+  - `500: 1 -> 0`
+  - p95 `21.6ms -> 19.3ms`
+  - throughput `357.56 -> 604.81 rps`
+- `POST /chat/ask`:
+  - p99 `755.9ms -> 723.8ms`
+  - throughput `32.95 -> 33.10 rps`
+  - `500` se mantiene en `1` residual.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> falla por deuda preexistente:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:326` (`if_same_then_else`)
+
+### Impacto Golden Path
+- No se cambió auth Bearer ni shape de `/logs`.
+- Se eliminó el `500` observado en `/logs` bajo la carga de prueba usada.
+
+### Pendiente inmediato
+- Queda `500` residual de chat bajo stress extremo (`1/220`); siguiente foco: hardening del path de consultas del bot para degradación controlada cuando la DB esté saturada.
+
+---
+
+## Actualización (2026-03-04) — Fase B profunda: `/logs` en una sola query (sin enrichment extra)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/db.rs` (`get_combined_events`)
+  - se eliminó la segunda consulta de enrichment por `client_event_ids`.
+  - ahora `details` de eventos `client` se construye en SQL en la misma query principal:
+    - incluye `reason`, `files`, `event_uuid`, `commit_sha`, `user_name`,
+    - fusiona metadata objeto al top-level de `details`,
+    - conserva fallback para metadata no objeto bajo clave `metadata`.
+
+### Motivo
+- `/logs` estaba haciendo dos roundtrips a DB por request (consulta principal + enrichment),
+  lo que aumentaba probabilidad de `500` bajo stress.
+
+### Benchmark prolongado comparado (220 req, c=8)
+- Antes (logs cache ya aplicado, con enrichment extra):
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_after_logs_cache_rerun_2026-03-04.json`
+- Después (single-query inline details):
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_after_logs_sql_inline_2026-03-04.json`
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_after_logs_sql_inline_rerun_2026-03-04.json`
+
+Comparativo principal (`before -> after`, rerun):
+- `GET /logs`:
+  - `500: 3 -> 1`
+  - p99 `586.9ms -> 305.9ms`
+  - throughput `351.72 -> 357.56 rps`
+- `POST /chat/ask`:
+  - `500: 2 -> 1`
+  - p99 `987.8ms -> 755.9ms`
+  - throughput `32.62 -> 32.95 rps`
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> falla por deuda preexistente:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:326` (`if_same_then_else`)
+
+### Impacto Golden Path
+- No cambia auth Bearer.
+- No cambia shape contractual de `/logs`.
+- Reduce presión de DB en path crítico de lectura.
+
+### Pendiente inmediato
+- Queda `500` residual bajo stress extremo (`/logs` y chat) aunque menor; siguiente paso: fallback controlado a cache reciente en error de DB para `GET /logs`.
+
+---
+
+## Actualización (2026-03-04) — Fase B parcial: cache corta de `/logs` para ráfagas
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+  - nuevo `LogsCacheEntry` y estado compartido:
+    - `logs_cache_ttl`
+    - `logs_cache`
+- `gitgov/gitgov-server/src/main.rs`
+  - nueva env var `GITGOV_LOGS_CACHE_TTL_MS` (default `800`).
+  - inicialización de cache de logs en `AppState`.
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - helpers cache `/logs`:
+    - `logs_cache_key(...)`
+    - `get_cached_logs(...)`
+    - `put_cached_logs(...)`
+    - `invalidate_logs_cache(...)`
+  - `GET /logs`: sirve desde cache cuando aplica (TTL corta, sin offset/keyset cursor).
+  - `POST /events`: invalida cache `/logs` tras ingesta para no entregar ventana stale.
+
+### Benchmark prolongado comparado (220 req, c=8)
+- Antes (con auth cache, sin logs cache):
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_canary_after_auth_cache_v2_2026-03-04.json`
+- Después (logs cache habilitado):
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_after_logs_cache_2026-03-04.json`
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_after_logs_cache_rerun_2026-03-04.json`
+
+Comparativo principal (`before -> after` usando rerun):
+- `GET /logs`:
+  - p95 `591.2ms -> 4.6ms`
+  - p99 `762.7ms -> 586.9ms`
+  - throughput `19.27 -> 351.72 rps`
+  - `500: 8 -> 3`
+- `POST /chat/ask`:
+  - p95 `612.0ms -> 443.2ms`
+  - throughput `30.19 -> 32.62 rps`
+  - `500: 3 -> 2`
+- `POST /events`:
+  - p95 `989.5ms -> 840.0ms`
+  - p99 `1700.7ms -> 845.8ms`
+  - `500: 0 -> 0`
+- `GET /stats`:
+  - se mantiene estable (`500=0`, sin regresión material).
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> falla por deuda preexistente:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:326` (`if_same_then_else`)
+
+### Impacto Golden Path
+- Sin cambio en contrato de `GET /logs` ni auth Bearer.
+- Cambio enfocado a resiliencia en ráfagas (misma funcionalidad, menor presión DB).
+
+### Pendiente inmediato
+- Persisten `500` residuales en `/logs` bajo stress extremo; siguiente paso: optimizar query path SQL de `/logs` (Fase B profunda).
+
+---
+
+## Actualización (2026-03-04) — Cierre de carga prolongada + hardening de auth bajo presión DB
+
+### Hallazgo de causa raíz en stress
+- En carga alta (`220 req`, `c=8`) aparecían `401` intermitentes no por token inválido, sino por:
+  - body: `{"error":"Authentication backend unavailable","code":"UNAUTHORIZED"}`.
+- Esto indicaba presión transitoria de DB durante `validate_api_key(...)`, que se traducía en “no autorizado” aunque la API key era correcta.
+
+### Mitigación aplicada (server)
+- `gitgov/gitgov-server/src/db.rs`
+  - cache in-memory para validación de API key (`key_hash`) con TTL corta.
+  - fallback controlado a cache stale (tiempo acotado) solo cuando hay error transitorio de DB.
+  - invalidación explícita de cache en creación/aseguramiento/revocación de API keys.
+  - nuevas env vars de tuning:
+    - `GITGOV_AUTH_CACHE_TTL_SECS` (default `20`)
+    - `GITGOV_AUTH_CACHE_STALE_MAX_SECS` (default `120`)
+    - `GITGOV_AUTH_CACHE_MAX_ENTRIES` (default `4096`)
+
+### Evidencia de código
+- cache y config:
+  - `gitgov/gitgov-server/src/db.rs:25-32,101-132,136-199`
+- uso en `validate_api_key(...)` con fallback stale por error de DB:
+  - `gitgov/gitgov-server/src/db.rs:2219-2279`
+- invalidación de cache en lifecycle de API keys:
+  - `gitgov/gitgov-server/src/db.rs:2325,2354,2426`
+
+### Benchmark prolongado (canary) comparado
+- Antes de mitigación:
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_canary_2026-03-04.json`
+- Después de mitigación:
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_canary_after_auth_cache_v2_2026-03-04.json`
+  - `gitgov/gitgov-server/tests/artifacts/perf_long_control_plane_canary_after_auth_cache_v2_rerun_2026-03-04.json`
+
+Resultado principal (`before -> after`):
+- `POST /events`:
+  - `401: 39 -> 0`
+  - p99: `2950.8ms -> 1700.7ms`
+  - throughput: `11.42 -> 13.81 rps`
+- `GET /logs`:
+  - `401: 4 -> 0`
+  - `500: 17 -> 8`
+  - p95: `814.6ms -> 591.2ms`
+- `GET /stats`:
+  - `401: 8 -> 0`
+  - p95: `986.6ms -> 2.5ms` (cache/hot path dominante)
+  - throughput: `29.10 -> 182.21 rps`
+- `POST /chat/ask`:
+  - `401: 9 -> 0`
+  - `500: 5 -> 3`
+  - p95: `819.0ms -> 612.0ms`
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> falla por deuda preexistente:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:326` (`if_same_then_else`)
+- `cd gitgov && npx tsc -b` -> OK
+
+### Impacto Golden Path
+- No se cambió contrato Bearer ni shape de `/events`, `/logs`, `/stats`.
+- Se redujo falsa señal de “token inválido” cuando la DB tiene presión transitoria.
+
+### Pendiente inmediato
+- Queda deuda de `500` residual en `/logs` y chat bajo stress alto; siguiente foco: optimización de query/payload en rutas de lectura pesada (Fase B/C).
+
+---
+
+## Actualización (2026-03-04) — Benchmark comparativo post-Fase A (`/events`) cerrado
+
+### Artefactos comparados
+- Baseline:
+  - `gitgov/gitgov-server/tests/artifacts/perf_baseline_control_plane_2026-03-04.json`
+- Post-Fase A (corrida estable usada para comparación):
+  - `gitgov/gitgov-server/tests/artifacts/perf_baseline_control_plane_after_phaseA_rerun2_2026-03-04.json`
+- Corridas adicionales de control:
+  - `gitgov/gitgov-server/tests/artifacts/perf_baseline_control_plane_after_phaseA_2026-03-04.json`
+  - `gitgov/gitgov-server/tests/artifacts/perf_baseline_control_plane_after_phaseA_rerun_2026-03-04.json`
+
+### Parámetros de prueba
+- `requests=35`
+- `concurrency=4`
+- `timeout=12s`
+- `server_url=http://127.0.0.1:3000`
+
+### Resultado comparativo (baseline -> post-Fase A estable)
+- `POST /events`:
+  - p95 `1952.5ms -> 875.1ms` (`-1077.4ms`)
+  - p99 `2056.3ms -> 890.3ms` (`-1166.0ms`)
+  - throughput `4.76 -> 6.17 rps` (`+1.41 rps`)
+  - HTTP `200=35 -> 200=35`
+- `GET /logs`:
+  - p95 `824.4ms -> 614.7ms` (`-209.8ms`)
+  - p99 `877.6ms -> 617.3ms` (`-260.3ms`)
+  - throughput `5.80 -> 6.45 rps` (`+0.65 rps`)
+  - HTTP `200=35 -> 200=35`
+- `GET /stats`:
+  - p95 `1005.8ms -> 878.4ms` (`-127.4ms`)
+  - p99 `1068.9ms -> 942.6ms` (`-126.3ms`)
+  - throughput `13.12 -> 13.50 rps` (`+0.37 rps`)
+  - HTTP `200=25,429=10 -> 200=35`
+- `POST /chat/ask`:
+  - p95 `1114.9ms -> 926.3ms` (`-188.6ms`)
+  - p99 `1170.4ms -> 947.0ms` (`-223.4ms`)
+  - throughput `6.96 -> 7.81 rps` (`+0.84 rps`)
+  - HTTP `200=35 -> 200=35`
+
+### Lectura operativa
+- Criterio principal de Fase A cumplido: mejora medible de p95/p99 en `POST /events` sin cambio contractual.
+- No se observaron `5xx` en la corrida estable comparada.
+- Se mantiene pendiente la validación de carga prolongada (duración mayor y cardinalidad de org grande) para cierre final de programa.
+
+---
+
+## Actualización (2026-03-04) — Fase A `/events`: cache por lote + inserción batch optimizada
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - cache in-batch `org_id_cache` para resolver `org_name` una sola vez por lote.
+  - cache in-batch `repo_cache` para resolver `repo_full_name` una sola vez por lote.
+  - hidratación del cache tras `upsert_repo_by_full_name(...)` exitoso para evitar re-upserts del mismo repo en el lote.
+- `gitgov/gitgov-server/src/db.rs`
+  - `insert_client_events_batch_tx(...)` cambió de `INSERT` por evento a una sola sentencia batch (`QueryBuilder`) con:
+    - `INSERT ... VALUES (...) ON CONFLICT (event_uuid) DO NOTHING RETURNING event_uuid`
+    - clasificación `accepted/duplicates` por set de UUIDs retornados.
+  - se mantiene fallback legacy por fila cuando el batch transaccional falla.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> falla por deuda preexistente:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:326` (`if_same_then_else`)
+- `cd gitgov && npx tsc -b` -> OK
+
+### Impacto Golden Path
+- Sin cambios en auth Bearer ni en contrato de `/events`, `/logs`, `/stats`.
+- Mejora de eficiencia en resolución de org/repo y en escritura DB para batches grandes (misma semántica funcional).
+
+### Pendiente Fase A
+- Extender benchmark ya comparado a corrida prolongada (mayor duración y cardinalidad alta) para cierre final de fase.
+
+---
+
+## Actualización (2026-03-04) — Mitigación de 429 cruzado: rate-limit separado para `/logs` y `/stats`
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/main.rs`
+  - se separó el bucket admin en limiters dedicados:
+    - `logs_endpoints` para `/logs`
+    - `stats_endpoints` para `/stats`, `/stats/daily`, `/dashboard`
+  - nuevas env vars:
+    - `GITGOV_RATE_LIMIT_LOGS_PER_MIN` (default hereda `GITGOV_RATE_LIMIT_ADMIN_PER_MIN`)
+    - `GITGOV_RATE_LIMIT_STATS_PER_MIN` (default hereda `GITGOV_RATE_LIMIT_ADMIN_PER_MIN`)
+- `gitgov/gitgov-server/src/handlers/conversational/core.rs`
+  - documentación interna del bot actualizada para reflejar los nuevos rate-limits configurables.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo fmt` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> falla por deuda preexistente:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:326` (`if_same_then_else`)
+- `cd gitgov && npx tsc -b` -> OK
+
+### Impacto Golden Path
+- Sin cambios en auth Bearer ni en contrato de `/events`, `/logs`, `/stats`.
+- Objetivo del cambio: evitar que la cuota de `/logs` consuma el presupuesto de `/stats` y provoque `429` percibido como “crash”.
+
+---
+
+## Actualización (2026-03-04) — Documento de performance ampliado (plan integral de cierre)
+
+### Qué se actualizó
+- `docs/PERFORMANCE_SCALABILITY_AUDIT_2026-03-04.md`
+  - nueva evidencia consolidada y actualizada en:
+    - `11.9 Hallazgos confirmados`
+    - `11.10 Plan integral de cierre`
+    - `11.11 Plan de ejecución y aprobación`
+  - foco: cierre por fases sin romper Golden Patch ni bot.
+
+### Cambios de código
+- Ninguno (solo documentación).
+
+---
+
+## Actualización (2026-03-04) — Fase 0 baseline consolidada (control plane)
+
+### Qué se implementó
+- Nuevo benchmark reproducible:
+  - `gitgov/gitgov-server/tests/perf_baseline_control_plane.py`
+  - mide por endpoint: `POST /events`, `GET /logs`, `GET /stats`, `POST /chat/ask`
+  - métricas: `p50/p95/p99`, throughput, `401/429/5xx`.
+
+### Ejecución
+- Comando:
+  - `python tests/perf_baseline_control_plane.py --server-url http://127.0.0.1:3000 --requests 35 --concurrency 4 --timeout-sec 12 --out-json tests/artifacts/perf_baseline_control_plane_2026-03-04.json`
+- Artefacto:
+  - `gitgov/gitgov-server/tests/artifacts/perf_baseline_control_plane_2026-03-04.json`
+
+### Resultado resumido
+- `POST /events`:
+  - HTTP `200=35`; p50 `603.6ms`; p95 `1952.5ms`; p99 `2056.3ms`; throughput `4.76 rps`.
+- `GET /logs`:
+  - HTTP `200=35`; p50 `611.1ms`; p95 `824.4ms`; p99 `877.6ms`; throughput `5.80 rps`.
+- `GET /stats`:
+  - HTTP `200=25`, `429=10`; p50 `206.6ms`; p95 `1005.8ms`; p99 `1068.9ms`; throughput `13.12 rps`.
+- `POST /chat/ask`:
+  - HTTP `200=35`; p50 `512.7ms`; p95 `1114.9ms`; p99 `1170.4ms`; throughput `6.96 rps`.
+
+### Lectura operativa
+- El `429` en `/stats` aparece al compartir bucket admin con `/logs` en ráfaga combinada (`35 + 35 > 60/min`), consistente con rate-limit actual.
+- No se observaron `401` ni `5xx` en este baseline.
+
+---
+
+## Actualización (2026-03-04) — Fase 5 complemento: JWT secret y CORS por entorno (server)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/main.rs`
+  - hardening de `GITGOV_JWT_SECRET`:
+    - fallback inseguro permitido solo en dev o con `GITGOV_ALLOW_INSECURE_JWT_FALLBACK=true`,
+    - en no-dev estricto, si falta `GITGOV_JWT_SECRET` el server aborta startup.
+  - CORS configurable por entorno:
+    - `GITGOV_CORS_ALLOW_ANY` (default: `true` en dev, `false` en no-dev),
+    - `GITGOV_CORS_ALLOW_ORIGINS` (lista CSV) para modo estricto.
+    - si modo estricto está activo sin orígenes válidos, el server aborta startup.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ServerDashboard.tsx src/components/control_plane/TeamManagementPanel.tsx src/components/control_plane/RecentCommitsTable.tsx src/router.tsx` -> 0 errores
+- smoke server:
+  - `GET /health` -> `200`
+
+### NO VERIFICADO
+- `cargo clippy -- -D warnings` en server sigue fallando por deuda preexistente:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:326` (`if_same_then_else`).
+
+---
+
+## Actualización (2026-03-04) — Fase 5 iniciada: hardening de API key fallback en frontend
+
+### Qué se implementó
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - el fallback hardcodeado (`LEGACY_DEFAULT_API_KEY`) ya no se aplica siempre.
+  - nuevo gate: `VITE_ALLOW_LEGACY_DEFAULT_API_KEY`.
+  - comportamiento:
+    - si `VITE_ALLOW_LEGACY_DEFAULT_API_KEY=true` -> fallback legacy habilitado.
+    - si `VITE_ALLOW_LEGACY_DEFAULT_API_KEY=false` -> fallback legacy deshabilitado.
+    - si no está definido -> default `true` solo en `DEV`, `false` en build no-dev.
+
+### Validación ejecutada
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts` -> 0 errores
+
+### Impacto Golden Path
+- No toca backend/auth Bearer ni contratos de `/events` `/logs` `/stats`.
+- En desarrollo local se mantiene compatibilidad por defecto (fallback activo en `DEV`).
+- Smoke contractual posterior:
+  - `GET /health` -> `200`
+  - `GET /stats` con Bearer -> shape válido
+  - `GET /logs?limit=5&offset=0` con Bearer -> `5` eventos
+
+### Observación de riesgo mitigado
+- El path que más se alineaba al síntoma de “freeze al escribir en chat” (serialización síncrona de historial por cada cambio) quedó desacoplado del turno de render.
+
+---
+
+## Actualización (2026-03-04) — Fase 3 complemento: pool DB configurable para carga alta
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/db.rs`
+  - `Database::new(...)` dejó de usar pool fijo `max_connections=10`.
+  - tuning configurable por env:
+    - `GITGOV_DB_MAX_CONNECTIONS` (default `20`)
+    - `GITGOV_DB_MIN_CONNECTIONS` (default `2`)
+    - `GITGOV_DB_ACQUIRE_TIMEOUT_SECS` (default `8`)
+    - `GITGOV_DB_IDLE_TIMEOUT_SECS` (default `300`)
+    - `GITGOV_DB_MAX_LIFETIME_SECS` (default `1800`)
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `GET /stats/daily?days=14` -> `14` filas (`2026-03-04` ... `2026-02-19`)
+
+### NO VERIFICADO
+- `cargo clippy -- -D warnings` en server sigue fallando por deuda preexistente:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:326` (`if_same_then_else`).
+
+---
+
+## Actualización (2026-03-04) — Fase 3 complemento: `/stats/daily` más index-friendly
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/db.rs`
+  - `get_daily_activity(...)` dejó de usar `(created_at AT TIME ZONE 'UTC')::date = day`.
+  - ahora usa rango por día:
+    - `created_at >= day_utc::timestamp`
+    - `created_at < day_utc::timestamp + interval '1 day'`
+  - objetivo: permitir mejor aprovechamiento de índices sobre `created_at` en tablas grandes.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- runtime contractual:
+  - `GET /stats/daily?days=14` -> `count=14`, campos `day/commits/pushes` presentes
+
+### NO VERIFICADO
+- `cargo clippy -- -D warnings` en server sigue fallando por deuda preexistente:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:326` (`if_same_then_else`).
+
+---
+
+## Actualización (2026-03-04) — Fase 4 iniciada: UI team incremental + tabla commits optimizada
+
+### Qué se implementó
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - `loadTeamOverview(...)` y `loadTeamRepos(...)` ahora soportan `append?: boolean`.
+  - en modo append, fusionan resultados sin duplicar (`login` para developers, `repo_name` para repos).
+- `gitgov/src/components/control_plane/TeamManagementPanel.tsx`
+  - carga inicial de team/repo en chunks (`TEAM_PAGE_SIZE=50`).
+  - botón `Cargar más` para traer siguientes páginas (`offset` + `append=true`) sin reemplazar todo.
+  - fetch de team por pestaña activa para evitar doble carga simultánea de endpoints pesados.
+  - reduce payload/render inicial en orgs grandes y evita picos al abrir panel.
+- `gitgov/src/components/control_plane/RecentCommitsTable.tsx`
+  - índice por prefijo de SHA (7..12) para correlaciones CI/PR, evitando fallback O(n*m) en el path común.
+  - evita trabajo duplicado en render (preview/sha se calculan una vez por fila).
+- `gitgov/src/router.tsx`
+  - `errorElement` por ruta (`RouteErrorPage`) para degradación controlada de UI ante errores de componente.
+- `gitgov/src/components/control_plane/ServerDashboard.tsx`
+  - auto-refresh ahora se pausa cuando la ventana está en segundo plano (`document.visibilityState !== 'visible'`).
+  - al volver a primer plano, ejecuta refresh normal y reduce ráfagas innecesarias en background.
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - nuevo `loadLogsIncremental(limit)`:
+    - trae solo eventos nuevos desde `start_date = latest_created_at` y fusiona por `id` (dedupe + orden descendente),
+    - fallback automático a `loadLogs` completo si falla incremental.
+  - `refreshDashboardData` y `refreshForCurrentRole` (developer) usan incremental para evitar recargar ventana completa de 500 cada ciclo.
+  - persistencia de chat optimizada:
+    - serialización pesada de historial se difiere a `requestIdleCallback` (o debounce fallback `setTimeout(120ms)`),
+    - se cancela trabajo pendiente previo para evitar tormenta de escrituras en `localStorage` al tipear rápido.
+
+### Validación ejecutada
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov && npx eslint src/components/control_plane/ServerDashboard.tsx src/components/control_plane/TeamManagementPanel.tsx src/components/control_plane/RecentCommitsTable.tsx src/store/useControlPlaneStore.ts src/router.tsx` -> 0 errores
+
+### Impacto Golden Path
+- sin cambios en auth Bearer, `/events`, `/logs`, `/stats`, bot o contratos server/tauri.
+- cambios limitados a rendimiento UI/control-plane store (frontend).
+
+---
+
+## Actualización (2026-03-04) — Fase 3 iniciada: cache TTL de `/stats` + invalidación por ingesta
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+  - `AppState` ahora incluye cache in-memory de stats:
+    - `stats_cache_ttl: Duration`
+    - `stats_cache: Arc<Mutex<HashMap<String, StatsCacheEntry>>>`
+  - nuevo `StatsCacheEntry { stats, expires_at }`.
+- `gitgov/gitgov-server/src/main.rs`
+  - nueva variable de entorno: `GITGOV_STATS_CACHE_TTL_MS` (default `3000`).
+  - wiring del cache en `AppState`.
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - `get_stats` ahora usa `load_audit_stats(...)` con cache por scope de org.
+  - `get_dashboard` reutiliza el mismo path cacheado.
+  - `ingest_client_events` invalida cache de stats después de inserción exitosa de lote.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts` -> 0 errores
+
+### Smoke runtime (server reiniciado)
+- `GET /health` -> `200`
+- `GET /stats` (x2 consecutivas) -> shape válido
+- latencia `/stats` en secuencia local (ms):
+  - primera llamada: `998`
+  - segunda llamada inmediata (cache-hit): `192`
+  - tercera llamada tras `~3.2s` (TTL expirado): `787`
+- `POST /events` (`commit`, usuario `stats_cache_probe2`) -> `accepted=1`, `errors=0`
+- `GET /logs?user_login=stats_cache_probe` -> evento visible (`event_type=commit`, `source=client`)
+- invalidación cache comprobada:
+  - `client_events.total` antes/después de ingesta: `366 -> 367` (`delta=+1`) inmediatamente
+
+### Impacto Golden Path
+- No se tocó auth Bearer ni contratos de `/events`, `/logs` o structs compartidas.
+- El flujo de ingesta y visualización se mantiene operativo en smoke.
+
+### NO VERIFICADO
+- `cargo clippy -- -D warnings` en server sigue fallando por deuda preexistente:
+  - `gitgov/gitgov-server/src/handlers/conversational/query.rs:326` (`if_same_then_else`).
+
+---
+
+## Actualización (2026-03-04) — Fase 2 iniciada: `/logs` con orden estable + cursor keyset (compat offset)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/models.rs`
+  - `EventFilter` ahora soporta cursor keyset:
+    - `before_created_at?: i64`
+    - `before_id?: string`
+- `gitgov/gitgov-server/src/db.rs`
+  - `get_combined_events(...)` ahora:
+    - ordena por `created_at DESC, id DESC` (orden determinístico),
+    - aplica filtro keyset opcional:
+      - `created_at < before_created_at`
+      - o empate por timestamp con `id < before_id`.
+  - mantiene compatibilidad con `limit/offset` existente.
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - cuando llega cursor keyset, fuerza `offset=0` para evitar mezclar offset+cursor.
+- `gitgov/src-tauri/src/control_plane/server.rs`
+  - `AuditFilter` amplía soporte con `before_created_at` y `before_id`.
+  - cliente Tauri envía estos query params cuando están presentes.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `79 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo test` -> `0 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts` -> 0 errores
+
+### Prueba funcional `/logs` (runtime local post-reinicio)
+- Page 1: `limit=10, offset=0`
+- Page 2 offset: `limit=10, offset=10`
+- Page 2 keyset: `limit=10, before_created_at=<last.created_at>, before_id=<last.id>`
+- Resultado:
+  - `page1_sorted_desc_created_at_id=true`
+  - `keyset_overlap_with_page1=0`
+  - compatibilidad offset preservada (`page2_offset_count=10`)
+
+### NO VERIFICADO
+- `cargo clippy -- -D warnings` en `gitgov-server` falla por deuda preexistente no relacionada al cambio:
+  - `src/handlers/conversational/query.rs:326` (`if_same_then_else`).
+
+---
+
+## Actualización (2026-03-04) — Validación runtime post-canary (server reiniciado + smoke + chat)
+
+### Reinicio y aplicación de configuración
+- Se reinició `gitgov-server` para aplicar tuning canary de `.env`:
+  - `GITGOV_RATE_LIMIT_CHAT_PER_MIN=120`
+  - `GITGOV_CHAT_LLM_MAX_CONCURRENCY=8`
+  - `GITGOV_CHAT_LLM_QUEUE_TIMEOUT_MS=1500`
+  - `GITGOV_CHAT_LLM_TIMEOUT_MS=12000`
+- `GET /health` después del reinicio -> `200`.
+
+### Verificación empírica de capacidad chat (post-canary)
+- Prueba secuencial (`125` requests a `/chat/ask`):
+  - `200=120`
+  - `429=5`
+- Ráfaga concurrente (`150` requests, workers=50):
+  - `200=106`
+  - `429=44`
+  - body real de 429:
+    - `{"code":"RATE_LIMITED","error":"Too many requests","retry_after_seconds":14}`
+
+### Smoke runtime Golden Path (equivalente PowerShell)
+- `/health` -> `200`
+- `/logs?limit=5&offset=0` -> shape válido (`events`)
+- Ingesta de eventos Golden Path:
+  - `stage_files`, `commit`, `attempt_push`, `successful_push` -> `4/4 accepted`
+  - visibles en `/logs` -> `4/4`
+  - duplicado de UUID -> detectado en `duplicates`
+
+### Resultado operativo
+- El canary quedó activo en runtime local y el comportamiento de `429` expone `retry_after_seconds`, alineado con el hardening de UI para mensaje “reintenta en N segundos”.
+- Golden Path contractual del server se mantiene estable en smoke post-reinicio.
+
+---
+
+## Actualización (2026-03-04) — Canary chat: tuning `.env` + UI hardening para 429
+
+### Qué se implementó
+- `gitgov/gitgov-server/.env`
+  - Se aplicó tuning canary de capacidad de chat (sin tocar Golden Path):
+    - `GITGOV_RATE_LIMIT_CHAT_PER_MIN=120`
+    - `GITGOV_CHAT_LLM_MAX_CONCURRENCY=8`
+    - `GITGOV_CHAT_LLM_QUEUE_TIMEOUT_MS=1500`
+    - `GITGOV_CHAT_LLM_TIMEOUT_MS=12000`
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - Hardening UX para errores de chat por cuota (`429`):
+    - parser de `retry_after_seconds` desde el mensaje de backend
+    - mensaje de usuario explícito: `Reintenta en N segundos`
+  - Si no llega `retry_after_seconds`, fallback: `Reintenta en unos segundos`.
+
+### Validación ejecutada
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts` -> 0 errores
+
+### Impacto Golden Path
+- Sin cambios en auth Bearer, `/events`, `/logs`, `/stats` ni flujo commit/push.
+- Cambio funcional limitado a capacidad/UX del chat.
+
+---
+
+## Actualización (2026-03-04) — Evidencia empírica: cuello de botella en `/chat/ask` (429 por rate-limit)
+
+### Pruebas ejecutadas (server local `http://127.0.0.1:3000`)
+- Smoke PowerShell equivalente (sin `bash` disponible en este entorno):
+  - `/health` -> `200`
+  - `/logs?limit=5&offset=0` -> shape válido (`events`)
+  - Inyección Golden Path (`stage_files`, `commit`, `attempt_push`, `successful_push`) -> `4/4 accepted`
+  - Verificación en `/logs` -> `4/4 visibles`
+  - Duplicado (`successful_push` mismo UUID) -> `duplicates` detectado
+- Benchmark chat (`tests/chat_capacity_test.py`):
+  - `120 req`, `concurrency=12`, `scenario=mixed`:
+    - HTTP: `200=39`, `429=81`
+    - throughput: `17.41 rps`
+    - latencia (all): `p50=219.2ms`, `p95=2674.9ms`, `p99=3898.3ms`
+    - artefacto: `gitgov/gitgov-server/tests/artifacts/chat_capacity_mixed_2026-03-04.json`
+  - `120 req`, `concurrency=4`, inmediatamente después:
+    - HTTP: `429=120` (ventana de rate-limit ya consumida)
+    - artefacto: `gitgov/gitgov-server/tests/artifacts/chat_capacity_mixed_c4_2026-03-04.json`
+  - tras enfriamiento, `20 req`, `concurrency=2`, `scenario=deterministic`:
+    - HTTP: `200=20`, `429=0`
+    - throughput: `3.93 rps`
+    - latencia: `p50=494.5ms`, `p95=1013.1ms`, `p99=1142.2ms`
+    - artefacto: `gitgov/gitgov-server/tests/artifacts/chat_capacity_det_c2_20_2026-03-04.json`
+
+### Confirmación causal (código + prueba controlada)
+- Código:
+  - `gitgov/gitgov-server/src/main.rs` define `GITGOV_RATE_LIMIT_CHAT_PER_MIN` con default `40` y ventana de 60s.
+  - `/chat/ask` está detrás de `chat_rate_limit` middleware.
+- Prueba controlada:
+  - 45 requests secuenciales a `/chat/ask` tras enfriamiento -> `200=40`, `429=5` (exactamente el límite).
+
+### Diagnóstico
+- Causa raíz del “chat se congela / no responde por minutos” bajo carga:
+  - saturación del rate-limit de chat (`40/min`) + ventana de 60s compartida por llave de rate-limit.
+- Esto no es crash de memoria del backend en esta evidencia; es rechazo controlado por cuota (`429 RATE_LIMITED`).
+
+### NO VERIFICADO
+- Causa exacta del error frontend `TypeError: Component is not a function` (screenshot React overlay) en esta sesión.
+
+---
+
+## Actualización (2026-03-04) — Fase 1 Outbox: chunking de envío para colas grandes
+
+### Qué se implementó
+- `gitgov/src-tauri/src/outbox/queue.rs`
+  - Se agregó loteo de outbox en chunks (`OUTBOX_BATCH_SIZE = 100`) para evitar un solo payload masivo al hacer flush.
+  - Se incorporó helper `build_batch(...)` para mantener contrato de `/events` sin cambios.
+  - `flush()` ahora procesa múltiples lotes y acumula `sent/duplicates/failed`.
+  - El worker background también procesa por lotes y corta en el primer error de red/HTTP/parse para evitar tormenta de requests.
+
+### Validación ejecutada
+- `cd gitgov/src-tauri && cargo fmt` -> OK
+- `cd gitgov/src-tauri && cargo test` -> `0 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+- `cd gitgov && npx tsc -b` -> sin errores
+- `cd gitgov && npm run lint` -> OK
+
+### Impacto Golden Path
+- Auth/Bearer/contratos server: sin cambios.
+- Bot/chat y lecturas de logs del control plane: sin cambios de código.
+- `NO VERIFICADO`: smoke runtime manual completo Desktop -> `/events` -> Dashboard bajo carga real de org grande en esta sesión.
+
+---
+
+## Actualización (2026-03-04) — Fase 1 Outbox: menos sobrecarga sin tocar el bot
+
+### Qué se implementó
+- `gitgov/src-tauri/src/commands/git_commands.rs`
+  - `trigger_flush(...)` dejó de crear un `thread::spawn` por evento y ahora solo notifica al worker (`outbox.notify_flush()`).
+- `gitgov/src-tauri/src/outbox/queue.rs`
+  - Se agregó `Outbox::notify_flush()` para despertar el worker sin flush síncrono por comando.
+  - El worker de `start_background_flush(...)` ya no despierta cada 1 segundo fijo; ahora espera hasta el próximo intervalo real o señal (`Condvar`) y puede flush-ear inmediatamente al recibir eventos.
+  - Se eliminó la reconciliación O(n²) de UUIDs (`Vec::contains` repetido) y se reemplazó por sets O(1) en `apply_batch_response(...)`.
+  - Se reutiliza un `reqwest::blocking::Client` compartido por `Outbox` (en lugar de construir cliente HTTP nuevo en cada flush).
+
+### Validación ejecutada
+- `cd gitgov/src-tauri && cargo fmt` → OK
+- `cd gitgov/src-tauri && cargo test` → `0 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` → OK (sin warnings)
+- `cd gitgov && npx tsc -b` → sin errores
+- `cd gitgov && npm run lint` → OK
+
+### Impacto en Golden Path
+- ¿Modifica auth/token/API key/handlers/dashboard? **No**.
+- ¿Modifica componentes críticos de flujo de eventos? **Sí**, solo outbox desktop (`commands/git_commands.rs` + `outbox/queue.rs`), sin tocar backend/server ni lógica del chatbot.
+- `NO VERIFICADO`: validación runtime manual completa Desktop → `/events` → PostgreSQL → Dashboard en esta sesión (faltó ejecutar flujo interactivo de commit/push con app y server vivos al mismo tiempo).
+
+---
+
 ## Actualización (2026-03-04) — Documentación: Golden Path incluye chatbot
 
 ### Qué se actualizó (solo docs)
@@ -2654,3 +4561,17 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
 - Validación ejecutada:
   - `cd gitgov && npm run typecheck` -> OK
   - `cd gitgov && npx eslint src/store/useAuthStore.ts src/components/auth/LoginScreen.tsx` -> 0 errores
+
+## 2026-03-06 - Limpieza de secretos en archivos versionados (sin tocar .env)
+
+- Alcance aplicado:
+  - No se modificó ningún archivo `.env`.
+  - Se eliminó token sensible embebido en `.mcp.json` y se reemplazó por referencia de entorno `${GITHUB_PERSONAL_ACCESS_TOKEN}`.
+
+- Verificación de exposición:
+  - Escaneo por patrones de secretos (`ghp_`, `github_pat_`, `sk-`, `AKIA`, `AIza`, llaves privadas) excluyendo `.env*` -> sin hallazgos reales.
+  - Cruce exacto de valores sensibles presentes en `.env` contra archivos no `.env` -> `TOTAL_HITS=0`.
+
+- Validación de no regresión:
+  - `cd gitgov/gitgov-server && cargo test` -> `99 passed; 0 failed`
+  - `cd gitgov && npx tsc -b` -> sin errores

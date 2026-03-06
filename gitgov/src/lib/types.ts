@@ -50,7 +50,10 @@ export interface AuditFilter {
   action?: string
   status?: string
   branch?: string
+  before_created_at?: number
+  before_id?: string
   limit: number
+  // Legacy fallback for /logs; prefer keyset cursor when possible.
   offset: number
 }
 
