@@ -49,8 +49,6 @@ interface FileItemProps {
   file: FileChange
   selected: boolean
   disabled: boolean
-  pendingPushOnly?: boolean
-  pendingPushTouches?: number | null
   gitgovHiddenRule?: string | null
   showGitGovHiddenBadge?: boolean
   onToggle: () => void
@@ -99,27 +97,20 @@ const FileItem = memo(function FileItem({
   file,
   selected,
   disabled,
-  pendingPushOnly = false,
-  pendingPushTouches = null,
   gitgovHiddenRule,
   showGitGovHiddenBadge,
   onToggle,
   onViewDiff,
   onUnstage,
 }: FileItemProps) {
-  const statusChar = pendingPushOnly
-    ? 'P'
-    : {
-      Modified: 'M',
-      Added: 'A',
-      Deleted: 'D',
-      Renamed: 'R',
-      Untracked: '?',
-    }[file.status]
-  const statusClass = pendingPushOnly
-    ? 'bg-warning-500/15 text-warning-300 border border-warning-500/30'
-    : FILE_STATUS_COLORS[statusChar ?? '?']
-  const interactionsBlocked = disabled || pendingPushOnly
+  const statusChar = {
+    Modified: 'M',
+    Added: 'A',
+    Deleted: 'D',
+    Renamed: 'R',
+    Untracked: '?',
+  }[file.status]
+  const interactionsBlocked = disabled
 
   const lastSlash = file.path.lastIndexOf('/')
   const dir = lastSlash >= 0 ? file.path.slice(0, lastSlash) : ''
@@ -130,8 +121,7 @@ const FileItem = memo(function FileItem({
       className={clsx(
         'flex items-center gap-2.5 px-3 py-2 cursor-pointer group transition-colors duration-150',
         selected ? 'bg-white/3' : 'hover:bg-white/2',
-        disabled && 'opacity-50',
-        pendingPushOnly && 'bg-warning-500/5'
+        disabled && 'opacity-50'
       )}
     >
       <button
@@ -153,7 +143,7 @@ const FileItem = memo(function FileItem({
         <span
           className={clsx(
             'shrink-0 w-4 h-4 rounded text-[9px] font-semibold mono-data flex items-center justify-center',
-            statusClass
+            FILE_STATUS_COLORS[statusChar ?? '?']
           )}
         >
           {statusChar}
@@ -171,23 +161,10 @@ const FileItem = memo(function FileItem({
               GitGov-hidden
             </span>
           )}
-          {pendingPushOnly && (
-            <span
-              title="Archivo presente en commit(s) local(es) pendiente(s) de push"
-              className="text-[9px] px-1.5 py-0.5 rounded bg-warning-500/15 text-warning-200 border border-warning-500/30 shrink-0"
-            >
-              Sin push
-            </span>
-          )}
-          {pendingPushOnly && pendingPushTouches && pendingPushTouches > 1 && (
-            <span className="text-[9px] text-warning-300 shrink-0">
-              {pendingPushTouches} commits
-            </span>
-          )}
         </div>
       </div>
 
-      {file.staged && !pendingPushOnly && (
+      {file.staged && (
         <button
           onClick={(e) => { e.stopPropagation(); onUnstage() }}
           title="Quitar del staging"
@@ -206,14 +183,12 @@ const FileItem = memo(function FileItem({
         </div>
       )}
 
-      {!pendingPushOnly && (
-        <button
-          onClick={onViewDiff}
-          className="opacity-0 group-hover:opacity-100 text-surface-500 hover:text-surface-300 transition-all duration-150"
-        >
-          <FileText size={13} strokeWidth={1.5} />
-        </button>
-      )}
+      <button
+        onClick={onViewDiff}
+        className="opacity-0 group-hover:opacity-100 text-surface-500 hover:text-surface-300 transition-all duration-150"
+      >
+        <FileText size={13} strokeWidth={1.5} />
+      </button>
     </div>
   )
 })
@@ -228,7 +203,6 @@ export function FileList() {
     isLoadingStatus,
     selectFile,
     deselectFile,
-    selectAll,
     deselectAll,
     stageFiles,
     loadDiff,
@@ -260,12 +234,12 @@ export function FileList() {
   const [listScrollTop, setListScrollTop] = useState(0)
   const [listViewportHeight, setListViewportHeight] = useState(480)
   const [busyGroupActionKey, setBusyGroupActionKey] = useState<string | null>(null)
-  const [showPendingPushFiles, setShowPendingPushFiles] = useState(true)
   const listContainerRef = useRef<HTMLDivElement | null>(null)
+  const pendingPushFilesCountRaw = pendingPushPreview?.files.length ?? 0
 
   useEffect(() => {
     setVisibleCount(INITIAL_VISIBLE_ROWS)
-  }, [fileChanges.length, searchQuery])
+  }, [fileChanges.length, pendingPushFilesCountRaw, searchQuery])
 
   useEffect(() => {
     if (!repoPath) return
@@ -338,44 +312,20 @@ export function FileList() {
     if (node) {
       node.scrollTop = 0
     }
-  }, [repoPath, searchQuery, fileChanges.length])
-
-  useEffect(() => {
-    if (!pendingPushPreview || pendingPushPreview.files.length === 0) {
-      setShowPendingPushFiles(true)
-      return
-    }
-    if (fileChanges.length === 0) {
-      setShowPendingPushFiles(true)
-    }
-  }, [pendingPushPreview, fileChanges.length])
-
-  useEffect(() => {
-    if (searchQuery.trim()) return
-    if (fileChanges.length <= LARGE_CHANGESET_THRESHOLD) {
-      setExpandedGroups(new Set())
-      return
-    }
-
-    const groups = Array.from(
-      fileChanges.reduce((acc, file) => {
-        const folder = topLevelFolder(file.path)
-        acc.set(folder, (acc.get(folder) ?? 0) + 1)
-        return acc
-      }, new Map<string, number>()).entries()
-    )
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .slice(0, 3)
-      .map(([folder]) => folder)
-
-    setExpandedGroups(new Set(groups))
-  }, [fileChanges, searchQuery])
+  }, [repoPath, searchQuery, fileChanges.length, pendingPushFilesCountRaw])
 
   const handleToggle = (path: string, isSelected: boolean) => {
     if (isSelected) {
       deselectFile(path)
     } else {
       selectFile(path)
+    }
+  }
+
+  const handleSelectAllVisible = () => {
+    deselectAll()
+    for (const file of visibleFiles) {
+      selectFile(file.path)
     }
   }
 
@@ -395,28 +345,46 @@ export function FileList() {
     }
   }
 
-  const analysis = useMemo(() => analyzeLargeChangeset(fileChanges), [fileChanges])
+  const pendingPushFiles = pendingPushPreview?.files
+  const workingTreePathSet = useMemo(() => new Set(fileChanges.map((f) => f.path)), [fileChanges])
+  const pendingPushOnlyFiles = useMemo<FileChange[]>(
+    () =>
+      (pendingPushFiles ?? [])
+        .filter((entry) => !workingTreePathSet.has(entry.path))
+        .map((entry) => ({
+          path: entry.path,
+          status: 'Modified',
+          staged: false,
+        })),
+    [pendingPushFiles, workingTreePathSet]
+  )
+  const effectiveFileChanges = useMemo(
+    () => [...pendingPushOnlyFiles, ...fileChanges],
+    [pendingPushOnlyFiles, fileChanges]
+  )
+
+  const analysis = useMemo(() => analyzeLargeChangeset(effectiveFileChanges), [effectiveFileChanges])
   const normalizedQuery = searchQuery.trim().toLowerCase()
   const gitgovHiddenPathSet = useMemo(() => {
     if (gitgovIgnoreRules.length === 0) return new Set<string>()
     const set = new Set<string>()
-    for (const f of fileChanges) {
+    for (const f of effectiveFileChanges) {
       if (isHiddenByGitGovIgnore(f.path, gitgovIgnoreRules)) set.add(f.path)
     }
     return set
-  }, [fileChanges, gitgovIgnoreRules])
+  }, [effectiveFileChanges, gitgovIgnoreRules])
   const gitgovHiddenCount = gitgovHiddenPathSet.size
   const gitgovHiddenRuleByPath = useMemo(() => {
     const map = new Map<string, string>()
     if (gitgovIgnoreRules.length === 0) return map
-    for (const f of fileChanges) {
+    for (const f of effectiveFileChanges) {
       const matched = firstMatchingGitGovIgnoreRule(f.path, gitgovIgnoreRules)
       if (matched) {
         map.set(f.path, matched)
       }
     }
     return map
-  }, [fileChanges, gitgovIgnoreRules])
+  }, [effectiveFileChanges, gitgovIgnoreRules])
   const gitgovHiddenTopRules = useMemo(() => {
     if (gitgovIgnoreRules.length === 0 || gitgovHiddenCount === 0) return [] as Array<{ rule: string; count: number }>
     const counts = new Map<string, number>()
@@ -429,9 +397,9 @@ export function FileList() {
       .map(([rule, count]) => ({ rule, count }))
   }, [gitgovHiddenCount, gitgovHiddenRuleByPath, gitgovIgnoreRules])
   const gitgovVisibleFiles = useMemo(() => {
-    if (showGitGovHidden || gitgovHiddenCount === 0) return fileChanges
-    return fileChanges.filter((f) => !gitgovHiddenPathSet.has(f.path))
-  }, [fileChanges, showGitGovHidden, gitgovHiddenCount, gitgovHiddenPathSet])
+    if (showGitGovHidden || gitgovHiddenCount === 0) return effectiveFileChanges
+    return effectiveFileChanges.filter((f) => !gitgovHiddenPathSet.has(f.path))
+  }, [effectiveFileChanges, showGitGovHidden, gitgovHiddenCount, gitgovHiddenPathSet])
   const noisePathSet = useMemo(() => {
     const set = new Set<string>()
     for (const f of gitgovVisibleFiles) {
@@ -452,6 +420,27 @@ export function FileList() {
     if (!normalizedQuery) return noiseFilteredFiles
     return noiseFilteredFiles.filter((f) => f.path.toLowerCase().includes(normalizedQuery))
   }, [noiseFilteredFiles, normalizedQuery])
+
+  useEffect(() => {
+    if (searchQuery.trim()) return
+    if (effectiveFileChanges.length <= LARGE_CHANGESET_THRESHOLD) {
+      setExpandedGroups(new Set())
+      return
+    }
+
+    const groups = Array.from(
+      effectiveFileChanges.reduce((acc, file) => {
+        const folder = topLevelFolder(file.path)
+        acc.set(folder, (acc.get(folder) ?? 0) + 1)
+        return acc
+      }, new Map<string, number>()).entries()
+    )
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 3)
+      .map(([folder]) => folder)
+
+    setExpandedGroups(new Set(groups))
+  }, [effectiveFileChanges, searchQuery])
 
   useEffect(() => {
     if (analysis.stackTemplates.length === 0) {
@@ -630,12 +619,8 @@ export function FileList() {
 
   const unstagedCount = useMemo(() => fileChanges.reduce((acc, f) => acc + (f.staged ? 0 : 1), 0), [fileChanges])
   const hasUnstagedFiles = unstagedCount > 0
-  const pendingPushFiles = pendingPushPreview?.files ?? []
-  const pendingPushCommits = pendingPushPreview?.commit_count ?? 0
-  const pendingPushFilesCount = pendingPushFiles.length
-  const hasPendingPushFiles = pendingPushCommits > 0 && pendingPushFilesCount > 0
   const someSelected = selectedFiles.size > 0
-  const isLargeChangeset = fileChanges.length > LARGE_CHANGESET_THRESHOLD
+  const isLargeChangeset = effectiveFileChanges.length > LARGE_CHANGESET_THRESHOLD
   const visibleFiles = isLargeChangeset ? filteredFiles.slice(0, visibleCount) : filteredFiles
   const hiddenFilesCount = filteredFiles.length - visibleFiles.length
   const shouldVirtualizeFlatList = !isLargeChangeset && filteredFiles.length > FLAT_LIST_VIRTUALIZE_THRESHOLD
@@ -734,7 +719,7 @@ export function FileList() {
     <div className="h-full flex flex-col bg-surface-900/50 border-r border-surface-700/30">
       <div className="flex items-center justify-between px-4 py-3 border-b border-surface-700/30">
         <h3 className="text-[10px] font-medium text-surface-500 uppercase tracking-widest">
-          Cambios ({fileChanges.length})
+          Cambios ({effectiveFileChanges.length})
         </h3>
         <div className="flex gap-2">
           {someSelected ? (
@@ -753,72 +738,38 @@ export function FileList() {
                 Deseleccionar
               </button>
             </>
-          ) : hasUnstagedFiles ? (
+          ) : effectiveFileChanges.length > 0 ? (
             <>
-              <button
-                onClick={handlePrepareAll}
-                disabled={isPreparing}
-                className="text-[11px] text-brand-400 hover:text-brand-300 flex items-center gap-1 transition-colors disabled:opacity-50"
-              >
-                {isPreparing ? (
-                  <Loader2 size={11} className="animate-spin" />
-                ) : (
-                  <Plus size={11} />
-                )}
-                Preparar todo ({unstagedCount})
-              </button>
+              {hasUnstagedFiles && (
+                <button
+                  onClick={handlePrepareAll}
+                  disabled={isPreparing}
+                  className="text-[11px] text-brand-400 hover:text-brand-300 flex items-center gap-1 transition-colors disabled:opacity-50"
+                >
+                  {isPreparing ? (
+                    <Loader2 size={11} className="animate-spin" />
+                  ) : (
+                    <Plus size={11} />
+                  )}
+                  Preparar todo ({unstagedCount})
+                </button>
+              )}
               {!isLargeChangeset ? (
                 <button
-                  onClick={selectAll}
+                  onClick={handleSelectAllVisible}
                   className="text-[11px] text-surface-500 hover:text-surface-300 transition-colors"
                 >
                   Seleccionar todo
                 </button>
               ) : (
                 <span className="text-[10px] text-surface-600">
-                  Cambios masivos: usa &quot;Preparar todo&quot;
+                  Cambios masivos: usa selección por carpeta o búsqueda
                 </span>
               )}
             </>
           ) : null}
         </div>
       </div>
-
-      {hasPendingPushFiles && (
-        <div className="px-4 py-2 border-b border-warning-500/20 bg-warning-500/5">
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-[11px] text-warning-200">
-              Pendiente de push: {pendingPushCommits} commit(s) local(es), {pendingPushFilesCount}
-              {' '}archivo(s) en esos commits.
-            </p>
-            <button
-              type="button"
-              onClick={() => setShowPendingPushFiles((prev) => !prev)}
-              className="text-[10px] px-2 py-1 rounded border border-warning-500/30 text-warning-200 hover:bg-warning-500/10 transition-colors"
-            >
-              {showPendingPushFiles ? 'Ocultar archivos' : 'Ver archivos'}
-            </button>
-          </div>
-
-          {showPendingPushFiles && (
-            <div className="mt-2 max-h-36 overflow-y-auto rounded border border-warning-500/20 bg-surface-950/40 divide-y divide-warning-500/10">
-              {pendingPushFiles.map((entry) => (
-                <div key={entry.path} className="flex items-center justify-between gap-2 px-2.5 py-1.5">
-                  <span className="text-[11px] text-surface-200 truncate mono-data">{entry.path}</span>
-                  <span className="text-[10px] text-warning-300 shrink-0">
-                    {entry.commits_touching} commit(s)
-                  </span>
-                </div>
-              ))}
-              {pendingPushPreview?.truncated && (
-                <div className="px-2.5 py-1.5 text-[10px] text-warning-300">
-                  Lista truncada por tamaño. Refina el push para reducir volumen visible.
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
 
       <div className="px-4 py-2 border-b border-surface-700/20 bg-surface-950/40">
         <label className="flex items-center gap-2 rounded-lg border border-surface-700/40 bg-surface-900/70 px-2.5 py-2">
@@ -832,7 +783,7 @@ export function FileList() {
         </label>
         {normalizedQuery && (
           <p className="mt-1.5 text-[10px] text-surface-500">
-            Coincidencias: {filteredFiles.length.toLocaleString()} / {fileChanges.length.toLocaleString()}
+            Coincidencias: {filteredFiles.length.toLocaleString()} / {effectiveFileChanges.length.toLocaleString()}
           </p>
         )}
 
@@ -956,7 +907,7 @@ export function FileList() {
             <AlertCircle size={13} strokeWidth={1.75} className="text-warning-500 mt-0.5 shrink-0" />
             <div className="min-w-0">
               <p className="text-[11px] text-warning-300 font-medium">
-                Cambios masivos detectados ({fileChanges.length.toLocaleString()} archivos)
+                Cambios masivos detectados ({effectiveFileChanges.length.toLocaleString()} archivos)
               </p>
               <p className="text-[10px] text-surface-500 mt-0.5">
                 Se renderiza una vista parcial para evitar bloqueos. Aun puedes preparar todo.
@@ -1258,28 +1209,17 @@ export function FileList() {
         onScroll={(e) => setListScrollTop(e.currentTarget.scrollTop)}
         className="flex-1 overflow-y-auto divide-y divide-surface-700/15"
       >
-        {isLoadingStatus && fileChanges.length === 0 ? (
+        {isLoadingStatus && effectiveFileChanges.length === 0 ? (
           <div className="space-y-0.5">
             {[1, 2, 3, 4, 5].map((i) => (
               <SkeletonFileRow key={i} />
             ))}
           </div>
-        ) : fileChanges.length === 0 ? (
+        ) : effectiveFileChanges.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-surface-500 p-6">
             <FileCode size={24} strokeWidth={1.5} className="mb-3 text-surface-700" />
-            {hasPendingPushFiles ? (
-              <>
-                <p className="text-xs font-medium text-warning-200">Working tree limpio</p>
-                <p className="text-[11px] text-warning-300 mt-1 text-center">
-                  Hay commits locales sin push. Revisa arriba la lista de archivos pendientes.
-                </p>
-              </>
-            ) : (
-              <>
-                <p className="text-xs font-medium text-surface-400">No hay cambios</p>
-                <p className="text-[11px] text-surface-600 mt-1">Edita archivos para empezar</p>
-              </>
-            )}
+            <p className="text-xs font-medium text-surface-400">No hay cambios</p>
+            <p className="text-[11px] text-surface-600 mt-1">Edita archivos para empezar</p>
           </div>
         ) : filteredFiles.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-surface-500 p-6">
@@ -1426,7 +1366,7 @@ export function FileList() {
           {hiddenFilesCount > 0 && (
             <p className="text-[10px] text-surface-500 mt-1">
               Mostrando {visibleFiles.length.toLocaleString()} de {filteredFiles.length.toLocaleString()}
-              {normalizedQuery ? ` coincidencias (de ${fileChanges.length.toLocaleString()} cambios)` : ` cambios`}
+              {normalizedQuery ? ` coincidencias (de ${effectiveFileChanges.length.toLocaleString()} cambios)` : ` cambios`}
             </p>
           )}
           {!isLargeChangeset && shouldVirtualizeFlatList && (

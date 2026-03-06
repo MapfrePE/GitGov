@@ -4695,3 +4695,19 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
   - `cd gitgov && npx eslint src/components/diff/FileList.tsx src/store/useRepoStore.ts src/lib/types.ts` -> 0 errores nuevos
   - Verificación repo actual:
     - `git -C c:\Users\PC\Desktop\GitGov diff --name-only origin/main..main | Measure-Object -Line` -> `90`
+
+## 2026-03-06 - Corrección UX (sin panel extra): pendientes integrados en Cambios
+
+- Ajuste solicitado por producto:
+  - Se eliminó el bloque visual separado de “pendiente de push”.
+  - Los archivos de commits locales no pusheados ahora se inyectan directamente en la lista normal de `Cambios` para que no “desaparezcan” del flujo principal.
+  - Esos archivos se pueden seleccionar desde el mismo listado (sin vista adicional).
+
+- Archivos tocados:
+  - `gitgov/src/components/diff/FileList.tsx`
+
+- Validación ejecutada:
+  - `cd gitgov && npx eslint src/components/diff/FileList.tsx` -> sin errores
+  - `cd gitgov && npx tsc -b` -> sin errores
+  - `cd gitgov/src-tauri && cargo test` -> `17 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo test` -> `99 passed; 0 failed`
