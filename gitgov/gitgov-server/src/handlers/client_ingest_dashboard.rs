@@ -8,6 +8,7 @@ pub async fn ingest_client_events(
     Json(batch): Json<ClientEventBatch>,
 ) -> impl IntoResponse {
     let batch_len = batch.events.len();
+    metrics::histogram!("gitgov_events_batch_size").record(batch_len as f64);
     if state.events_max_batch > 0 && batch_len > state.events_max_batch {
         tracing::warn!(
             auth_user = %auth_user.client_id,
@@ -255,6 +256,21 @@ pub async fn ingest_client_events(
             invalidate_stats_cache(&state);
             invalidate_logs_cache(&state);
 
+            // Prometheus counters
+            metrics::counter!("gitgov_events_ingested_total", "status" => "accepted")
+                .increment(response.accepted.len() as u64);
+            metrics::counter!("gitgov_events_ingested_total", "status" => "duplicate")
+                .increment(response.duplicates.len() as u64);
+            metrics::counter!("gitgov_events_ingested_total", "status" => "error")
+                .increment(response.errors.len() as u64);
+
+            // Notify SSE subscribers about new events (fire-and-forget).
+            // Single notification — frontend refreshes both logs and stats on new_events.
+            let accepted_count = response.accepted.len() as u32;
+            if accepted_count > 0 {
+                let _ = state.sse_tx.send(SseNotification::NewEvents { count: accepted_count });
+            }
+
             // Fire-and-forget: update client_sessions last_seen + device metadata
             {
                 let client_id = auth_user.client_id.clone();
@@ -350,8 +366,8 @@ pub struct OutboxLeaseTelemetryResponse {
     pub telemetry: OutboxLeaseTelemetrySnapshot,
 }
 
-fn record_outbox_lease_telemetry(
-    state: &Arc<AppState>,
+#[derive(Debug, Clone, Copy)]
+struct OutboxLeaseTelemetryInput {
     mode: OutboxLeaseTelemetryMode,
     requested_ttl_ms: u64,
     effective_ttl_ms: u64,
@@ -359,17 +375,19 @@ fn record_outbox_lease_telemetry(
     ttl_clamped: bool,
     wait_clamped: bool,
     request_started: Instant,
-) {
+}
+
+fn record_outbox_lease_telemetry(state: &Arc<AppState>, input: OutboxLeaseTelemetryInput) {
     match state.outbox_lease_telemetry.lock() {
-        Ok(mut telemetry) => telemetry.record(
-            mode,
-            requested_ttl_ms,
-            effective_ttl_ms,
-            wait_ms,
-            ttl_clamped,
-            wait_clamped,
-            request_started.elapsed().as_millis() as u64,
-        ),
+        Ok(mut telemetry) => telemetry.record(OutboxLeaseTelemetryRecord {
+            mode: input.mode,
+            requested_ttl_ms: input.requested_ttl_ms,
+            effective_ttl_ms: input.effective_ttl_ms,
+            wait_ms: input.wait_ms,
+            ttl_clamped: input.ttl_clamped,
+            wait_clamped: input.wait_clamped,
+            handler_duration_ms: input.request_started.elapsed().as_millis() as u64,
+        }),
         Err(_) => tracing::warn!("Outbox lease telemetry lock poisoned; skipping telemetry record"),
     }
 }
@@ -392,13 +410,15 @@ pub async fn acquire_outbox_flush_lease(
     if !state.outbox_server_lease_enabled {
         record_outbox_lease_telemetry(
             &state,
-            OutboxLeaseTelemetryMode::DisabledFailOpen,
-            requested_ttl_ms,
-            lease_ttl_ms,
-            0,
-            ttl_clamped,
-            wait_clamped,
-            request_started,
+            OutboxLeaseTelemetryInput {
+                mode: OutboxLeaseTelemetryMode::DisabledFailOpen,
+                requested_ttl_ms,
+                effective_ttl_ms: lease_ttl_ms,
+                wait_ms: 0,
+                ttl_clamped,
+                wait_clamped,
+                request_started,
+            },
         );
         return (
             StatusCode::OK,
@@ -443,17 +463,19 @@ pub async fn acquire_outbox_flush_lease(
             let response_wait_ms = decision.wait_ms.min(max_wait_ms);
             record_outbox_lease_telemetry(
                 &state,
-                if decision.granted {
-                    OutboxLeaseTelemetryMode::Granted
-                } else {
-                    OutboxLeaseTelemetryMode::Denied
+                OutboxLeaseTelemetryInput {
+                    mode: if decision.granted {
+                        OutboxLeaseTelemetryMode::Granted
+                    } else {
+                        OutboxLeaseTelemetryMode::Denied
+                    },
+                    requested_ttl_ms,
+                    effective_ttl_ms: lease_ttl_ms,
+                    wait_ms: response_wait_ms,
+                    ttl_clamped,
+                    wait_clamped,
+                    request_started,
                 },
-                requested_ttl_ms,
-                lease_ttl_ms,
-                response_wait_ms,
-                ttl_clamped,
-                wait_clamped,
-                request_started,
             );
             (
             StatusCode::OK,
@@ -474,13 +496,15 @@ pub async fn acquire_outbox_flush_lease(
             );
             record_outbox_lease_telemetry(
                 &state,
-                OutboxLeaseTelemetryMode::DbErrorFailOpen,
-                requested_ttl_ms,
-                lease_ttl_ms,
-                0,
-                ttl_clamped,
-                wait_clamped,
-                request_started,
+                OutboxLeaseTelemetryInput {
+                    mode: OutboxLeaseTelemetryMode::DbErrorFailOpen,
+                    requested_ttl_ms,
+                    effective_ttl_ms: lease_ttl_ms,
+                    wait_ms: 0,
+                    ttl_clamped,
+                    wait_clamped,
+                    request_started,
+                },
             );
             (
                 StatusCode::OK,
@@ -1153,8 +1177,7 @@ pub async fn policy_check(
                 advisory: true,
                 allowed: false,
                 reasons: vec!["Admin access required".to_string()],
-                warnings: vec![],
-                evaluated_rules: vec![],
+                ..Default::default()
             }),
         );
     }
@@ -1166,11 +1189,12 @@ pub async fn policy_check(
                 advisory: true,
                 allowed: false,
                 reasons: vec!["repo and branch are required".to_string()],
-                warnings: vec![],
-                evaluated_rules: vec![],
+                ..Default::default()
             }),
         );
     }
+
+    metrics::counter!("gitgov_policy_checks_total").increment(1);
 
     let repo_name = repo_name_from_policy_check_input(&payload.repo);
     let mut response = PolicyCheckResponse {
@@ -1183,6 +1207,7 @@ pub async fn policy_check(
             "policy_exists".to_string(),
             "branch_matches_policy".to_string(),
         ],
+        ..Default::default()
     };
 
     let repo = match state.db.get_repo_by_full_name(&repo_name).await {
@@ -1214,19 +1239,110 @@ pub async fn policy_check(
     };
 
     let branch = payload.branch.trim();
-    if !branch_matches_policy(&policy.config, branch) {
-        response.allowed = false;
-        response
-            .reasons
-            .push(format!("Branch '{}' does not match configured policy patterns/protected branches", branch));
+    let config = &policy.config;
+    let enforcement = &config.enforcement;
+
+    // Determine highest enforcement level applied
+    let has_block = [
+        &enforcement.pull_requests,
+        &enforcement.commits,
+        &enforcement.branches,
+        &enforcement.traceability,
+    ]
+    .iter()
+    .any(|e| **e == EnforcementLevel::Block);
+    let has_warn = [
+        &enforcement.pull_requests,
+        &enforcement.commits,
+        &enforcement.branches,
+        &enforcement.traceability,
+    ]
+    .iter()
+    .any(|e| **e == EnforcementLevel::Warn);
+
+    response.advisory = !has_block;
+    response.enforcement_applied = if has_block {
+        "block".to_string()
+    } else if has_warn {
+        "warn".to_string()
+    } else {
+        "off".to_string()
+    };
+
+    // --- Branch rules ---
+    if enforcement.branches != EnforcementLevel::Off {
+        response.evaluated_rules.push("branch_name_valid".to_string());
+        if !branch_matches_policy(config, branch) {
+            let v = RuleViolation {
+                rule: "branch_name_valid".to_string(),
+                category: "branches".to_string(),
+                enforcement: format!("{:?}", enforcement.branches).to_lowercase(),
+                message: format!("Branch '{}' does not match configured patterns", branch),
+            };
+            if enforcement.branches == EnforcementLevel::Block {
+                response.allowed = false;
+                response.reasons.push(v.message.clone());
+            } else {
+                response.warnings.push(v.message.clone());
+            }
+            response.violations.push(v);
+        }
+
+        response.evaluated_rules.push("not_protected_branch".to_string());
+        if config.branches.protected.iter().any(|p| p == branch) {
+            let v = RuleViolation {
+                rule: "not_protected_branch".to_string(),
+                category: "branches".to_string(),
+                enforcement: format!("{:?}", enforcement.branches).to_lowercase(),
+                message: format!("Branch '{}' is protected; direct push not allowed", branch),
+            };
+            if enforcement.branches == EnforcementLevel::Block {
+                response.allowed = false;
+                response.reasons.push(v.message.clone());
+            } else {
+                response.warnings.push(v.message.clone());
+            }
+            response.violations.push(v);
+        }
+
+        if config.rules.block_force_push {
+            response.evaluated_rules.push("no_force_push".to_string());
+        }
     }
 
-    response.warnings.push(
-        "Advisory mode: author/role validation not enforced yet in V1.2-A".to_string(),
-    );
-    response.warnings.push(
-        "Advisory mode: bypass/drift checks are not fully integrated into policy/check yet".to_string(),
-    );
+    // --- Commit rules ---
+    if enforcement.commits != EnforcementLevel::Off {
+        if config.rules.require_conventional_commits {
+            response.evaluated_rules.push("conventional_commit".to_string());
+        }
+        if config.rules.require_signed_commits {
+            response.evaluated_rules.push("signed_commit".to_string());
+        }
+        if let Some(max) = config.rules.max_files_per_commit {
+            response.evaluated_rules.push(format!("max_files_per_commit_{}", max));
+        }
+        if !config.rules.forbidden_patterns.is_empty() {
+            response.evaluated_rules.push("forbidden_patterns".to_string());
+        }
+    }
+
+    // --- Pull request rules ---
+    if enforcement.pull_requests != EnforcementLevel::Off {
+        if config.rules.require_pull_request {
+            response.evaluated_rules.push("require_pull_request".to_string());
+        }
+        if config.rules.min_approvals > 0 {
+            response.evaluated_rules.push(format!("min_approvals_{}", config.rules.min_approvals));
+        }
+    }
+
+    // --- Traceability rules ---
+    if enforcement.traceability != EnforcementLevel::Off && config.rules.require_linked_ticket {
+        response
+            .evaluated_rules
+            .push("require_linked_ticket".to_string());
+    }
+
     if payload.commit.as_deref().unwrap_or_default().is_empty() {
         response
             .warnings
@@ -1235,4 +1351,3 @@ pub async fn policy_check(
 
     (StatusCode::OK, Json(response))
 }
-

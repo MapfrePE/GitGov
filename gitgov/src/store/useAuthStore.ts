@@ -3,9 +3,10 @@ import { tauriInvoke, parseCommandError } from '@/lib/tauri'
 import type { AuthenticatedUser, DeviceFlowInfo } from '@/lib/types'
 
 type AuthStep = 'idle' | 'waiting_device' | 'polling' | 'authenticated'
-const LOCAL_PIN_KEY = 'gitgov.local_pin_v1'
+const LEGACY_LOCAL_PIN_KEY = 'gitgov.local_pin_v1'
 let authPollTimer: ReturnType<typeof setTimeout> | null = null
 let authPollInFlight = false
+let cachedLocalPin: string | null = null
 const REQUIRE_DEVICE_FLOW_ON_START =
   String(import.meta.env.VITE_REQUIRE_DEVICE_FLOW_ON_START ?? 'true').toLowerCase() !== 'false'
 const MIN_POLLING_VISUAL_MS = 900
@@ -29,22 +30,73 @@ interface AuthActions {
   logout: () => Promise<void>
   setUser: (user: AuthenticatedUser) => void
   clearError: () => void
-  setLocalPin: (pin: string) => void
-  clearLocalPin: () => void
+  setLocalPin: (pin: string) => Promise<void>
+  clearLocalPin: () => Promise<void>
   unlockWithPin: (pin: string) => boolean
   lockSession: () => void
 }
 
-function getStoredPin(): string | null {
+function readLegacyStoredPin(): string | null {
   try {
-    return localStorage.getItem(LOCAL_PIN_KEY)
+    const value = localStorage.getItem(LEGACY_LOCAL_PIN_KEY)
+    const normalized = value?.trim() ?? ''
+    return isValidPin(normalized) ? normalized : null
   } catch {
     return null
   }
 }
 
+function clearLegacyStoredPin(): void {
+  try {
+    localStorage.removeItem(LEGACY_LOCAL_PIN_KEY)
+  } catch {
+    // ignore local storage errors
+  }
+}
+
 function isValidPin(pin: string): boolean {
   return /^[0-9]{4,6}$/.test(pin.trim())
+}
+
+function normalizeSecurePin(value: string | null | undefined): string | null {
+  const normalized = (value ?? '').trim()
+  return isValidPin(normalized) ? normalized : null
+}
+
+async function loadSecurePin(): Promise<string | null> {
+  try {
+    const securePin = await tauriInvoke<string | null>('cmd_pin_get')
+    return normalizeSecurePin(securePin)
+  } catch {
+    return null
+  }
+}
+
+async function hydratePinFromSecureStorage(): Promise<string | null> {
+  const securePin = await loadSecurePin()
+  if (securePin) {
+    cachedLocalPin = securePin
+    clearLegacyStoredPin()
+    return securePin
+  }
+
+  const legacyPin = readLegacyStoredPin()
+  if (!legacyPin) {
+    cachedLocalPin = null
+    clearLegacyStoredPin()
+    return null
+  }
+
+  // One-shot migration from localStorage into keyring; legacy key is removed either way.
+  clearLegacyStoredPin()
+  try {
+    await tauriInvoke('cmd_pin_set', { pin: legacyPin })
+    cachedLocalPin = legacyPin
+    return legacyPin
+  } catch {
+    cachedLocalPin = null
+    return null
+  }
 }
 
 export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
@@ -53,8 +105,8 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
   authStep: 'idle',
   deviceFlowInfo: null,
   error: null,
-  isPinEnabled: getStoredPin() !== null,
-  pinUnlocked: getStoredPin() === null,
+  isPinEnabled: false,
+  pinUnlocked: true,
   pinError: null,
 
   startAuth: async () => {
@@ -94,7 +146,7 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
       if (elapsed < MIN_POLLING_VISUAL_MS) {
         await new Promise((resolve) => setTimeout(resolve, MIN_POLLING_VISUAL_MS - elapsed))
       }
-      const hasPin = getStoredPin() !== null
+      const hasPin = (await hydratePinFromSecureStorage()) !== null
       set({
         user,
         authStep: 'authenticated',
@@ -144,6 +196,7 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
 
   checkExistingSession: async () => {
     set({ isLoading: true })
+    const hasPin = (await hydratePinFromSecureStorage()) !== null
     if (REQUIRE_DEVICE_FLOW_ON_START) {
       // Product decision: every desktop restart must pass through GitHub Device Flow.
       set({
@@ -152,6 +205,7 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
         deviceFlowInfo: null,
         isLoading: false,
         error: null,
+        isPinEnabled: hasPin,
         pinUnlocked: true,
         pinError: null,
       })
@@ -160,7 +214,6 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
     try {
       const user = await tauriInvoke<AuthenticatedUser | null>('cmd_get_current_user')
       if (user) {
-        const hasPin = getStoredPin() !== null
         set({
           user,
           authStep: 'authenticated',
@@ -194,29 +247,33 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
   },
 
   setUser: (user) => {
-    const hasPin = getStoredPin() !== null
+    const hasPin = cachedLocalPin !== null
     set({ user, authStep: 'authenticated', isPinEnabled: hasPin, pinUnlocked: !hasPin, pinError: null })
   },
 
   clearError: () => set({ error: null }),
 
-  setLocalPin: (pin) => {
+  setLocalPin: async (pin) => {
     const normalized = pin.trim()
     if (!isValidPin(normalized)) {
       set({ pinError: 'PIN inválido. Usa 4 a 6 dígitos.' })
       return
     }
     try {
-      localStorage.setItem(LOCAL_PIN_KEY, normalized)
+      await tauriInvoke('cmd_pin_set', { pin: normalized })
+      clearLegacyStoredPin()
+      cachedLocalPin = normalized
       set({ isPinEnabled: true, pinUnlocked: true, pinError: null })
     } catch {
       set({ pinError: 'No se pudo guardar el PIN local.' })
     }
   },
 
-  clearLocalPin: () => {
+  clearLocalPin: async () => {
     try {
-      localStorage.removeItem(LOCAL_PIN_KEY)
+      await tauriInvoke('cmd_pin_clear')
+      clearLegacyStoredPin()
+      cachedLocalPin = null
       set({ isPinEnabled: false, pinUnlocked: true, pinError: null })
     } catch {
       set({ pinError: 'No se pudo eliminar el PIN local.' })
@@ -224,7 +281,7 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
   },
 
   unlockWithPin: (pin) => {
-    const stored = getStoredPin()
+    const stored = cachedLocalPin
     if (!stored) {
       set({ pinUnlocked: true, pinError: null, isPinEnabled: false })
       return true
@@ -238,7 +295,7 @@ export const useAuthStore = create<AuthState & AuthActions>((set, get) => ({
   },
 
   lockSession: () => {
-    if (getStoredPin()) {
+    if (cachedLocalPin) {
       set({ pinUnlocked: false, isPinEnabled: true })
     }
   },

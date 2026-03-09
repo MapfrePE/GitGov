@@ -92,6 +92,17 @@ pub enum OutboxLeaseTelemetryMode {
     DbErrorFailOpen,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct OutboxLeaseTelemetryRecord {
+    pub mode: OutboxLeaseTelemetryMode,
+    pub requested_ttl_ms: u64,
+    pub effective_ttl_ms: u64,
+    pub wait_ms: u64,
+    pub ttl_clamped: bool,
+    pub wait_clamped: bool,
+    pub handler_duration_ms: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct OutboxLeaseTelemetry {
     total_requests: u64,
@@ -123,16 +134,16 @@ impl OutboxLeaseTelemetry {
         }
     }
 
-    pub fn record(
-        &mut self,
-        mode: OutboxLeaseTelemetryMode,
-        requested_ttl_ms: u64,
-        effective_ttl_ms: u64,
-        wait_ms: u64,
-        ttl_clamped: bool,
-        wait_clamped: bool,
-        handler_duration_ms: u64,
-    ) {
+    pub fn record(&mut self, record: OutboxLeaseTelemetryRecord) {
+        let OutboxLeaseTelemetryRecord {
+            mode,
+            requested_ttl_ms,
+            effective_ttl_ms,
+            wait_ms,
+            ttl_clamped,
+            wait_clamped,
+            handler_duration_ms,
+        } = record;
         self.total_requests = self.total_requests.saturating_add(1);
         self.requested_ttl_sum_ms = self.requested_ttl_sum_ms.saturating_add(requested_ttl_ms as u128);
         self.effective_ttl_sum_ms = self.effective_ttl_sum_ms.saturating_add(effective_ttl_ms as u128);
@@ -248,15 +259,32 @@ pub struct AppState {
     pub outbox_lease_telemetry: Arc<Mutex<OutboxLeaseTelemetry>>,
     /// Cache keyed by effective filter + role scoping.
     pub logs_cache: Arc<Mutex<HashMap<String, LogsCacheEntry>>>,
+    /// Broadcast channel for SSE dashboard notifications.
+    pub sse_tx: tokio::sync::broadcast::Sender<SseNotification>,
+    /// Max concurrent SSE connections allowed server-wide.
+    pub sse_max_connections: Arc<Semaphore>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Lightweight notification sent via SSE to connected dashboard clients.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SseNotification {
+    /// New events were ingested via POST /events.
+    NewEvents { count: u32 },
+    /// Stats cache was invalidated (new data available).
+    #[allow(dead_code)]
+    StatsUpdated,
+    /// Server heartbeat (keep-alive).
+    Heartbeat,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
     pub code: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
@@ -300,4 +328,3 @@ pub async fn detailed_health(
         timestamp: chrono::Utc::now().timestamp_millis(),
     })
 }
-

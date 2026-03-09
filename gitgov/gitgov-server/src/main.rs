@@ -1,13 +1,16 @@
 mod auth;
 mod db;
 mod handlers;
+#[cfg(test)]
+mod integration_tests;
 mod models;
 mod notifications;
+mod openapi;
 
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, State},
-    http::{header::RETRY_AFTER, HeaderMap, HeaderValue, Request, StatusCode},
+    http::{header::RETRY_AFTER, HeaderValue, Request, StatusCode},
     middleware,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -384,7 +387,22 @@ fn parse_cors_origins(input: &str) -> Vec<HeaderValue> {
         .collect()
 }
 
-fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
+/// Build rate-limit key from the authenticated user identity.
+/// Priority: authenticated identity (scoped by org when available) > auth token hash + IP.
+/// This keeps authenticated rate limiting stable across IP changes and avoids
+/// cross-tenant collisions when different orgs share the same login string.
+fn rate_limit_key_from_request(req: &Request<Body>) -> String {
+    // If auth middleware has already run, use the authenticated user identity.
+    // For multi-tenant isolation, scope by org_id when available.
+    if let Some(auth_user) = req.extensions().get::<auth::AuthUser>() {
+        if let Some(org_id) = auth_user.org_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            return format!("org:{}:user:{}", org_id, auth_user.client_id);
+        }
+        return format!("user:{}", auth_user.client_id);
+    }
+
+    // Fallback for unauthenticated routes: IP + token hash (original behavior)
+    let headers = req.headers();
     let ip = headers
         .get("x-forwarded-for")
         .and_then(|h| h.to_str().ok())
@@ -412,17 +430,90 @@ fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
     format!("{}:{}", ip, auth_fingerprint)
 }
 
+async fn security_headers(req: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    // Modern browsers ignore X-XSS-Protection; value "0" disables legacy filter
+    // to avoid introducing new vulnerabilities in older browsers.
+    headers.insert("x-xss-protection", HeaderValue::from_static("0"));
+    headers.insert(
+        "referrer-policy",
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    response
+}
+
+/// Middleware that records per-request HTTP duration and status as Prometheus
+/// histograms/counters.  The path is normalized to avoid high-cardinality label
+/// explosion (UUIDs and numeric IDs are replaced with placeholders).
+async fn request_metrics_middleware(req: Request<Body>, next: Next) -> Response {
+    let method = req.method().to_string();
+    let raw_path = req.uri().path().to_string();
+    let start = Instant::now();
+    let response = next.run(req).await;
+    let duration = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16().to_string();
+
+    // Normalize path to avoid high-cardinality labels (UUIDs, numeric IDs).
+    let path = normalize_metrics_path(&raw_path);
+
+    metrics::histogram!("gitgov_http_request_duration_seconds",
+        "method" => method, "path" => path, "status" => status
+    )
+    .record(duration);
+
+    response
+}
+
+/// Replace UUID segments and numeric IDs with `{id}` to keep label cardinality bounded.
+fn normalize_metrics_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for segment in path.split('/') {
+        out.push('/');
+        if segment.is_empty() {
+            continue;
+        }
+        // UUID-like: 8-4-4-4-12 hex chars
+        let is_uuid =
+            segment.len() == 36 && segment.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+        // Pure numeric
+        let is_numeric = !segment.is_empty() && segment.chars().all(|c| c.is_ascii_digit());
+        if is_uuid || is_numeric {
+            out.push_str("{id}");
+        } else {
+            out.push_str(segment);
+        }
+    }
+    if out.is_empty() {
+        "/".to_string()
+    } else {
+        out
+    }
+}
+
 async fn rate_limit_middleware(
     State(limiter): State<Arc<RateLimiterState>>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let key = rate_limit_key_from_headers(req.headers());
+    let key = rate_limit_key_from_request(&req);
     let decision = limiter.check(&key).await;
 
     if decision.allowed {
         return next.run(req).await;
     }
+
+    metrics::counter!("gitgov_rate_limited_total", "limiter" => limiter.name().to_string())
+        .increment(1);
 
     if decision.internal_error {
         tracing::error!(
@@ -492,6 +583,12 @@ async fn main() {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    // Prometheus metrics recorder — must be installed before any metrics::* calls.
+    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .expect("failed to install Prometheus metrics recorder");
+    tracing::info!("Prometheus metrics recorder installed");
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
@@ -790,6 +887,10 @@ async fn main() {
         outbox_server_lease_ttl_ms,
         outbox_lease_telemetry: Arc::new(Mutex::new(handlers::OutboxLeaseTelemetry::default())),
         logs_cache: Arc::new(Mutex::new(HashMap::new())),
+        sse_tx: tokio::sync::broadcast::channel::<handlers::SseNotification>(64).0,
+        sse_max_connections: Arc::new(Semaphore::new(
+            parse_u32_env("GITGOV_SSE_MAX_CONNECTIONS", 50) as usize,
+        )),
     });
 
     // Keep utility APIs exercised in non-test builds so strict linting does not
@@ -1024,6 +1125,13 @@ async fn main() {
             "/logs",
             get(handlers::get_logs).layer(middleware::from_fn_with_state(
                 Arc::clone(&logs_rate_limit),
+                rate_limit_middleware,
+            )),
+        )
+        .route(
+            "/sse",
+            get(handlers::sse_stream).layer(middleware::from_fn_with_state(
+                Arc::clone(&admin_rate_limit),
                 rate_limit_middleware,
             )),
         )
@@ -1277,6 +1385,7 @@ async fn main() {
         .route("/health", get(handlers::health))
         .route("/health/detailed", get(handlers::detailed_health))
         .route("/webhooks/github", post(handlers::handle_github_webhook))
+        .route("/metrics", get(handlers::prometheus_metrics))
         .route(
             "/org-invitations/preview/{token}",
             get(handlers::preview_org_invitation),
@@ -1286,7 +1395,14 @@ async fn main() {
             post(handlers::accept_org_invitation),
         )
         .merge(auth_routes)
+        .merge(
+            utoipa_swagger_ui::SwaggerUi::new("/api-docs")
+                .url("/api-docs/openapi.json", openapi::build_openapi_spec()),
+        )
+        .layer(axum::Extension(prometheus_handle))
         .layer(cors_layer)
+        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(request_metrics_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -1302,6 +1418,8 @@ async fn main() {
     tracing::info!("  GET  /health                    - Health check (public)");
     tracing::info!("  GET  /health/detailed           - Detailed health (public)");
     tracing::info!("  POST /webhooks/github           - GitHub webhook (HMAC auth)");
+    tracing::info!("  GET  /metrics                   - Prometheus metrics (public)");
+    tracing::info!("  GET  /api-docs                  - Swagger UI (public)");
     tracing::info!("  --- Authenticated endpoints ---");
     tracing::info!("  POST /events                    - Client events (auth)");
     tracing::info!("  POST /outbox/lease              - Outbox coordination lease (auth, opt-in)");
@@ -1370,22 +1488,71 @@ async fn main() {
         "Job worker configuration"
     );
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("Failed to bind to address {}: {}", addr, e);
-            std::process::exit(1);
-        });
+    // TLS support: if GITGOV_TLS_CERT and GITGOV_TLS_KEY are set, serve HTTPS.
+    let tls_cert = std::env::var("GITGOV_TLS_CERT").ok();
+    let tls_key = std::env::var("GITGOV_TLS_KEY").ok();
 
-    axum::serve(listener, app).await.unwrap_or_else(|e| {
-        tracing::error!("Server error: {}", e);
-    });
+    match (tls_cert, tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let tls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::error!(
+                            cert_path = %cert_path,
+                            key_path = %key_path,
+                            error = %e,
+                            "Failed to load TLS certificate/key"
+                        );
+                        std::process::exit(1);
+                    });
+
+            tracing::info!(
+                addr = %addr,
+                cert = %cert_path,
+                "Starting HTTPS server with TLS"
+            );
+
+            axum_server::bind_rustls(addr, tls_config)
+                .serve(app.into_make_service())
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("HTTPS server error: {}", e);
+                });
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            tracing::error!(
+                "Both GITGOV_TLS_CERT and GITGOV_TLS_KEY must be set for HTTPS. Only one was provided."
+            );
+            std::process::exit(1);
+        }
+        (None, None) => {
+            if !is_dev_env {
+                tracing::warn!(
+                    "HTTPS is NOT enabled. Set GITGOV_TLS_CERT and GITGOV_TLS_KEY for production TLS. \
+                     Use a reverse proxy (nginx/caddy) if terminating TLS externally."
+                );
+            }
+
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("Failed to bind to address {}: {}", addr, e);
+                    std::process::exit(1);
+                });
+
+            axum::serve(listener, app).await.unwrap_or_else(|e| {
+                tracing::error!("Server error: {}", e);
+            });
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+    use tower::ServiceExt;
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1505,5 +1672,98 @@ mod tests {
         assert!(!decision.allowed);
         assert!(decision.internal_error);
         assert_eq!(decision.retry_after_secs, 1);
+    }
+
+    #[test]
+    fn rate_limit_key_prefers_authenticated_identity_scoped_by_org() {
+        let mut req = Request::builder()
+            .uri("/stats")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(auth::AuthUser {
+            client_id: "andres".to_string(),
+            role: crate::models::UserRole::Admin,
+            org_id: Some("org-123".to_string()),
+        });
+
+        let key = rate_limit_key_from_request(&req);
+        assert_eq!(key, "org:org-123:user:andres");
+    }
+
+    #[test]
+    fn rate_limit_key_uses_client_identity_when_org_missing() {
+        let mut req = Request::builder()
+            .uri("/stats")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(auth::AuthUser {
+            client_id: "andres".to_string(),
+            role: crate::models::UserRole::Developer,
+            org_id: None,
+        });
+
+        let key = rate_limit_key_from_request(&req);
+        assert_eq!(key, "user:andres");
+    }
+
+    #[test]
+    fn rate_limit_key_fallback_matches_ip_and_auth_fingerprint() {
+        let req = Request::builder()
+            .uri("/health")
+            .header("x-real-ip", "10.20.30.40")
+            .header("authorization", "Bearer test-token")
+            .body(Body::empty())
+            .expect("request");
+
+        let digest = sha2::Sha256::digest("Bearer test-token".as_bytes());
+        let expected_fingerprint = format!("{:x}", digest)[..12].to_string();
+        let key = rate_limit_key_from_request(&req);
+        assert_eq!(key, format!("10.20.30.40:{}", expected_fingerprint));
+    }
+
+    async fn inject_test_auth(mut req: Request<Body>, next: Next) -> Response {
+        req.extensions_mut().insert(auth::AuthUser {
+            client_id: "test-user".to_string(),
+            role: crate::models::UserRole::Admin,
+            org_id: Some("test-org".to_string()),
+        });
+        next.run(req).await
+    }
+
+    async fn attach_rate_limit_key_header(req: Request<Body>, next: Next) -> Response {
+        let key = rate_limit_key_from_request(&req);
+        let mut response = next.run(req).await;
+        let value = HeaderValue::from_str(&key).expect("valid header value");
+        response.headers_mut().insert("x-rate-limit-key", value);
+        response
+    }
+
+    #[tokio::test]
+    async fn auth_layer_populates_identity_before_route_level_rate_limit_key() {
+        let app = Router::new()
+            .route(
+                "/probe",
+                get(|| async { StatusCode::OK })
+                    .layer(middleware::from_fn(attach_rate_limit_key_header)),
+            )
+            .layer(middleware::from_fn(inject_test_auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/probe")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let key = response
+            .headers()
+            .get("x-rate-limit-key")
+            .and_then(|h| h.to_str().ok())
+            .expect("x-rate-limit-key header");
+        assert_eq!(key, "org:test-org:user:test-user");
     }
 }

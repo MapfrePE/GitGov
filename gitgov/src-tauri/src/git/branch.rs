@@ -481,15 +481,8 @@ mod tests {
 
         match parent {
             Some(parent_commit) => {
-                repo.commit(
-                    Some("HEAD"),
-                    &sig,
-                    &sig,
-                    message,
-                    &tree,
-                    &[&parent_commit],
-                )
-                .expect("failed to commit with parent");
+                repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent_commit])
+                    .expect("failed to commit with parent");
             }
             None => {
                 repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import { tauriInvoke, parseCommandError } from '@/lib/tauri'
+import { tauriInvoke, tauriListen, parseCommandError } from '@/lib/tauri'
+import { notifyBlockedPush, notifyGovernanceWarning } from '@/lib/notifications'
 import type {
   BranchInfo,
   BranchSyncStatus,
@@ -329,12 +330,25 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
   push: async (branch: string, developerLogin: string) => {
     const { repoPath } = get()
     if (!repoPath) throw new Error('Ningún repositorio seleccionado')
+    // Listen for governance warnings emitted during push (warn mode — push succeeds but has warnings)
+    let unlisten: (() => void) | null = null
     try {
+      unlisten = await tauriListen<{ warnings: string[] }>('gitgov:governance-warnings', (payload) => {
+        if (payload.warnings?.length) {
+          void notifyGovernanceWarning(payload.warnings)
+        }
+      })
       await tauriInvoke('cmd_push', { repoPath, branch, developerLogin })
     } catch (e) {
-      set({ error: parseCommandError(String(e)).message })
+      const parsed = parseCommandError(String(e))
+      set({ error: parsed.message })
+      // Send desktop notification for blocked pushes
+      if (parsed.code === 'BLOCKED' || parsed.code === 'GOVERNANCE_BLOCKED') {
+        void notifyBlockedPush(branch, parsed.message)
+      }
       throw e
     } finally {
+      unlisten?.()
       await get().refreshBranchSync(branch)
     }
   },

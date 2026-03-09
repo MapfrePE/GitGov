@@ -20,6 +20,9 @@ pub async fn ingest_jenkins_pipeline_event(
         );
     }
 
+    metrics::counter!("gitgov_jenkins_events_total", "status" => payload.status.clone())
+        .increment(1);
+
     if let Some(expected_secret) = state.jenkins_webhook_secret.as_deref() {
         let provided_secret = headers
             .get("x-gitgov-jenkins-secret")
@@ -237,6 +240,8 @@ pub async fn ingest_jira_webhook(
         );
     }
 
+    metrics::counter!("gitgov_jira_events_total").increment(1);
+
     if let Some(expected_secret) = state.jira_webhook_secret.as_deref() {
         let provided_secret = headers
             .get("x-gitgov-jira-secret")
@@ -384,6 +389,75 @@ fn read_metadata_commit_message(metadata: &serde_json::Value) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+fn collect_pr_ticket_matches(
+    head_sha: Option<&str>,
+    pr_title: Option<&str>,
+    tickets_by_commit_sha: &HashMap<String, HashSet<String>>,
+    phase1_tickets: &HashSet<String>,
+) -> Vec<String> {
+    let mut matched_tickets: HashSet<String> = HashSet::new();
+
+    if let Some(sha) = head_sha {
+        if let Some(commit_tickets) = tickets_by_commit_sha.get(sha) {
+            matched_tickets.extend(commit_tickets.iter().cloned());
+        }
+    }
+
+    if let Some(title) = pr_title {
+        for ticket_id in extract_ticket_ids(&[title]) {
+            if phase1_tickets.contains(&ticket_id) {
+                matched_tickets.insert(ticket_id);
+            }
+        }
+    }
+
+    let mut matched_tickets: Vec<String> = matched_tickets.into_iter().collect();
+    matched_tickets.sort();
+    matched_tickets
+}
+
+#[cfg(test)]
+mod jira_pr_correlation_tests {
+    use super::*;
+
+    fn ticket_set(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn head_sha_match_only_returns_tickets_for_that_commit() {
+        let mut tickets_by_commit_sha: HashMap<String, HashSet<String>> = HashMap::new();
+        tickets_by_commit_sha.insert("sha-a".to_string(), ticket_set(&["ABC-1"]));
+        tickets_by_commit_sha.insert("sha-b".to_string(), ticket_set(&["ABC-2"]));
+        let phase1_tickets = ticket_set(&["ABC-1", "ABC-2"]);
+
+        let matched = collect_pr_ticket_matches(
+            Some("sha-a"),
+            None,
+            &tickets_by_commit_sha,
+            &phase1_tickets,
+        );
+
+        assert_eq!(matched, vec!["ABC-1".to_string()]);
+    }
+
+    #[test]
+    fn title_match_is_limited_to_phase1_candidates() {
+        let mut tickets_by_commit_sha: HashMap<String, HashSet<String>> = HashMap::new();
+        tickets_by_commit_sha.insert("sha-a".to_string(), ticket_set(&["ABC-1"]));
+        let phase1_tickets = ticket_set(&["ABC-1", "ABC-2"]);
+
+        let matched = collect_pr_ticket_matches(
+            Some("sha-a"),
+            Some("Implements ABC-2 and XYZ-99"),
+            &tickets_by_commit_sha,
+            &phase1_tickets,
+        );
+
+        assert_eq!(matched, vec!["ABC-1".to_string(), "ABC-2".to_string()]);
+    }
+}
+
 pub async fn correlate_jira_tickets(
     Extension(auth_user): Extension<AuthUser>,
     State(state): State<Arc<AppState>>,
@@ -420,6 +494,8 @@ pub async fn correlate_jira_tickets(
 
     let mut created = 0i64;
     let mut correlated_tickets: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut phase1_tickets: HashSet<String> = HashSet::new();
+    let mut tickets_by_commit_sha: HashMap<String, HashSet<String>> = HashMap::new();
 
     for (commit_sha, branch, org_id, metadata, _repo_name) in &commits {
         let mut commit_sources: Vec<(&str, Vec<String>)> = Vec::new();
@@ -447,8 +523,14 @@ pub async fn correlate_jira_tickets(
                     confidence: if source == "commit_message" { 1.0 } else { 0.8 },
                     created_at: chrono::Utc::now().timestamp_millis(),
                 };
-                match state.db.insert_commit_ticket_correlation(&correlation).await {
-                    Ok(true) => {
+                if let Ok(was_created) = state.db.insert_commit_ticket_correlation(&correlation).await {
+                    phase1_tickets.insert(ticket_id.clone());
+                    tickets_by_commit_sha
+                        .entry(correlation.commit_sha.clone())
+                        .or_default()
+                        .insert(ticket_id.clone());
+
+                    if was_created {
                         created += 1;
                         correlated_tickets.insert(ticket_id);
                         if let Err(e) = state
@@ -468,9 +550,60 @@ pub async fn correlate_jira_tickets(
                             );
                         }
                     }
-                    Ok(false) => {}
-                    Err(_) => {}
                 }
+            }
+        }
+    }
+
+    // --- Phase 2: PR auto-correlation ---
+    // Find PRs whose head_sha matches any correlated commit, or whose title
+    // mentions any correlated ticket ID. Then append them to related_prs.
+    if !phase1_tickets.is_empty() {
+        let correlated_shas: Vec<String> = tickets_by_commit_sha.keys().cloned().collect();
+        let ticket_list: Vec<String> = phase1_tickets.iter().cloned().collect();
+
+        match state
+            .db
+            .find_prs_related_to_tickets(&correlated_shas, &ticket_list, hours)
+            .await
+        {
+            Ok(prs) => {
+                for (pr_number, pr_title, head_sha, repo_full_name) in &prs {
+                    let pr_ref = if let Some(repo) = repo_full_name {
+                        format!("{}#{}", repo, pr_number)
+                    } else {
+                        format!("#{}", pr_number)
+                    };
+                    let matched_tickets = collect_pr_ticket_matches(
+                        head_sha.as_deref(),
+                        pr_title.as_deref(),
+                        &tickets_by_commit_sha,
+                        &phase1_tickets,
+                    );
+
+                    for ticket_id in &matched_tickets {
+                        if let Err(e) = state
+                            .db
+                            .append_project_ticket_relations_full(
+                                ticket_id,
+                                None,
+                                None,
+                                Some(&pr_ref),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                ticket_id = %ticket_id,
+                                pr_ref = %pr_ref,
+                                error = %e,
+                                "Failed to append PR relation to ticket"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to find PRs for ticket correlation");
             }
         }
     }

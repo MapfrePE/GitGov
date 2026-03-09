@@ -8,7 +8,9 @@ mod tests {
         extract_ticket_ids, is_founder_scope_exception, is_logs_precision_query, extract_logs_limit,
         extract_logs_event_type_hint, is_relevant_audit_action, make_audit_delivery_id, render_todo_list,
         validate_github_signature, ChatQuery, ConversationState, GitHubPrReview, GitHubPrReviewUser,
-        NlpIntent, OrgScopeError, OutboxLeaseTelemetry, OutboxLeaseTelemetryMode, detect_query, detect_language, logs_deprecations_for_request,
+        NlpIntent, OrgScopeError, OutboxLeaseTelemetry, OutboxLeaseTelemetryMode,
+        OutboxLeaseTelemetryRecord, detect_query, detect_language,
+        logs_deprecations_for_request,
         should_reject_logs_offset,
     };
     use crate::auth::AuthUser;
@@ -746,33 +748,33 @@ mod tests {
     #[test]
     fn outbox_lease_telemetry_counts_modes_and_clamps() {
         let mut telemetry = OutboxLeaseTelemetry::default();
-        telemetry.record(
-            OutboxLeaseTelemetryMode::Granted,
-            4_000,
-            4_000,
-            0,
-            false,
-            false,
-            2,
-        );
-        telemetry.record(
-            OutboxLeaseTelemetryMode::Denied,
-            4_000,
-            4_000,
-            3_500,
-            false,
-            false,
-            3,
-        );
-        telemetry.record(
-            OutboxLeaseTelemetryMode::DbErrorFailOpen,
-            500,
-            1_000,
-            0,
-            true,
-            true,
-            1,
-        );
+        telemetry.record(OutboxLeaseTelemetryRecord {
+            mode: OutboxLeaseTelemetryMode::Granted,
+            requested_ttl_ms: 4_000,
+            effective_ttl_ms: 4_000,
+            wait_ms: 0,
+            ttl_clamped: false,
+            wait_clamped: false,
+            handler_duration_ms: 2,
+        });
+        telemetry.record(OutboxLeaseTelemetryRecord {
+            mode: OutboxLeaseTelemetryMode::Denied,
+            requested_ttl_ms: 4_000,
+            effective_ttl_ms: 4_000,
+            wait_ms: 3_500,
+            ttl_clamped: false,
+            wait_clamped: false,
+            handler_duration_ms: 3,
+        });
+        telemetry.record(OutboxLeaseTelemetryRecord {
+            mode: OutboxLeaseTelemetryMode::DbErrorFailOpen,
+            requested_ttl_ms: 500,
+            effective_ttl_ms: 1_000,
+            wait_ms: 0,
+            ttl_clamped: true,
+            wait_clamped: true,
+            handler_duration_ms: 1,
+        });
 
         let snapshot = telemetry.snapshot();
         assert_eq!(snapshot.total_requests, 3);
@@ -788,51 +790,51 @@ mod tests {
     #[test]
     fn outbox_lease_telemetry_wait_buckets_are_recorded() {
         let mut telemetry = OutboxLeaseTelemetry::default();
-        telemetry.record(
-            OutboxLeaseTelemetryMode::Granted,
-            5_000,
-            5_000,
-            0,
-            false,
-            false,
-            1,
-        );
-        telemetry.record(
-            OutboxLeaseTelemetryMode::Denied,
-            5_000,
-            5_000,
-            120,
-            false,
-            false,
-            1,
-        );
-        telemetry.record(
-            OutboxLeaseTelemetryMode::Denied,
-            5_000,
-            5_000,
-            800,
-            false,
-            false,
-            1,
-        );
-        telemetry.record(
-            OutboxLeaseTelemetryMode::Denied,
-            5_000,
-            5_000,
-            2_300,
-            false,
-            false,
-            1,
-        );
-        telemetry.record(
-            OutboxLeaseTelemetryMode::Denied,
-            5_000,
-            5_000,
-            8_900,
-            false,
-            false,
-            1,
-        );
+        telemetry.record(OutboxLeaseTelemetryRecord {
+            mode: OutboxLeaseTelemetryMode::Granted,
+            requested_ttl_ms: 5_000,
+            effective_ttl_ms: 5_000,
+            wait_ms: 0,
+            ttl_clamped: false,
+            wait_clamped: false,
+            handler_duration_ms: 1,
+        });
+        telemetry.record(OutboxLeaseTelemetryRecord {
+            mode: OutboxLeaseTelemetryMode::Denied,
+            requested_ttl_ms: 5_000,
+            effective_ttl_ms: 5_000,
+            wait_ms: 120,
+            ttl_clamped: false,
+            wait_clamped: false,
+            handler_duration_ms: 1,
+        });
+        telemetry.record(OutboxLeaseTelemetryRecord {
+            mode: OutboxLeaseTelemetryMode::Denied,
+            requested_ttl_ms: 5_000,
+            effective_ttl_ms: 5_000,
+            wait_ms: 800,
+            ttl_clamped: false,
+            wait_clamped: false,
+            handler_duration_ms: 1,
+        });
+        telemetry.record(OutboxLeaseTelemetryRecord {
+            mode: OutboxLeaseTelemetryMode::Denied,
+            requested_ttl_ms: 5_000,
+            effective_ttl_ms: 5_000,
+            wait_ms: 2_300,
+            ttl_clamped: false,
+            wait_clamped: false,
+            handler_duration_ms: 1,
+        });
+        telemetry.record(OutboxLeaseTelemetryRecord {
+            mode: OutboxLeaseTelemetryMode::Denied,
+            requested_ttl_ms: 5_000,
+            effective_ttl_ms: 5_000,
+            wait_ms: 8_900,
+            ttl_clamped: false,
+            wait_clamped: false,
+            handler_duration_ms: 1,
+        });
 
         let snapshot = telemetry.snapshot();
         assert_eq!(snapshot.wait_buckets.le_0, 1);

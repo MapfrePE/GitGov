@@ -1,7 +1,7 @@
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use std::time::Duration;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ApiError {

@@ -318,13 +318,6 @@ fn detect_query(question: &str) -> Option<ChatQuery> {
     if asks_no_ticket_commits {
         let hours = if q.contains("mes") || q.contains("month") {
             24 * 30
-        } else if q.contains("semana")
-            || q.contains("week")
-            || q.contains("7d")
-            || q.contains("7 dias")
-            || q.contains("7 días")
-        {
-            24 * 7
         } else {
             24 * 7
         };

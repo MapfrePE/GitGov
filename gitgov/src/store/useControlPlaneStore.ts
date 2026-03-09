@@ -1,8 +1,9 @@
 import { create } from 'zustand'
-import { tauriInvoke, parseCommandError } from '@/lib/tauri'
+import { tauriInvoke, tauriListen, parseCommandError } from '@/lib/tauri'
 import type { CombinedEvent } from '@/lib/types'
 import { detectBrowserTimezone, persistTimezone, readStoredTimezone } from '@/lib/timezone'
 import { useAuthStore } from '@/store/useAuthStore'
+import { notifyNewEvents } from '@/lib/notifications'
 
 interface ServerConfig {
   url: string
@@ -343,6 +344,24 @@ export interface ChatSession {
   messages: ChatMessage[]
 }
 
+interface PolicyResponseData {
+  version: string
+  checksum: string
+  config: import('@/lib/types').GitGovConfig
+  updated_at: number
+}
+
+interface PolicyHistoryEntry {
+  id: string
+  repo_id: string
+  config: import('@/lib/types').GitGovConfig
+  checksum: string
+  changed_by: string
+  change_type: string
+  previous_checksum: string | null
+  created_at: number
+}
+
 interface ControlPlaneState {
   serverConfig: ServerConfig | null
   serverStats: ServerStats | null
@@ -390,6 +409,12 @@ interface ControlPlaneState {
   chatMessages: ChatMessage[]
   isChatLoading: boolean
   displayTimezone: string
+  policyData: PolicyResponseData | null
+  policyHistory: PolicyHistoryEntry[]
+  isPolicyLoading: boolean
+  isPolicySaving: boolean
+  policyError: string | null
+  sseConnected: boolean
 }
 
 interface ControlPlaneActions {
@@ -458,6 +483,11 @@ interface ControlPlaneActions {
   closeChatSession: (sessionId: string) => void
   refreshChatMessagesForActiveUser: () => void
   setDisplayTimezone: (tz: string) => void
+  loadPolicy: (repoName: string) => Promise<void>
+  savePolicy: (repoName: string, config: import('@/lib/types').GitGovConfig) => Promise<boolean>
+  loadPolicyHistory: (repoName: string) => Promise<void>
+  connectSse: () => Promise<void>
+  disconnectSse: () => void
 }
 
 const CONTROL_PLANE_CONFIG_STORAGE_KEY = 'gitgov.control_plane_config'
@@ -483,11 +513,13 @@ const ALLOW_LEGACY_DEFAULT_API_KEY = (() => {
 })()
 const DEV_ACTIVITY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 const HEAVY_DASHBOARD_REFRESH_MS = 5 * 60 * 1000
+const JIRA_TICKET_CACHE_MAX = 50
 const LOGS_KEYSET_PAGE_SIZE = 500
 const LOGS_KEYSET_MAX_PAGES = 64
 const MAX_CHAT_SESSIONS = 8
 const MAX_CHAT_MESSAGES_PER_SESSION = 80
 const DEFAULT_CHAT_SESSION_TITLE = 'Chat nuevo'
+let cachedSecureControlPlaneApiKey: string | undefined
 
 interface StoredChatStateV2 {
   version: 2
@@ -538,7 +570,10 @@ function compareCombinedEventDesc(a: CombinedEvent, b: CombinedEvent): number {
 }
 
 function mergeRecentLogs(existing: CombinedEvent[], incoming: CombinedEvent[], limit: number): CombinedEvent[] {
-  if (incoming.length === 0) return existing.slice(0, limit)
+  if (incoming.length === 0) {
+    // Return same reference to avoid invalidating downstream useMemo hooks
+    return existing.length <= limit ? existing : existing.slice(0, limit)
+  }
   const merged = [...incoming, ...existing]
   merged.sort(compareCombinedEventDesc)
 
@@ -666,6 +701,7 @@ function readStoredServerConfig(): ServerConfig | null {
     if (!parsed || typeof parsed.url !== 'string') return null
     return {
       url: parsed.url,
+      // Legacy v1: api_key could still exist in localStorage and must be migrated to keyring.
       api_key: typeof parsed.api_key === 'string' && parsed.api_key.trim() ? parsed.api_key : undefined,
     }
   } catch {
@@ -679,9 +715,43 @@ function persistServerConfig(config: ServerConfig | null) {
       window.localStorage.removeItem(CONTROL_PLANE_CONFIG_STORAGE_KEY)
       return
     }
-    window.localStorage.setItem(CONTROL_PLANE_CONFIG_STORAGE_KEY, JSON.stringify(config))
+    // Persist only non-secret fields in localStorage.
+    window.localStorage.setItem(CONTROL_PLANE_CONFIG_STORAGE_KEY, JSON.stringify({
+      url: config.url,
+    }))
   } catch {
     // ignore storage errors
+  }
+}
+
+function normalizeSecretValue(input: string | null | undefined): string | undefined {
+  const normalized = (input ?? '').trim()
+  return normalized || undefined
+}
+
+async function readSecureControlPlaneApiKey(): Promise<string | undefined> {
+  try {
+    const value = await tauriInvoke<string | null>('cmd_cp_get_api_key')
+    const normalized = normalizeSecretValue(value)
+    cachedSecureControlPlaneApiKey = normalized
+    return normalized
+  } catch {
+    return cachedSecureControlPlaneApiKey
+  }
+}
+
+async function persistSecureControlPlaneApiKey(apiKey?: string): Promise<void> {
+  const normalized = normalizeSecretValue(apiKey)
+  try {
+    if (!normalized) {
+      await tauriInvoke('cmd_cp_clear_api_key')
+      cachedSecureControlPlaneApiKey = undefined
+      return
+    }
+    await tauriInvoke('cmd_cp_set_api_key', { apiKey: normalized })
+    cachedSecureControlPlaneApiKey = normalized
+  } catch {
+    // ignore secure storage failures to avoid blocking connectivity checks
   }
 }
 
@@ -886,6 +956,8 @@ function readStoredChatState(): { sessions: ChatSession[]; activeSessionId: stri
 let chatPersistTimeoutId: number | null = null
 let chatPersistIdleId: number | null = null
 let checkConnectionInFlight: Promise<void> | null = null
+let sseUnlisteners: Array<() => void> = []
+let sseReconnectTimer: ReturnType<typeof setTimeout> | null = null
 let refreshForCurrentRoleInFlight: Promise<void> | null = null
 let lastHeavyDashboardRefreshAt = 0
 const initialChatState = readStoredChatState()
@@ -988,7 +1060,11 @@ function formatChatErrorMessage(rawMessage: string): string {
   return 'El chat está recibiendo demasiadas solicitudes ahora. Reintenta en unos segundos.'
 }
 
-function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: ServerConfig | null): ServerConfig {
+function resolveServerConfig(
+  input?: Partial<ServerConfig> | null,
+  previous?: ServerConfig | null,
+  secureApiKey?: string | null,
+): ServerConfig {
   const stored = readStoredServerConfig()
   const envUrl = normalizeLoopbackUrl(import.meta.env.VITE_SERVER_URL || '')
   const envApiKey = (import.meta.env.VITE_API_KEY || '').trim()
@@ -1004,6 +1080,8 @@ function resolveServerConfig(input?: Partial<ServerConfig> | null, previous?: Se
     input?.api_key?.trim() ||
     previous?.api_key?.trim() ||
     envApiKey ||
+    secureApiKey?.trim() ||
+    cachedSecureControlPlaneApiKey?.trim() ||
     stored?.api_key?.trim() ||
     (ALLOW_LEGACY_DEFAULT_API_KEY ? LEGACY_DEFAULT_API_KEY : '')
 
@@ -1100,19 +1178,28 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   chatMessages: deriveActiveChatMessages(initialChatState.sessions, initialChatState.activeSessionId),
   isChatLoading: false,
   displayTimezone: readStoredTimezone() || detectBrowserTimezone(),
+  policyData: null,
+  policyHistory: [],
+  isPolicyLoading: false,
+  isPolicySaving: false,
+  policyError: null,
+  sseConnected: false,
 
   initFromEnv: async () => {
-    // Auto-connect with stored config, env vars, or compatibility fallback.
-    const config = resolveServerConfig()
+    const secureApiKey = await readSecureControlPlaneApiKey()
+    // Auto-connect with secure keyring storage, env vars, or compatibility fallback.
+    const config = resolveServerConfig(undefined, undefined, secureApiKey)
     persistServerConfig(config)
+    await persistSecureControlPlaneApiKey(config.api_key)
     set({ serverConfig: config })
     await syncOutboxServerConfig(config)
     await get().checkConnection()
   },
 
   setServerConfig: (config) => {
-    const merged = resolveServerConfig(config, get().serverConfig)
+    const merged = resolveServerConfig(config, get().serverConfig, cachedSecureControlPlaneApiKey)
     persistServerConfig(merged)
+    void persistSecureControlPlaneApiKey(merged.api_key)
     set({ serverConfig: merged })
     void syncOutboxServerConfig(merged)
     get().checkConnection()
@@ -1132,8 +1219,10 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
         api_key: envApiKey,
       },
       serverConfig,
+      cachedSecureControlPlaneApiKey,
     )
     persistServerConfig(next)
+    await persistSecureControlPlaneApiKey(next.api_key)
     set({ serverConfig: next, error: null })
     await syncOutboxServerConfig(next)
     await get().checkConnection()
@@ -1154,8 +1243,10 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
         api_key: normalizedKey,
       },
       serverConfig,
+      cachedSecureControlPlaneApiKey,
     )
     persistServerConfig(next)
+    await persistSecureControlPlaneApiKey(next.api_key)
     set({ serverConfig: next, error: null })
     await syncOutboxServerConfig(next)
     await get().checkConnection()
@@ -1210,6 +1301,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
             if (envApiKey && envApiKey !== currentApiKey) {
               const recoveredConfig: ServerConfig = { ...serverConfig, api_key: envApiKey }
               persistServerConfig(recoveredConfig)
+              await persistSecureControlPlaneApiKey(recoveredConfig.api_key)
               await syncOutboxServerConfig(recoveredConfig)
               set({ serverConfig: recoveredConfig })
               hasRoleContext = await get().loadMe()
@@ -1364,7 +1456,7 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
       return
     }
 
-    const latestTs = Math.max(...serverLogs.map((log) => log.created_at))
+    const latestTs = serverLogs.reduce((max, log) => log.created_at > max ? log.created_at : max, 0)
     try {
       const incoming = await tauriInvoke<CombinedEvent[]>('cmd_server_get_logs', {
         config: serverConfig,
@@ -1525,20 +1617,29 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
         ticketId: normalized,
       })
       const ticket = resp.found ? resp.ticket ?? null : null
-      set((state) => ({
-        jiraTicketDetails: {
-          ...state.jiraTicketDetails,
-          [normalized]: ticket,
-        },
-        jiraTicketDetailFetchedAt: {
-          ...state.jiraTicketDetailFetchedAt,
-          [normalized]: Date.now(),
-        },
-        jiraTicketDetailLoading: {
-          ...state.jiraTicketDetailLoading,
-          [normalized]: false,
-        },
-      }))
+      set((state) => {
+        const nextDetails = { ...state.jiraTicketDetails, [normalized]: ticket }
+        const nextFetchedAt = { ...state.jiraTicketDetailFetchedAt, [normalized]: Date.now() }
+        const nextLoading = { ...state.jiraTicketDetailLoading, [normalized]: false }
+
+        // Evict oldest entries when cache exceeds limit
+        const keys = Object.keys(nextFetchedAt)
+        if (keys.length > JIRA_TICKET_CACHE_MAX) {
+          const sorted = keys.sort((a, b) => (nextFetchedAt[a] ?? 0) - (nextFetchedAt[b] ?? 0))
+          const toRemove = sorted.slice(0, keys.length - JIRA_TICKET_CACHE_MAX)
+          for (const k of toRemove) {
+            delete nextDetails[k]
+            delete nextFetchedAt[k]
+            delete nextLoading[k]
+          }
+        }
+
+        return {
+          jiraTicketDetails: nextDetails,
+          jiraTicketDetailFetchedAt: nextFetchedAt,
+          jiraTicketDetailLoading: nextLoading,
+        }
+      })
       return ticket
     } catch {
       set((state) => ({
@@ -1986,11 +2087,15 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   clearError: () => set({ error: null }),
 
   disconnect: () => {
+    // Teardown SSE connection
+    get().disconnectSse()
     persistServerConfig(null)
+    void persistSecureControlPlaneApiKey(undefined)
     void syncOutboxServerConfig(null)
     set({
       serverConfig: null,
       isConnected: false,
+      sseConnected: false,
       connectionStatus: 'disconnected',
       maintenanceDetectedAt: null,
       serverStats: null,
@@ -2252,5 +2357,128 @@ export const useControlPlaneStore = create<ControlPlaneState & ControlPlaneActio
   setDisplayTimezone: (tz: string) => {
     persistTimezone(tz)
     set({ displayTimezone: tz })
+  },
+
+  loadPolicy: async (repoName: string) => {
+    const serverConfig = get().serverConfig
+    if (!serverConfig) return
+    set({ isPolicyLoading: true, policyError: null })
+    try {
+      const config = { url: serverConfig.url, api_key: serverConfig.api_key }
+      const result = await tauriInvoke<PolicyResponseData | null>('cmd_server_get_policy', {
+        config,
+        repoName,
+      })
+      set({ policyData: result ?? null, isPolicyLoading: false })
+    } catch (e) {
+      const msg = parseCommandError(String(e))
+      set({ policyError: msg.message, isPolicyLoading: false })
+    }
+  },
+
+  savePolicy: async (repoName: string, policyConfig: import('@/lib/types').GitGovConfig) => {
+    const serverConfig = get().serverConfig
+    if (!serverConfig) return false
+    set({ isPolicySaving: true, policyError: null })
+    try {
+      const config = { url: serverConfig.url, api_key: serverConfig.api_key }
+      const result = await tauriInvoke<PolicyResponseData>('cmd_server_override_policy', {
+        config,
+        repoName,
+        policyConfig,
+      })
+      set({ policyData: result, isPolicySaving: false })
+      return true
+    } catch (e) {
+      const msg = parseCommandError(String(e))
+      set({ policyError: msg.message, isPolicySaving: false })
+      return false
+    }
+  },
+
+  loadPolicyHistory: async (repoName: string) => {
+    const serverConfig = get().serverConfig
+    if (!serverConfig) return
+    try {
+      const config = { url: serverConfig.url, api_key: serverConfig.api_key }
+      const history = await tauriInvoke<PolicyHistoryEntry[]>('cmd_server_get_policy_history', {
+        config,
+        repoName,
+      })
+      set({ policyHistory: history })
+    } catch {
+      // non-fatal
+    }
+  },
+
+  connectSse: async () => {
+    const { serverConfig, sseConnected } = get()
+    if (!serverConfig || sseConnected) return
+
+    // Debounce: track whether an SSE refresh is already scheduled
+    let sseRefreshScheduled = false
+
+    // Listen for SSE events from Tauri backend
+    const unlistenEvent = await tauriListen<{ type: string; count?: number }>('gitgov:sse-event', (payload) => {
+      const eventType = payload?.type
+      if ((eventType === 'new_events' || eventType === 'stats_updated') && !sseRefreshScheduled) {
+        // Debounce: batch rapid SSE notifications into a single refresh
+        sseRefreshScheduled = true
+        setTimeout(() => {
+          sseRefreshScheduled = false
+          void get().loadLogsIncremental(500)
+          void get().loadStats()
+        }, 200)
+        // Desktop notification for new events (fire-and-forget)
+        if (eventType === 'new_events' && payload.count) {
+          void notifyNewEvents(payload.count)
+        }
+      }
+      // heartbeat — no action needed
+    })
+
+    const unlistenConnected = await tauriListen<unknown>('gitgov:sse-connected', () => {
+      set({ sseConnected: true })
+    })
+
+    const unlistenDisconnected = await tauriListen<unknown>('gitgov:sse-disconnected', () => {
+      set({ sseConnected: false })
+      unlistenEvent()
+      unlistenConnected()
+      unlistenDisconnected()
+      sseUnlisteners = []
+      // Auto-reconnect after 5s if still connected to server
+      sseReconnectTimer = setTimeout(() => {
+        sseReconnectTimer = null
+        if (get().isConnected) {
+          void get().connectSse()
+        }
+      }, 5000)
+    })
+
+    // Store unlisten functions for cleanup on disconnect
+    sseUnlisteners = [unlistenEvent, unlistenConnected, unlistenDisconnected]
+
+    // Fire-and-forget: the command runs until connection drops or is cancelled
+    const config = { url: serverConfig.url, api_key: serverConfig.api_key }
+    tauriInvoke('cmd_server_sse_connect', { config }).catch(() => {
+      // Connection failed — clean up listeners
+      set({ sseConnected: false })
+      for (const fn of sseUnlisteners) fn()
+      sseUnlisteners = []
+    })
+  },
+
+  disconnectSse: () => {
+    set({ sseConnected: false })
+    // Cancel pending reconnect timer
+    if (sseReconnectTimer !== null) {
+      clearTimeout(sseReconnectTimer)
+      sseReconnectTimer = null
+    }
+    // Signal the Tauri backend to stop the stream loop (bumps generation)
+    tauriInvoke('cmd_server_sse_disconnect', {}).catch(() => {})
+    for (const fn of sseUnlisteners) fn()
+    sseUnlisteners = []
   },
 }))

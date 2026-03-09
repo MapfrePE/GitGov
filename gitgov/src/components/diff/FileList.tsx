@@ -13,7 +13,7 @@ import {
   topLevelFolder,
 } from '@/lib/largeChangeset'
 import { tauriInvoke, parseCommandError } from '@/lib/tauri'
-import { FileText, AlertCircle, CheckSquare, Plus, FileCode, Loader2, Search, Sparkles, FolderTree, ChevronRight, ChevronDown } from 'lucide-react'
+import { FileText, AlertCircle, CheckSquare, Plus, FileCode, Loader2, Search, Sparkles, FolderTree, ChevronRight, ChevronDown, MoreHorizontal, EyeOff } from 'lucide-react'
 import { SkeletonFileRow } from '@/components/shared/Skeleton'
 
 const LARGE_CHANGESET_THRESHOLD = 1000
@@ -54,6 +54,8 @@ interface FileItemProps {
   onToggle: () => void
   onViewDiff: () => void
   onUnstage: () => void
+  onHideFromUi: () => void
+  onIgnoreLocalGit: () => void
 }
 
 interface GroupedFileBucket {
@@ -68,6 +70,7 @@ interface FileListUiPrefs {
   selectedStackTemplateId?: string | null
   selectedStackRuleGroupId?: string | null
   showGitGovHidden?: boolean
+  localHiddenPaths?: string[]
 }
 
 function fileListPrefsKey(repoPath: string): string {
@@ -102,7 +105,11 @@ const FileItem = memo(function FileItem({
   onToggle,
   onViewDiff,
   onUnstage,
+  onHideFromUi,
+  onIgnoreLocalGit,
 }: FileItemProps) {
+  const [isActionsOpen, setIsActionsOpen] = useState(false)
+  const actionsRef = useRef<HTMLDivElement | null>(null)
   const statusChar = {
     Modified: 'M',
     Added: 'A',
@@ -115,6 +122,30 @@ const FileItem = memo(function FileItem({
   const lastSlash = file.path.lastIndexOf('/')
   const dir = lastSlash >= 0 ? file.path.slice(0, lastSlash) : ''
   const name = lastSlash >= 0 ? file.path.slice(lastSlash + 1) : file.path
+
+  useEffect(() => {
+    if (!isActionsOpen) return
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null
+      if (actionsRef.current && target && !actionsRef.current.contains(target)) {
+        setIsActionsOpen(false)
+      }
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsActionsOpen(false)
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isActionsOpen])
 
   return (
     <div
@@ -183,6 +214,47 @@ const FileItem = memo(function FileItem({
         </div>
       )}
 
+      <div ref={actionsRef} className="relative">
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            setIsActionsOpen((prev) => !prev)
+          }}
+          title="Opciones del archivo"
+          className={clsx(
+            'text-surface-500 hover:text-surface-300 transition-colors',
+            isActionsOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+          )}
+        >
+          <MoreHorizontal size={13} strokeWidth={1.5} />
+        </button>
+        {isActionsOpen && (
+          <div className="absolute right-0 top-full mt-1 z-20 min-w-52 rounded-md border border-surface-700/50 bg-surface-950 shadow-lg p-1">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                setIsActionsOpen(false)
+                onHideFromUi()
+              }}
+              className="w-full text-left px-2 py-1.5 text-[11px] text-surface-200 hover:bg-white/6 rounded flex items-center gap-1.5"
+            >
+              <EyeOff size={12} strokeWidth={1.5} className="text-warning-400 shrink-0" />
+              Quitar de GitGov (local)
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                setIsActionsOpen(false)
+                onIgnoreLocalGit()
+              }}
+              className="w-full text-left px-2 py-1.5 text-[11px] text-surface-200 hover:bg-white/6 rounded"
+            >
+              Ignorar local en Git (.git/info/exclude)
+            </button>
+          </div>
+        )}
+      </div>
+
       <button
         onClick={onViewDiff}
         className="opacity-0 group-hover:opacity-100 text-surface-500 hover:text-surface-300 transition-all duration-150"
@@ -228,6 +300,7 @@ export function FileList() {
   const [gitgovIgnorePath, setGitgovIgnorePath] = useState<string | null>(null)
   const [gitgovIgnoreLoadError, setGitgovIgnoreLoadError] = useState<string | null>(null)
   const [showGitGovHidden, setShowGitGovHidden] = useState(false)
+  const [locallyHiddenPaths, setLocallyHiddenPaths] = useState<Set<string>>(new Set())
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [selectedStackTemplateId, setSelectedStackTemplateId] = useState<string | null>(null)
   const [selectedStackRuleGroupId, setSelectedStackRuleGroupId] = useState<string | null>(null)
@@ -248,6 +321,8 @@ export function FileList() {
       setNoiseFilterMode('all')
       setSelectedStackTemplateId(null)
       setSelectedStackRuleGroupId(null)
+      setShowGitGovHidden(false)
+      setLocallyHiddenPaths(new Set())
       return
     }
 
@@ -259,6 +334,7 @@ export function FileList() {
     setSelectedStackTemplateId(saved.selectedStackTemplateId ?? null)
     setSelectedStackRuleGroupId(saved.selectedStackRuleGroupId ?? null)
     setShowGitGovHidden(saved.showGitGovHidden === true)
+    setLocallyHiddenPaths(new Set((saved.localHiddenPaths ?? []).filter((p) => typeof p === 'string' && p.trim().length > 0)))
   }, [repoPath])
 
   useEffect(() => {
@@ -345,6 +421,78 @@ export function FileList() {
     }
   }
 
+  const handleHideFileLocally = async (file: FileChange) => {
+    const confirmed = window.confirm(
+      `Quitar "${file.path}" de la lista de GitGov en este equipo?\n\nNo modifica Git ni borra el archivo.`
+    )
+    if (!confirmed) return
+
+    if (file.staged) {
+      const unstageConfirmed = window.confirm(
+        `"${file.path}" está en staging.\n\nPara evitar commits invisibles, se quitará del staging antes de ocultarlo.`
+      )
+      if (!unstageConfirmed) return
+      try {
+        await unstageFiles([file.path])
+      } catch (e) {
+        window.alert(`No se pudo quitar del staging: ${parseCommandError(String(e)).message}`)
+        return
+      }
+    }
+
+    deselectFile(file.path)
+    setLocallyHiddenPaths((prev) => {
+      const next = new Set(prev)
+      next.add(file.path)
+      return next
+    })
+  }
+
+  const handleRestoreLocallyHidden = () => {
+    setLocallyHiddenPaths(new Set())
+  }
+
+  const handleIgnoreFileInLocalGit = async (file: FileChange) => {
+    if (!repoPath) return
+    const confirmed = window.confirm(
+      `Ignorar "${file.path}" en Git local (.git/info/exclude)?\n\nNo se commitea y aplica solo en este repositorio local.`
+    )
+    if (!confirmed) return
+
+    if (file.staged) {
+      const unstageConfirmed = window.confirm(
+        `"${file.path}" está en staging.\n\nSe quitará del staging antes de aplicar ignore local.`
+      )
+      if (!unstageConfirmed) return
+      try {
+        await unstageFiles([file.path])
+      } catch (e) {
+        window.alert(`No se pudo quitar del staging: ${parseCommandError(String(e)).message}`)
+        return
+      }
+    }
+
+    try {
+      await tauriInvoke<IgnoreRuleApplyResult>('cmd_apply_ignore_rules', {
+        repoPath,
+        target: 'exclude',
+        rules: [file.path],
+      })
+      deselectFile(file.path)
+      await refreshStatus()
+    } catch (e) {
+      window.alert(`No se pudo aplicar ignore local: ${parseCommandError(String(e)).message}`)
+      return
+    }
+
+    const stillVisible = useRepoStore.getState().fileChanges.some((entry) => entry.path === file.path)
+    if (stillVisible) {
+      window.alert(
+        `Se agregó la regla en .git/info/exclude, pero "${file.path}" sigue visible porque ya está trackeado por Git.\n\nEn ese caso usa "Quitar de GitGov (local)".`
+      )
+    }
+  }
+
   const pendingPushFiles = pendingPushPreview?.files
   const workingTreePathSet = useMemo(() => new Set(fileChanges.map((f) => f.path)), [fileChanges])
   const pendingPushOnlyFiles = useMemo<FileChange[]>(
@@ -362,29 +510,37 @@ export function FileList() {
     () => [...pendingPushOnlyFiles, ...fileChanges],
     [pendingPushOnlyFiles, fileChanges]
   )
+  const localHiddenCount = useMemo(
+    () => effectiveFileChanges.reduce((acc, file) => acc + (locallyHiddenPaths.has(file.path) ? 1 : 0), 0),
+    [effectiveFileChanges, locallyHiddenPaths]
+  )
+  const locallyVisibleFiles = useMemo(
+    () => effectiveFileChanges.filter((file) => !locallyHiddenPaths.has(file.path)),
+    [effectiveFileChanges, locallyHiddenPaths]
+  )
 
-  const analysis = useMemo(() => analyzeLargeChangeset(effectiveFileChanges), [effectiveFileChanges])
+  const analysis = useMemo(() => analyzeLargeChangeset(locallyVisibleFiles), [locallyVisibleFiles])
   const normalizedQuery = searchQuery.trim().toLowerCase()
   const gitgovHiddenPathSet = useMemo(() => {
     if (gitgovIgnoreRules.length === 0) return new Set<string>()
     const set = new Set<string>()
-    for (const f of effectiveFileChanges) {
+    for (const f of locallyVisibleFiles) {
       if (isHiddenByGitGovIgnore(f.path, gitgovIgnoreRules)) set.add(f.path)
     }
     return set
-  }, [effectiveFileChanges, gitgovIgnoreRules])
+  }, [locallyVisibleFiles, gitgovIgnoreRules])
   const gitgovHiddenCount = gitgovHiddenPathSet.size
   const gitgovHiddenRuleByPath = useMemo(() => {
     const map = new Map<string, string>()
     if (gitgovIgnoreRules.length === 0) return map
-    for (const f of effectiveFileChanges) {
+    for (const f of locallyVisibleFiles) {
       const matched = firstMatchingGitGovIgnoreRule(f.path, gitgovIgnoreRules)
       if (matched) {
         map.set(f.path, matched)
       }
     }
     return map
-  }, [effectiveFileChanges, gitgovIgnoreRules])
+  }, [locallyVisibleFiles, gitgovIgnoreRules])
   const gitgovHiddenTopRules = useMemo(() => {
     if (gitgovIgnoreRules.length === 0 || gitgovHiddenCount === 0) return [] as Array<{ rule: string; count: number }>
     const counts = new Map<string, number>()
@@ -397,9 +553,9 @@ export function FileList() {
       .map(([rule, count]) => ({ rule, count }))
   }, [gitgovHiddenCount, gitgovHiddenRuleByPath, gitgovIgnoreRules])
   const gitgovVisibleFiles = useMemo(() => {
-    if (showGitGovHidden || gitgovHiddenCount === 0) return effectiveFileChanges
-    return effectiveFileChanges.filter((f) => !gitgovHiddenPathSet.has(f.path))
-  }, [effectiveFileChanges, showGitGovHidden, gitgovHiddenCount, gitgovHiddenPathSet])
+    if (showGitGovHidden || gitgovHiddenCount === 0) return locallyVisibleFiles
+    return locallyVisibleFiles.filter((f) => !gitgovHiddenPathSet.has(f.path))
+  }, [locallyVisibleFiles, showGitGovHidden, gitgovHiddenCount, gitgovHiddenPathSet])
   const noisePathSet = useMemo(() => {
     const set = new Set<string>()
     for (const f of gitgovVisibleFiles) {
@@ -423,13 +579,13 @@ export function FileList() {
 
   useEffect(() => {
     if (searchQuery.trim()) return
-    if (effectiveFileChanges.length <= LARGE_CHANGESET_THRESHOLD) {
+    if (locallyVisibleFiles.length <= LARGE_CHANGESET_THRESHOLD) {
       setExpandedGroups(new Set())
       return
     }
 
     const groups = Array.from(
-      effectiveFileChanges.reduce((acc, file) => {
+      locallyVisibleFiles.reduce((acc, file) => {
         const folder = topLevelFolder(file.path)
         acc.set(folder, (acc.get(folder) ?? 0) + 1)
         return acc
@@ -440,7 +596,7 @@ export function FileList() {
       .map(([folder]) => folder)
 
     setExpandedGroups(new Set(groups))
-  }, [effectiveFileChanges, searchQuery])
+  }, [locallyVisibleFiles, searchQuery])
 
   useEffect(() => {
     if (analysis.stackTemplates.length === 0) {
@@ -537,13 +693,42 @@ export function FileList() {
 
   useEffect(() => {
     if (!repoPath) return
+    const localHiddenPathsArray = Array.from(locallyHiddenPaths)
+      .filter((path) => effectiveFileChanges.some((file) => file.path === path))
+      .sort()
     writeFileListPrefs(repoPath, {
       noiseFilterMode,
       selectedStackTemplateId,
       selectedStackRuleGroupId,
       showGitGovHidden,
+      localHiddenPaths: localHiddenPathsArray,
     })
-  }, [repoPath, noiseFilterMode, selectedStackTemplateId, selectedStackRuleGroupId, showGitGovHidden])
+  }, [
+    repoPath,
+    noiseFilterMode,
+    selectedStackTemplateId,
+    selectedStackRuleGroupId,
+    showGitGovHidden,
+    locallyHiddenPaths,
+    effectiveFileChanges,
+  ])
+
+  useEffect(() => {
+    setLocallyHiddenPaths((prev) => {
+      if (prev.size === 0) return prev
+      const currentPaths = new Set(effectiveFileChanges.map((file) => file.path))
+      let changed = false
+      const next = new Set<string>()
+      for (const path of prev) {
+        if (currentPaths.has(path)) {
+          next.add(path)
+        } else {
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [effectiveFileChanges])
 
   const applyStackTemplateRules = async (target: 'gitignore' | 'exclude' | 'gitgovignore') => {
     if (!selectedStackTemplate || !selectedStackRuleGroup) return
@@ -620,7 +805,7 @@ export function FileList() {
   const unstagedCount = useMemo(() => fileChanges.reduce((acc, f) => acc + (f.staged ? 0 : 1), 0), [fileChanges])
   const hasUnstagedFiles = unstagedCount > 0
   const someSelected = selectedFiles.size > 0
-  const isLargeChangeset = effectiveFileChanges.length > LARGE_CHANGESET_THRESHOLD
+  const isLargeChangeset = locallyVisibleFiles.length > LARGE_CHANGESET_THRESHOLD
   const visibleFiles = isLargeChangeset ? filteredFiles.slice(0, visibleCount) : filteredFiles
   const hiddenFilesCount = filteredFiles.length - visibleFiles.length
   const shouldVirtualizeFlatList = !isLargeChangeset && filteredFiles.length > FLAT_LIST_VIRTUALIZE_THRESHOLD
@@ -719,7 +904,7 @@ export function FileList() {
     <div className="h-full flex flex-col bg-surface-900/50 border-r border-surface-700/30">
       <div className="flex items-center justify-between px-4 py-3 border-b border-surface-700/30">
         <h3 className="text-[10px] font-medium text-surface-500 uppercase tracking-widest">
-          Cambios ({effectiveFileChanges.length})
+          Cambios ({locallyVisibleFiles.length})
         </h3>
         <div className="flex gap-2">
           {someSelected ? (
@@ -738,7 +923,7 @@ export function FileList() {
                 Deseleccionar
               </button>
             </>
-          ) : effectiveFileChanges.length > 0 ? (
+          ) : locallyVisibleFiles.length > 0 ? (
             <>
               {hasUnstagedFiles && (
                 <button
@@ -783,8 +968,28 @@ export function FileList() {
         </label>
         {normalizedQuery && (
           <p className="mt-1.5 text-[10px] text-surface-500">
-            Coincidencias: {filteredFiles.length.toLocaleString()} / {effectiveFileChanges.length.toLocaleString()}
+            Coincidencias: {filteredFiles.length.toLocaleString()} / {locallyVisibleFiles.length.toLocaleString()}
           </p>
+        )}
+        {localHiddenCount > 0 && (
+          <div className="mt-2 rounded border border-warning-500/25 bg-warning-500/6 px-2.5 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[10px] text-warning-200">
+                Ocultos localmente en GitGov: {localHiddenCount}
+              </p>
+              <button
+                type="button"
+                onClick={handleRestoreLocallyHidden}
+                className="text-[10px] px-2 py-0.5 rounded bg-white/8 text-surface-200 hover:bg-white/12 transition-colors"
+                title="Volver a mostrar todos los archivos ocultos localmente"
+              >
+                Restaurar ocultos
+              </button>
+            </div>
+            <p className="mt-1 text-[10px] text-surface-500">
+              Solo aplica a este repo en este equipo. No modifica Git ni el servidor.
+            </p>
+          </div>
         )}
 
         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -907,7 +1112,7 @@ export function FileList() {
             <AlertCircle size={13} strokeWidth={1.75} className="text-warning-500 mt-0.5 shrink-0" />
             <div className="min-w-0">
               <p className="text-[11px] text-warning-300 font-medium">
-                Cambios masivos detectados ({effectiveFileChanges.length.toLocaleString()} archivos)
+                Cambios masivos detectados ({locallyVisibleFiles.length.toLocaleString()} archivos)
               </p>
               <p className="text-[10px] text-surface-500 mt-0.5">
                 Se renderiza una vista parcial para evitar bloqueos. Aun puedes preparar todo.
@@ -1209,13 +1414,13 @@ export function FileList() {
         onScroll={(e) => setListScrollTop(e.currentTarget.scrollTop)}
         className="flex-1 overflow-y-auto divide-y divide-surface-700/15"
       >
-        {isLoadingStatus && effectiveFileChanges.length === 0 ? (
+        {isLoadingStatus && locallyVisibleFiles.length === 0 ? (
           <div className="space-y-0.5">
             {[1, 2, 3, 4, 5].map((i) => (
               <SkeletonFileRow key={i} />
             ))}
           </div>
-        ) : effectiveFileChanges.length === 0 ? (
+        ) : locallyVisibleFiles.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-surface-500 p-6">
             <FileCode size={24} strokeWidth={1.5} className="mb-3 text-surface-700" />
             <p className="text-xs font-medium text-surface-400">No hay cambios</p>
@@ -1301,6 +1506,8 @@ export function FileList() {
                           onToggle={() => handleToggle(file.path, selectedFiles.has(file.path))}
                           onViewDiff={() => loadDiff(file.path)}
                           onUnstage={() => unstageFiles([file.path])}
+                          onHideFromUi={() => void handleHideFileLocally(file)}
+                          onIgnoreLocalGit={() => void handleIgnoreFileInLocalGit(file)}
                         />
                       ))}
                     </div>
@@ -1329,6 +1536,8 @@ export function FileList() {
                   onToggle={() => handleToggle(file.path, selectedFiles.has(file.path))}
                   onViewDiff={() => loadDiff(file.path)}
                   onUnstage={() => unstageFiles([file.path])}
+                  onHideFromUi={() => void handleHideFileLocally(file)}
+                  onIgnoreLocalGit={() => void handleIgnoreFileInLocalGit(file)}
                 />
               ))}
 
@@ -1352,6 +1561,8 @@ export function FileList() {
                 onToggle={() => handleToggle(file.path, selectedFiles.has(file.path))}
                 onViewDiff={() => loadDiff(file.path)}
                 onUnstage={() => unstageFiles([file.path])}
+                onHideFromUi={() => void handleHideFileLocally(file)}
+                onIgnoreLocalGit={() => void handleIgnoreFileInLocalGit(file)}
               />
             ))
           )
@@ -1366,7 +1577,7 @@ export function FileList() {
           {hiddenFilesCount > 0 && (
             <p className="text-[10px] text-surface-500 mt-1">
               Mostrando {visibleFiles.length.toLocaleString()} de {filteredFiles.length.toLocaleString()}
-              {normalizedQuery ? ` coincidencias (de ${effectiveFileChanges.length.toLocaleString()} cambios)` : ` cambios`}
+              {normalizedQuery ? ` coincidencias (de ${locallyVisibleFiles.length.toLocaleString()} cambios)` : ` cambios`}
             </p>
           )}
           {!isLargeChangeset && shouldVirtualizeFlatList && (

@@ -130,8 +130,8 @@ fn simulated_keyring_store() -> &'static std::sync::Mutex<std::collections::Hash
     STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-fn in_process_token_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+fn in_process_token_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>>
+{
     static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -472,14 +472,12 @@ pub fn save_token(username: &str, token: &str, expires_in: Option<i64>) -> Resul
                 );
             }
         }
-    } else {
-        if let Err(e) = delete_legacy_token_file(username) {
-            tracing::warn!(
-                username = %username,
-                error = %e,
-                "Token saved to keyring, but legacy token file cleanup failed"
-            );
-        }
+    } else if let Err(e) = delete_legacy_token_file(username) {
+        tracing::warn!(
+            username = %username,
+            error = %e,
+            "Token saved to keyring, but legacy token file cleanup failed"
+        );
     }
 
     tracing::info!(username = %username, "Token saved to keyring");

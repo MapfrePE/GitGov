@@ -43,11 +43,16 @@ pub async fn auth_middleware(
         .headers()
         .get("Authorization")
         .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| AuthError("Missing Authorization header".to_string()))?;
+        .ok_or_else(|| {
+            metrics::counter!("gitgov_auth_total", "result" => "missing_header", "role" => "unknown").increment(1);
+            AuthError("Missing Authorization header".to_string())
+        })?;
 
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| AuthError("Invalid Authorization header format".to_string()))?;
+    let token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+        metrics::counter!("gitgov_auth_total", "result" => "bad_format", "role" => "unknown")
+            .increment(1);
+        AuthError("Invalid Authorization header format".to_string())
+    })?;
 
     let key_hash = format!("{:x}", sha2::Sha256::digest(token.as_bytes()));
 
@@ -56,9 +61,11 @@ pub async fn auth_middleware(
         tracing::error!("Authentication backend error: {}", e);
         AuthError("Authentication backend unavailable".to_string())
     })?;
-    let auth_user = auth_validation
-        .auth
-        .ok_or_else(|| AuthError("Invalid or expired API key".to_string()))?;
+    let auth_user = auth_validation.auth.ok_or_else(|| {
+        metrics::counter!("gitgov_auth_total", "result" => "invalid_key", "role" => "unknown")
+            .increment(1);
+        AuthError("Invalid or expired API key".to_string())
+    })?;
 
     let (client_id, role, org_id) = auth_user;
     if auth_validation.used_stale_cache
@@ -81,6 +88,9 @@ pub async fn auth_middleware(
         role,
         org_id,
     };
+
+    metrics::counter!("gitgov_auth_total", "result" => "success", "role" => user.role.as_str())
+        .increment(1);
 
     req.extensions_mut().insert(user);
 

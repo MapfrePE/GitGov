@@ -33,13 +33,16 @@ pub struct Database {
 
 #[derive(Clone)]
 struct CachedApiKeyAuth {
-    value: Option<(String, UserRole, Option<String>)>,
+    value: Option<ApiKeyAuthCacheValue>,
     cached_at: Instant,
 }
 
+type ApiKeyAuthCacheValue = (String, UserRole, Option<String>);
+type StaleApiKeyAuthCacheValue = (ApiKeyAuthCacheValue, u64);
+
 #[derive(Debug, Clone)]
 pub struct ApiKeyAuthValidation {
-    pub auth: Option<(String, UserRole, Option<String>)>,
+    pub auth: Option<ApiKeyAuthCacheValue>,
     pub used_stale_cache: bool,
 }
 
@@ -128,6 +131,20 @@ pub struct AcceptedOrgInvitation {
 }
 
 impl Database {
+    /// Create a Database from an existing PgPool (used by integration tests).
+    #[cfg(test)]
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self {
+            pool,
+            auth_cache: Arc::new(Mutex::new(HashMap::new())),
+            auth_cache_ttl: Duration::from_secs(20),
+            auth_cache_stale_max: Duration::from_secs(120),
+            auth_cache_max_entries: 4096,
+            auth_db_failure_streak: Arc::new(AtomicU32::new(0)),
+            auth_stale_fail_closed_after: 0,
+        }
+    }
+
     pub async fn new(database_url: &str) -> Result<Self, DbError> {
         let runtime_env = std::env::var("GITGOV_ENV")
             .unwrap_or_else(|_| "dev".to_string())
@@ -209,7 +226,7 @@ impl Database {
         &self,
         key_hash: &str,
         max_age: Duration,
-    ) -> Option<Option<(String, UserRole, Option<String>)>> {
+    ) -> Option<Option<ApiKeyAuthCacheValue>> {
         let cache = self.auth_cache.lock().ok()?;
         let entry = cache.get(key_hash).cloned()?;
         if entry.cached_at.elapsed() <= max_age {
@@ -218,17 +235,11 @@ impl Database {
         None
     }
 
-    fn get_cached_api_key_auth(
-        &self,
-        key_hash: &str,
-    ) -> Option<Option<(String, UserRole, Option<String>)>> {
+    fn get_cached_api_key_auth(&self, key_hash: &str) -> Option<Option<ApiKeyAuthCacheValue>> {
         self.get_cached_api_key_auth_with_max_age(key_hash, self.auth_cache_ttl)
     }
 
-    fn get_stale_cached_api_key_auth(
-        &self,
-        key_hash: &str,
-    ) -> Option<((String, UserRole, Option<String>), u64)> {
+    fn get_stale_cached_api_key_auth(&self, key_hash: &str) -> Option<StaleApiKeyAuthCacheValue> {
         let mut cache = self.auth_cache.lock().ok()?;
         let entry = cache.get(key_hash).cloned()?;
         let age = entry.cached_at.elapsed();
@@ -239,11 +250,7 @@ impl Database {
         None
     }
 
-    fn put_cached_api_key_auth(
-        &self,
-        key_hash: &str,
-        value: Option<(String, UserRole, Option<String>)>,
-    ) {
+    fn put_cached_api_key_auth(&self, key_hash: &str, value: Option<ApiKeyAuthCacheValue>) {
         if let Ok(mut cache) = self.auth_cache.lock() {
             if cache.len() >= self.auth_cache_max_entries && !cache.contains_key(key_hash) {
                 if let Some(stale_key) = cache.iter().find_map(|(k, v)| {
@@ -1830,8 +1837,19 @@ impl Database {
         commit_sha: Option<&str>,
         branch: Option<&str>,
     ) -> Result<bool, DbError> {
+        self.append_project_ticket_relations_full(ticket_id, commit_sha, branch, None).await
+    }
+
+    pub async fn append_project_ticket_relations_full(
+        &self,
+        ticket_id: &str,
+        commit_sha: Option<&str>,
+        branch: Option<&str>,
+        pr_ref: Option<&str>,
+    ) -> Result<bool, DbError> {
         let commit_sha = commit_sha.map(str::trim).filter(|s| !s.is_empty());
         let branch = branch.map(str::trim).filter(|s| !s.is_empty());
+        let pr_ref = pr_ref.map(str::trim).filter(|s| !s.is_empty());
 
         let result = sqlx::query(
             r#"
@@ -1853,6 +1871,14 @@ impl Database {
                   WHERE x IS NOT NULL AND x <> ''
                 )
               END,
+              related_prs = CASE
+                WHEN $4::text IS NULL THEN related_prs
+                ELSE (
+                  SELECT COALESCE(array_agg(DISTINCT x), '{}'::text[])
+                  FROM unnest(COALESCE(related_prs, '{}'::text[]) || ARRAY[$4::text]) AS x
+                  WHERE x IS NOT NULL AND x <> ''
+                )
+              END,
               updated_at = NOW()
             WHERE ticket_id = $1
             "#,
@@ -1860,11 +1886,66 @@ impl Database {
         .bind(ticket_id)
         .bind(commit_sha)
         .bind(branch)
+        .bind(pr_ref)
         .execute(&self.pool)
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Find PRs whose head_sha matches any of the given commit SHAs,
+    /// or whose pr_title contains any of the given ticket IDs.
+    /// Returns Vec<(pr_number, pr_title, head_sha, repo_full_name)>.
+    pub async fn find_prs_related_to_tickets(
+        &self,
+        commit_shas: &[String],
+        ticket_ids: &[String],
+        hours: i64,
+    ) -> Result<Vec<(i32, Option<String>, Option<String>, Option<String>)>, DbError> {
+        if commit_shas.is_empty() && ticket_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT DISTINCT
+                prm.pr_number,
+                prm.pr_title,
+                prm.head_sha,
+                r.full_name AS repo_full_name
+            FROM pull_request_merges prm
+            LEFT JOIN repos r ON r.id = prm.repo_id
+            WHERE prm.created_at >= NOW() - make_interval(hours => $3::int)
+              AND (
+                ($1::text[] IS NOT NULL AND prm.head_sha = ANY($1::text[]))
+                OR ($2::text[] IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM unnest($2::text[]) AS tid
+                  WHERE UPPER(prm.pr_title) LIKE '%' || UPPER(tid) || '%'
+                ))
+              )
+            ORDER BY prm.pr_number
+            LIMIT 200
+            "#,
+        )
+        .bind(commit_shas)
+        .bind(ticket_ids)
+        .bind(hours as i32)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<i32, _>("pr_number"),
+                    row.get::<Option<String>, _>("pr_title"),
+                    row.get::<Option<String>, _>("head_sha"),
+                    row.get::<Option<String>, _>("repo_full_name"),
+                )
+            })
+            .collect())
     }
 
     pub async fn get_recent_commit_events_for_ticket_correlation(

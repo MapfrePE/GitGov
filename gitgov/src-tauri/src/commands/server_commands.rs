@@ -6,14 +6,28 @@ use crate::control_plane::{
     DailyActivityPoint, EventPayload, ExportLogEntry, ExportResponse, FeatureRequestCreated,
     FeatureRequestInput, JenkinsCorrelationFilter, JiraCorrelateRequest, JiraCorrelateResponse,
     JiraTicketDetailResponse, MeResponse, OrgInvitation, OrgInvitationsResponse, OrgUser,
-    OrgUsersResponse, PrMergeEvidenceEntry, PrMergeEvidenceFilter, ResendOrgInvitationRequest,
-    RevokeApiKeyResponse, ServerConfig, ServerStats, TeamOverviewResponse, TeamReposResponse,
-    TicketCoverageQuery, TicketCoverageResponse,
+    OrgUsersResponse, PolicyCheckResponse, PolicyHistoryEntry, PolicyResponse,
+    PrMergeEvidenceEntry, PrMergeEvidenceFilter, ResendOrgInvitationRequest, RevokeApiKeyResponse,
+    ServerConfig, ServerStats, TeamOverviewResponse, TeamReposResponse, TicketCoverageQuery,
+    TicketCoverageResponse,
 };
+use crate::models::GitGovConfig;
 use crate::outbox::Outbox;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, State};
+
+const KEYRING_SERVICE: &str = "gitgov";
+const CONTROL_PLANE_API_KEY_ACCOUNT: &str = "control_plane_api_key";
+const LOCAL_PIN_ACCOUNT: &str = "local_pin";
+
+/// Monotonic generation counter for SSE connections.
+/// Each new connection increments the counter; a stream loop only
+/// continues while its local generation matches the current value.
+/// This prevents stale streams from surviving a quick disconnect→reconnect.
+pub struct SseGeneration(pub Arc<AtomicU64>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConnectionConfig {
@@ -76,6 +90,115 @@ where
             "SERVER_ERROR",
         )
     })?
+}
+
+fn is_keyring_no_entry_error(error: &keyring::Error) -> bool {
+    match error {
+        #[allow(unreachable_patterns)]
+        keyring::Error::NoEntry => true,
+        _ => {
+            let msg = error.to_string().to_ascii_lowercase();
+            msg.contains("no matching entry found")
+                || msg.contains("no entry")
+                || msg.contains("credential not found")
+        }
+    }
+}
+
+fn load_secure_secret(account: &'static str) -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, account)
+        .map_err(|e| to_command_error(e, "SECURE_STORAGE_ERROR"))?;
+    match entry.get_password() {
+        Ok(value) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed))
+            }
+        }
+        Err(e) if is_keyring_no_entry_error(&e) => Ok(None),
+        Err(e) => Err(to_command_error(e, "SECURE_STORAGE_ERROR")),
+    }
+}
+
+fn save_secure_secret(account: &'static str, value: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, account)
+        .map_err(|e| to_command_error(e, "SECURE_STORAGE_ERROR"))?;
+    entry
+        .set_password(value)
+        .map_err(|e| to_command_error(e, "SECURE_STORAGE_ERROR"))
+}
+
+fn clear_secure_secret(account: &'static str) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, account)
+        .map_err(|e| to_command_error(e, "SECURE_STORAGE_ERROR"))?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(e) if is_keyring_no_entry_error(&e) => Ok(()),
+        Err(e) => Err(to_command_error(e, "SECURE_STORAGE_ERROR")),
+    }
+}
+
+fn is_valid_local_pin(pin: &str) -> bool {
+    let len = pin.len();
+    (4..=6).contains(&len) && pin.chars().all(|c| c.is_ascii_digit())
+}
+
+#[tauri::command]
+pub async fn cmd_cp_get_api_key() -> Result<Option<String>, String> {
+    run_blocking_command("CP_GET_API_KEY", || {
+        load_secure_secret(CONTROL_PLANE_API_KEY_ACCOUNT)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_cp_set_api_key(api_key: String) -> Result<(), String> {
+    run_blocking_command("CP_SET_API_KEY", move || {
+        let normalized = api_key.trim().to_string();
+        if normalized.is_empty() {
+            return Err(to_command_error(
+                "API key vacia no permitida",
+                "VALIDATION_ERROR",
+            ));
+        }
+        save_secure_secret(CONTROL_PLANE_API_KEY_ACCOUNT, &normalized)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_cp_clear_api_key() -> Result<(), String> {
+    run_blocking_command("CP_CLEAR_API_KEY", || {
+        clear_secure_secret(CONTROL_PLANE_API_KEY_ACCOUNT)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_pin_get() -> Result<Option<String>, String> {
+    run_blocking_command("PIN_GET", || load_secure_secret(LOCAL_PIN_ACCOUNT)).await
+}
+
+#[tauri::command]
+pub async fn cmd_pin_set(pin: String) -> Result<(), String> {
+    run_blocking_command("PIN_SET", move || {
+        let normalized = pin.trim().to_string();
+        if !is_valid_local_pin(&normalized) {
+            return Err(to_command_error(
+                "PIN invalido. Debe tener entre 4 y 6 digitos.",
+                "VALIDATION_ERROR",
+            ));
+        }
+        save_secure_secret(LOCAL_PIN_ACCOUNT, &normalized)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_pin_clear() -> Result<(), String> {
+    run_blocking_command("PIN_CLEAR", || clear_secure_secret(LOCAL_PIN_ACCOUNT)).await
 }
 
 #[tauri::command]
@@ -714,4 +837,181 @@ pub async fn cmd_server_create_feature_request(
         )
     })?
     .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+}
+
+#[tauri::command]
+pub async fn cmd_server_get_policy(
+    config: ServerConnectionConfig,
+    repo_name: String,
+) -> Result<Option<PolicyResponse>, String> {
+    run_blocking_command("GET_POLICY", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_policy(&repo_name)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_server_override_policy(
+    config: ServerConnectionConfig,
+    repo_name: String,
+    policy_config: GitGovConfig,
+) -> Result<PolicyResponse, String> {
+    run_blocking_command("OVERRIDE_POLICY", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .override_policy(&repo_name, &policy_config)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_server_get_policy_history(
+    config: ServerConnectionConfig,
+    repo_name: String,
+) -> Result<Vec<PolicyHistoryEntry>, String> {
+    run_blocking_command("GET_POLICY_HISTORY", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .get_policy_history(&repo_name)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_server_policy_check(
+    config: ServerConnectionConfig,
+    repo: String,
+    branch: String,
+    user_login: Option<String>,
+) -> Result<PolicyCheckResponse, String> {
+    run_blocking_command("POLICY_CHECK", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .policy_check(&repo, &branch, user_login.as_deref())
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
+}
+
+/// Connects to the server's SSE endpoint and forwards notifications as Tauri events.
+/// Uses a generation counter so that `cmd_server_sse_disconnect` (or a newer connect)
+/// invalidates any stale stream without race conditions.
+#[tauri::command]
+pub async fn cmd_server_sse_connect(
+    config: ServerConnectionConfig,
+    app: tauri::AppHandle,
+    gen: State<'_, SseGeneration>,
+) -> Result<(), String> {
+    // Bump generation: any older stream loop will see a mismatch and exit.
+    let my_gen = gen.0.fetch_add(1, Ordering::SeqCst) + 1;
+    let gen_counter = Arc::clone(&gen.0);
+
+    let url = format!("{}/sse", config.url);
+    let client = reqwest::Client::new();
+    let mut request = client.get(&url);
+    if let Some(ref api_key) = config.api_key {
+        request = request.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| to_command_error(e, "SSE_CONNECT_ERROR"))?;
+
+    if !response.status().is_success() {
+        return Err(to_command_error(
+            format!("SSE connection failed: {}", response.status()),
+            "SSE_CONNECT_ERROR",
+        ));
+    }
+
+    let _ = app.emit("gitgov:sse-connected", serde_json::json!({}));
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        // If generation changed, a newer connection or disconnect invalidated us
+        if gen_counter.load(Ordering::SeqCst) != my_gen {
+            tracing::info!(my_gen, "SSE stream superseded by newer generation");
+            break;
+        }
+
+        match chunk {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                buffer.push_str(&text);
+
+                // Parse SSE protocol — handles both \n\n and \r\n\r\n
+                while let Some(pos) = find_sse_boundary(&buffer) {
+                    let boundary_len = if buffer[pos..].starts_with("\r\n\r\n") {
+                        4
+                    } else {
+                        2
+                    };
+                    let message = buffer[..pos].to_string();
+                    buffer = buffer[pos + boundary_len..].to_string();
+
+                    for line in message.lines() {
+                        // Accept both "data: value" and "data:value"
+                        let data = line
+                            .strip_prefix("data: ")
+                            .or_else(|| line.strip_prefix("data:"));
+                        if let Some(data) = data {
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
+                                let _ = app.emit("gitgov:sse-event", parsed);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "SSE stream error");
+                break;
+            }
+        }
+    }
+
+    // Only emit disconnected if we are still the active generation
+    if gen_counter.load(Ordering::SeqCst) == my_gen {
+        let _ = app.emit("gitgov:sse-disconnected", serde_json::json!({}));
+    }
+    Ok(())
+}
+
+/// Signals any running SSE stream to stop by bumping the generation counter.
+#[tauri::command]
+pub async fn cmd_server_sse_disconnect(gen: State<'_, SseGeneration>) -> Result<(), String> {
+    gen.0.fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Find the next SSE message boundary (\n\n or \r\n\r\n).
+fn find_sse_boundary(buf: &str) -> Option<usize> {
+    // Check \r\n\r\n first (more specific), then \n\n
+    if let Some(pos) = buf.find("\r\n\r\n") {
+        // But only if there isn't an earlier \n\n
+        if let Some(pos2) = buf.find("\n\n") {
+            return Some(pos.min(pos2));
+        }
+        return Some(pos);
+    }
+    buf.find("\n\n")
 }

@@ -60,17 +60,19 @@ pub fn run() {
         .init();
 
     // Best-effort migration of legacy local token files into keyring.
-    // Never block startup: failures are logged by auth module and can be retried on login.
-    let migration_report = github::migrate_legacy_tokens_from_disk();
-    if migration_report.scanned_files > 0 {
-        tracing::info!(
-            scanned_files = migration_report.scanned_files,
-            migrated_tokens = migration_report.migrated_tokens,
-            skipped_files = migration_report.skipped_files,
-            failed_files = migration_report.failed_files,
-            "Legacy token migration sweep executed at startup"
-        );
-    }
+    // Run in background to avoid blocking desktop startup on keyring/file I/O.
+    std::thread::spawn(|| {
+        let migration_report = github::migrate_legacy_tokens_from_disk();
+        if migration_report.scanned_files > 0 {
+            tracing::info!(
+                scanned_files = migration_report.scanned_files,
+                migrated_tokens = migration_report.migrated_tokens,
+                skipped_files = migration_report.skipped_files,
+                failed_files = migration_report.failed_files,
+                "Legacy token migration sweep executed at startup"
+            );
+        }
+    });
 
     let app_data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -166,13 +168,19 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .manage(audit_db)
         .manage(outbox)
+        .manage(commands::SseGeneration(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0))))
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
+                // Prevent native white flash before WebView first paint.
+                let _ = window.set_background_color(Some(tauri::window::Color(5, 7, 15, 255)));
                 if let Some(icon) = embedded_window_icon() {
                     let _ = window.set_icon(icon);
                 }
+                let _ = window.show();
+                let _ = window.set_focus();
             }
 
             if !server_configured {
@@ -219,6 +227,12 @@ pub fn run() {
             commands::cmd_load_repo_config,
             commands::cmd_validate_repo,
             commands::cmd_validate_branch_name,
+            commands::cmd_cp_get_api_key,
+            commands::cmd_cp_set_api_key,
+            commands::cmd_cp_clear_api_key,
+            commands::cmd_pin_get,
+            commands::cmd_pin_set,
+            commands::cmd_pin_clear,
             commands::cmd_server_sync_outbox,
             commands::cmd_server_health,
             commands::cmd_server_send_event,
@@ -250,6 +264,12 @@ pub fn run() {
             commands::cmd_server_list_exports,
             commands::cmd_server_chat_ask,
             commands::cmd_server_create_feature_request,
+            commands::cmd_server_get_policy,
+            commands::cmd_server_override_policy,
+            commands::cmd_server_get_policy_history,
+            commands::cmd_server_policy_check,
+            commands::cmd_server_sse_connect,
+            commands::cmd_server_sse_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

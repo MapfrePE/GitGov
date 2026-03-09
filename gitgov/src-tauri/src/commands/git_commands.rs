@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, State};
 
 const MAX_STAGE_FILES_EVENT_LIST: usize = 500;
 
@@ -479,6 +479,7 @@ pub fn cmd_get_git_identity(repo_path: String) -> Result<serde_json::Value, Stri
 
 #[tauri::command]
 pub fn cmd_push(
+    app: tauri::AppHandle,
     repo_path: String,
     branch: String,
     developer_login: String,
@@ -552,6 +553,117 @@ pub fn cmd_push(
                 format!("Rama protegida. No puedes hacer push a '{}'.", branch),
                 "BLOCKED",
             ));
+        }
+    }
+
+    // --- Governance enforcement check (server-side policy evaluation) ---
+    // Fail-open: if server is unreachable, push continues (offline-first).
+    if let Ok(cfg) = &config {
+        use crate::models::EnforcementLevel;
+        let enforcement = &cfg.enforcement;
+        let has_enforcement = enforcement.pull_requests != EnforcementLevel::Off
+            || enforcement.commits != EnforcementLevel::Off
+            || enforcement.branches != EnforcementLevel::Off
+            || enforcement.traceability != EnforcementLevel::Off;
+
+        if has_enforcement {
+            if let Some(ref full_name) = repo_full_name {
+                let server_url = std::env::var("GITGOV_SERVER_URL").unwrap_or_default();
+                let api_key = std::env::var("GITGOV_API_KEY").ok();
+                if !server_url.is_empty() {
+                    let client = crate::control_plane::ControlPlaneClient::new(
+                        crate::control_plane::ServerConfig {
+                            url: server_url,
+                            api_key,
+                        },
+                    );
+                    match client.policy_check(full_name, &branch, Some(&developer_login)) {
+                        Ok(check) => {
+                            if !check.allowed {
+                                let reasons_text = check.reasons.join("; ");
+                                let mut blocked_event = OutboxEvent::new(
+                                    "governance_blocked_push".to_string(),
+                                    developer_login.clone(),
+                                    Some(branch.clone()),
+                                    AuditStatus::Blocked,
+                                )
+                                .with_reason(format!("Governance: {}", reasons_text))
+                                .with_metadata(serde_json::json!({
+                                    "device": device_metadata(),
+                                    "violations": check.violations.len(),
+                                    "enforcement_applied": check.enforcement_applied,
+                                }));
+                                if let Some(full_name) = repo_full_name.clone() {
+                                    blocked_event = blocked_event.with_repo(full_name);
+                                }
+                                if let Some(org) = org_name.clone() {
+                                    blocked_event = blocked_event.with_org(org);
+                                }
+                                let _ = outbox.add(blocked_event);
+
+                                let entry = AuditLogEntry {
+                                    id: Uuid::new_v4().to_string(),
+                                    timestamp: chrono::Utc::now().timestamp_millis(),
+                                    developer_login: developer_login.clone(),
+                                    developer_name: developer_login.clone(),
+                                    action: AuditAction::BlockedPush,
+                                    branch: branch.clone(),
+                                    files: vec![],
+                                    commit_hash: None,
+                                    status: AuditStatus::Blocked,
+                                    reason: Some(format!("Governance: {}", reasons_text)),
+                                };
+                                let _ = audit_db.insert(&entry);
+
+                                trigger_flush(&outbox);
+
+                                return Err(to_command_error(
+                                    format!(
+                                        "Push bloqueado por reglas de gobierno: {}",
+                                        reasons_text
+                                    ),
+                                    "GOVERNANCE_BLOCKED",
+                                ));
+                            }
+                            // Warn mode: log warnings but allow push
+                            if !check.warnings.is_empty() {
+                                let mut warn_event = OutboxEvent::new(
+                                    "governance_warned_push".to_string(),
+                                    developer_login.clone(),
+                                    Some(branch.clone()),
+                                    AuditStatus::Success,
+                                )
+                                .with_reason(check.warnings.join("; "))
+                                .with_metadata(serde_json::json!({
+                                    "device": device_metadata(),
+                                    "warnings": check.warnings,
+                                    "enforcement_applied": check.enforcement_applied,
+                                }));
+                                if let Some(full_name) = repo_full_name.clone() {
+                                    warn_event = warn_event.with_repo(full_name);
+                                }
+                                if let Some(org) = org_name.clone() {
+                                    warn_event = warn_event.with_org(org);
+                                }
+                                let _ = outbox.add(warn_event);
+                                let _ = app.emit(
+                                    "gitgov:governance-warnings",
+                                    serde_json::json!({
+                                        "warnings": check.warnings,
+                                    }),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            // Fail-open: server unreachable → log and continue
+                            tracing::warn!(
+                                error = %e,
+                                "Governance policy check failed (fail-open, push continues)"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

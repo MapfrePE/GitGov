@@ -24,7 +24,7 @@
                                 }
                             ],
                 "security":  {
-                                 "csp":  null,
+                                 "csp":  "default-src 'self' tauri: https://ipc.localhost; script-src 'self' tauri: https://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' tauri: https://ipc.localhost http://127.0.0.1:* http://localhost:* https://*; worker-src 'self' blob:",
                                  "capabilities":  [
                                                       "default"
                                                   ]

@@ -108,6 +108,53 @@ export interface GitGovConfig {
   }
   groups: Record<string, GroupConfig>
   admins: string[]
+  rules: RulesConfig
+  checklist: ChecklistConfig
+  enforcement: EnforcementConfig
+}
+
+export interface RulesConfig {
+  require_pull_request: boolean
+  min_approvals: number
+  require_conventional_commits: boolean
+  require_signed_commits: boolean
+  max_files_per_commit: number | null
+  require_linked_ticket: boolean
+  block_force_push: boolean
+  forbidden_patterns: string[]
+}
+
+export interface ChecklistConfig {
+  confirm: string[]
+  auto_check: string[]
+}
+
+export type EnforcementLevel = 'off' | 'warn' | 'block'
+
+export interface EnforcementConfig {
+  pull_requests: EnforcementLevel
+  commits: EnforcementLevel
+  branches: EnforcementLevel
+  traceability: EnforcementLevel
+}
+
+export type GovernancePreset = 'startup' | 'enterprise' | 'regulated' | 'custom'
+
+export interface RuleViolation {
+  rule: string
+  category: string
+  enforcement: string
+  message: string
+}
+
+export interface PolicyCheckResponse {
+  advisory: boolean
+  allowed: boolean
+  reasons: string[]
+  warnings: string[]
+  evaluated_rules: string[]
+  enforcement_applied: string
+  violations: RuleViolation[]
 }
 
 export interface GroupConfig {

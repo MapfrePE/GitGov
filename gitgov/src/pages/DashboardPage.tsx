@@ -18,13 +18,15 @@ export function DashboardPage() {
     }
   }, [repoPath, refreshStatus, refreshBranches, refreshBranchSync])
 
+  // Repo status polling: 2 min cadence (local git state changes infrequently).
+  // Server dashboard has its own 30 s poll; Header has its own 30 s connection check.
   useEffect(() => {
     const interval = setInterval(() => {
       if (repoPath) {
         refreshStatus()
         refreshBranchSync()
       }
-    }, 30000)
+    }, 120_000)
     return () => clearInterval(interval)
   }, [repoPath, refreshStatus, refreshBranchSync])
 

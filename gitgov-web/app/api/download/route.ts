@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getReleaseMetadata } from '@/lib/release';
 
 /**
  * Download tracking API endpoint — Placeholder.
@@ -13,34 +14,49 @@ import { NextRequest, NextResponse } from 'next/server';
 export async function GET(request: NextRequest) {
     const platform = request.nextUrl.searchParams.get('platform') || 'windows';
 
-    // Placeholder download paths
-    const downloads: Record<string, { url: string; fileName: string; version: string }> = {
-        windows: {
-            url: '/downloads/GitGov_0.1.0_x64-setup.exe',
-            fileName: 'GitGov_0.1.0_x64-setup.exe',
-            version: '0.1.0',
-        },
-    };
-
-    const download = downloads[platform];
-
-    if (!download) {
+    if (platform !== 'windows') {
         return NextResponse.json(
             { error: `Platform '${platform}' is not available yet.` },
             { status: 404 }
         );
     }
 
+    const metadata = await getReleaseMetadata();
+    const fileName = metadata.downloadUrl.split('/').pop() || 'desktop-installer.exe';
+
+    if (!metadata.available) {
+        return NextResponse.json(
+            {
+                error: 'Desktop installer is not available at the configured URL.',
+                platform,
+                download: {
+                    url: metadata.downloadUrl,
+                    fileName,
+                    version: metadata.version,
+                    checksum: metadata.checksum,
+                    msiUrl: metadata.msiUrl,
+                },
+            },
+            { status: 503 }
+        );
+    }
+
     // Log download intent (placeholder for analytics)
     console.log('[Download Intent]', {
         platform,
-        fileName: download.fileName,
+        fileName,
         userAgent: request.headers.get('user-agent'),
         timestamp: new Date().toISOString(),
     });
 
     return NextResponse.json({
         success: true,
-        download,
+        download: {
+            url: metadata.downloadUrl,
+            fileName,
+            version: metadata.version,
+            checksum: metadata.checksum,
+            msiUrl: metadata.msiUrl,
+        },
     });
 }

@@ -327,3 +327,331 @@ P1:
 
 P2:
 - tuning operativo de outbox lease/global coord en despliegues con alta concurrencia
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ANALISIS GPT /// 
+
+
+1) Arquitectura general
+
+Lo que ya está bien
+La separación de responsabilidades está clara: Desktop App, Control Plane Server, integración GitHub y Web App pública. No parece un monolito improvisado; parece una plataforma con límites definidos entre captura, ingestión, correlación y exposición.
+
+Lo que falta
+Falta terminar de alinear la arquitectura “documentada” con la estructura real del repo y endurecer la historia de operación para que alguien externo pueda clonar, entender y levantar cada componente sin tropezar. El repo raíz todavía deja señales de onboarding imperfecto, y GitHub incluso mostró referencias a gitgov-server/tests que no reflejan del todo la anidación real del servidor dentro de gitgov/gitgov-server/.
+
+Riesgo
+Medio. No rompe el producto, pero sí daña credibilidad técnica, onboarding y velocidad futura.
+
+Prioridad
+P1
+
+Acción concreta
+Haz una limpieza de estructura y documentación: un solo diagrama del repo real, un solo camino de arranque por componente, y un README raíz que no deje ambigüedad sobre dónde vive cada servicio.
+
+2) Modelo de datos
+
+Lo que ya está bien
+Sí tienes un modelo de datos de verdad. En el servidor aparecen entidades y tipos de dominio como organizaciones, repositorios, miembros, eventos GitHub, eventos del cliente, violaciones y roles (Admin, Architect, Developer, PM), y la arquitectura documenta un esquema versionado que evoluciona desde base hasta Jenkins y Jira.
+
+Lo que falta
+Falta volver el modelo más “presentable” para terceros: ERD, tabla de ownership por dominio, explicación de qué es append-only, qué es mutable, qué es derivado y qué es evidencia. Hoy existe, pero todavía vive más como implementación que como contrato técnico visible.
+
+Riesgo
+Bajo a medio. El riesgo no es técnico inmediato; es de mantenibilidad y claridad cuando el proyecto crezca.
+
+Prioridad
+P2
+
+Acción concreta
+Publica un DATA_MODEL.md con 10–15 tablas clave, relaciones, índices esperados y regla de inmutabilidad por entidad.
+
+3) Flujo de eventos y correlación
+
+Lo que ya está bien
+Esta es una de tus partes más fuertes. Tienes un flujo explícito de Desktop → Outbox → servidor, con almacenamiento local offline, flush periódico y distinción entre eventos del cliente y eventos de GitHub. Además, el servidor ya contempla webhooks, audit stream, señales de no cumplimiento, violaciones e integraciones con Jenkins y Jira.
+
+Lo que falta
+Falta formalizar mejor los estados del ciclo de vida de un evento: recibido, persistido, correlacionado, enriquecido, fallido, reintentado, dead-letter, exportado. Ya tienes piezas de jobs y métricas, pero el modelo de estados todavía debería verse más explícito como parte del producto.
+
+Riesgo
+Medio. Cuando suba el volumen, los problemas de orden, duplicados o correlación parcial pueden erosionar la confianza.
+
+Prioridad
+P1
+
+Acción concreta
+Define una máquina de estados para eventos y jobs. Eso te ayuda tanto para trazabilidad como para debug y dashboards.
+
+4) Seguridad y control de acceso
+
+Lo que ya está bien
+Tu base conceptual es buena: OAuth con GitHub para login en desktop, keyring del sistema para credenciales de usuario, autenticación por Bearer token hacia el servidor, hashing SHA256 de API keys, roles diferenciados y separación clara de permisos como admin vs developer. También se documenta HMAC para webhooks GitHub y secretos dedicados para Jenkins/Jira.
+
+Lo que falta
+Aquí está una de las brechas más importantes. Tu propia auditoría de performance/escala reconoce deuda real: fallback API key hardcodeada, almacenamiento de PIN/API key en texto claro en localStorage, CORS permisivo y fallback por defecto para JWT secret. Eso no invalida el proyecto, pero sí marca claramente que el hardening aún no está cerrado.
+
+Riesgo
+Alto. Esta es la categoría que más fácilmente te puede hacer daño reputacional y técnico.
+
+Prioridad
+P0
+
+Acción concreta
+Tu siguiente sprint debería cerrar cuatro cosas sin negociar: eliminar fallback secrets, mover cualquier clave sensible a almacenamiento seguro, restringir CORS por entorno y exigir secretos/JWT válidos en runtime sin defaults peligrosos.
+
+5) Observabilidad
+
+Lo que ya está bien
+Ya tienes algo útil: /health, /health/detailed, /jobs/metrics, /logs, /stats, /dashboard, más trazas HTTP en el servidor y documentación operativa del job worker. Eso te pone por encima de muchos proyectos que apenas tienen “funciona o no funciona”.
+
+Lo que falta
+Te falta cerrar la capa enterprise de observabilidad: métricas con cardinalidad controlada, dashboards operativos mínimos, alertas accionables y una historia clara de trazabilidad por correlation_id o equivalente desde evento cliente hasta webhook/pipeline/ticket. La base existe, pero todavía está más cerca de “instrumentación útil” que de “observabilidad madura”.
+
+Riesgo
+Medio. Si el sistema falla bajo carga o hay correlaciones raras, el tiempo de diagnóstico puede dispararse.
+
+Prioridad
+P1
+
+Acción concreta
+Define 8 métricas obligatorias: ingesta/min, backlog outbox, latencia de flush, jobs running/dead, tasa de correlación, errores 4xx/5xx, latencia DB y fallos de webhook. Luego arma un dashboard operativo mínimo con alertas simples.
+
+6) Rendimiento y escalabilidad
+
+Lo que ya está bien
+Tienes una auditoría específica de performance y escalabilidad, y eso ya es excelente señal de madurez. El documento identifica cuellos de botella concretos y no se esconde detrás de “Rust es rápido, así que todo estará bien”. Reconoce problemas de forma, polling, payload, batching y consultas de alta cardinalidad.
+
+Lo que falta
+Falta ejecutar y cerrar sistemáticamente las correcciones priorizadas de esa auditoría. En especial, el propio documento señala presión sobre el outbox, consultas costosas y deuda de configuración/seguridad que amplifica la inestabilidad.
+
+Riesgo
+Alto a medida que suba el volumen.
+
+Prioridad
+P1
+
+Acción concreta
+No abras más features de alto tráfico hasta completar el paquete de estabilización: batching mejorado, paginación/keyset en logs, reducción de payload por defecto y controles de polling.
+
+7) Job system y resiliencia
+
+Lo que ya está bien
+El servidor documenta un worker con TTL para jobs atascados, polling periódico, backoff tras error, métricas, cola de muertos y reintentos. Eso ya es una base seria de resiliencia operativa.
+
+Lo que falta
+Falta hacer más visible el contrato de idempotencia: qué jobs pueden reintentarse sin duplicar efectos, cómo se detectan jobs zombis, y cómo se verifica integridad de resultados tras retry. La estructura está; la formalización todavía puede subir mucho.
+
+Riesgo
+Medio.
+
+Prioridad
+P2
+
+Acción concreta
+Añade un documento corto de JOB_SEMANTICS.md con reglas de retry, deduplicación e idempotencia.
+
+8) Despliegue y operación
+
+Lo que ya está bien
+La historia de despliegue ya existe: Ubuntu + Nginx + systemd o Docker para el server, Supabase/PostgreSQL, web en Vercel, releases de escritorio y workflows de CI. Para una sola persona, eso está muy bien encaminado.
+
+Lo que falta
+Falta más estandarización de entornos: matriz dev/stage/prod, checklist de variables obligatorias, bootstrap sin magia y rollback documentado. Hoy se siente funcional, pero todavía no completamente productizado.
+
+Riesgo
+Medio.
+
+Prioridad
+P2
+
+Acción concreta
+Crea una “Deployment Contract” de una sola página: variables mínimas, secretos obligatorios, puertos, health checks, migraciones y rollback.
+
+9) Evidencia, auditoría e inmutabilidad
+
+Lo que ya está bien
+El valor de GitGov está bien orientado hacia trazabilidad y evidencia: logs, audit stream, governance events, violations, compliance y export. La intención del producto está muy clara y bien posicionada.
+
+Lo que falta
+Aquí te falta demostrarlo de forma más contundente. El claim de evidencia fuerte/inmutable necesita una presentación más verificable: reglas append-only, quién puede borrar qué, si existe soft delete, cómo se preserva integridad, qué índices y constraints sostienen esa promesa.
+
+Riesgo
+Medio a alto, porque es parte del corazón del producto.
+
+Prioridad
+P1
+
+Acción concreta
+Haz una sección técnica llamada “Why this audit trail is trustworthy” y documenta exactamente qué protege la evidencia y qué no.
+
+10) Producto y enfoque V1
+
+Lo que ya está bien
+La visión está fuerte. No estás haciendo “otro dashboard DevOps”; estás haciendo gobernanza con evidencia y correlación desde el origen. Eso es bastante más interesante que un panel bonito con números tristes.
+
+Lo que falta
+Ahora el enemigo no es la falta de ideas, sino la dispersión. Tienes suficiente superficie como para perder meses en features periféricas mientras lo crítico sigue con deuda. Tu propia auditoría ya te dice dónde duele de verdad.
+
+Riesgo
+Alto si te desenfocas.
+
+Prioridad
+P0
+
+Acción concreta
+Congela features “wow” por un ciclo corto y ejecuta un hardening sprint.
+
+Prioridades recomendadas, ya ordenadas
+
+P0 — cerrar ya
+
+Hardening de secretos, API keys, JWT y storage local.
+
+Enfoque V1: evitar dispersión y no abrir más superficie crítica antes de estabilizar.
+
+P1 — siguiente bloque
+
+Flujo de eventos con estados explícitos.
+
+Observabilidad mínima seria.
+
+Cerrar performance/scalability prioritario.
+
+Demostrabilidad de audit trail/inmutabilidad.
+
+Consistencia repo/docs/onboarding.
+
+P2 — después
+
+Formalizar el modelo de datos para terceros.
+
+Semántica de jobs/idempotencia.
+
+Contrato de despliegue más estricto.
+
+Lectura final estilo CTO
+
+Lo mejor de GitGov hoy:
+La arquitectura ya tiene columna vertebral, el flujo de eventos está bien pensado y el proyecto transmite que entiende governance de verdad.
+
+Lo más peligroso hoy:
+No es Rust, no es complejidad distribuida, ni falta de ideas. Es la combinación de deuda de seguridad/configuración, observabilidad todavía incompleta y riesgo de dispersarte antes de endurecer el núcleo.
+
+Mi conclusión:
+Vas bien. Pero el siguiente salto no es “más features”; es más confianza. 
+
+
+  ANALISIS VERIFICADO LOCAL (CODEX) /// 2026-03-07
+
+  Resumen corto
+  - El análisis GPT es útil y mayormente correcto a nivel estratégico.
+  - Precisión estimada contra el repo local actual: ~70-80%.
+  - Tiene partes desactualizadas (sobre todo seguridad/performance/docs) frente a cambios recientes ya aplicados.
+
+  Verificación por bloque
+
+  1) Arquitectura general
+  - Estado: CORRECTO.
+  - Evidencia:
+    - `docs/ARCHITECTURE.md:7` (4 componentes).
+    - `docs/ARCHITECTURE.md:19-33` (diagrama Desktop/Server/GitHub/Web App).
+    - `docs/ARCHITECTURE.md:172-176` (Web App pública separada).
+
+  2) Repo/docs/onboarding
+  - Estado: CORRECTO (sí hay drift real).
+  - Evidencia:
+    - `README.md:13` usa `cd gitgov-server` (ruta no alineada con estructura anidada).
+    - `AGENTS.md:81-82` usa `cd gitgov/gitgov-server` (ruta canónica).
+    - `docs/QUICKSTART.md:56` vs `docs/QUICKSTART.md:94` (inconsistencia interna de rutas).
+
+  3) Modelo de datos
+  - Estado: PARCIALMENTE CORRECTO.
+  - Lo correcto:
+    - Roles y entidades están implementados.
+    - Evidencia: `gitgov/gitgov-server/src/models.rs:42-45`, `docs/ARCHITECTURE.md:459-499`.
+  - Lo desactualizado:
+    - El análisis se queda en v6; el repo local ya llega a v12.
+    - Evidencia: `gitgov/gitgov-server/supabase/` contiene `supabase_schema_v7.sql` ... `supabase_schema_v12.sql`.
+    - `docs/PROGRESS.md:2953` (v9), `docs/PROGRESS.md:2699` (v10), `docs/PROGRESS.md:2606` (v11), `docs/PROGRESS.md:4107` (v12).
+
+  4) Flujo de eventos y correlación
+  - Estado: CORRECTO.
+  - Evidencia:
+    - Outbox offline y envío a `/events`: `docs/ARCHITECTURE.md:61`, `gitgov/src-tauri/src/outbox/queue.rs:254`, `queue.rs:632`.
+    - Dedupe por `event_uuid`: `gitgov/gitgov-server/src/db.rs:1142`.
+    - Integraciones/correlaciones presentes: `gitgov/gitgov-server/src/main.rs:1077-1115`.
+
+  5) Seguridad y control de acceso
+  - Estado: PARCIALMENTE CORRECTO.
+  - Correcto:
+    - Bearer + SHA256 + keyring: `gitgov/gitgov-server/src/auth.rs:42-52`, `gitgov/src-tauri/src/github/auth.rs:647-689`.
+    - PIN/API key en `localStorage` sigue siendo deuda: `gitgov/src/store/useAuthStore.ts:40`, `useAuthStore.ts:210`, `gitgov/src/store/useControlPlaneStore.ts:697-704`.
+  - Desactualizado:
+    - “fallback API key hardcodeada” ya no aplica tal cual: ahora es fallback por env y con gate.
+    - Evidencia: `gitgov/src/store/useControlPlaneStore.ts:507-513`, `useControlPlaneStore.ts:1044`.
+  - Matiz importante:
+    - CORS/JWT tienen fallback en dev, pero en modo no-dev hay fail-closed.
+    - Evidencia: `gitgov/gitgov-server/src/main.rs:498-515`, `main.rs:970-983`.
+
+  6) Observabilidad
+  - Estado: CORRECTO (base buena) + PARCIAL (madurez enterprise pendiente).
+  - Evidencia base:
+    - `/health`, `/health/detailed`, `/logs`, `/stats`, `/dashboard`, `/jobs/metrics`: `gitgov/gitgov-server/src/main.rs:1028-1061`, `main.rs:1240`, `main.rs:1288-1289`.
+    - Trazas HTTP: `gitgov/gitgov-server/src/main.rs:1301` (`TraceLayer`).
+
+  7) Rendimiento y escalabilidad
+  - Estado: PARCIALMENTE CORRECTO (diagnóstico válido, pero parcialmente viejo).
+  - Correcto:
+    - Existe auditoría profunda: `docs/PERFORMANCE_SCALABILITY_AUDIT_2026-03-04.md:1`.
+  - Desactualizado:
+    - Ya se aplicaron mejoras grandes post-auditoría: SSE + debounce + fallback polling + batching outbox + tuning.
+    - Evidencia: `docs/PROGRESS.md:79-135`, `gitgov/src/components/control_plane/ServerDashboard.tsx:62-103`, `gitgov/src-tauri/src/outbox/queue.rs:570-575`, `gitgov/src-tauri/src/commands/git_commands.rs:27-29`.
+  - Riesgo remanente puntual:
+    - Aún hay un path con `thread::spawn` flush en `branch_commands`.
+    - Evidencia: `gitgov/src-tauri/src/commands/branch_commands.rs:30-34`.
+
+  8) Job system y resiliencia
+  - Estado: CORRECTO.
+  - Evidencia:
+    - Worker con TTL/poll/backoff: `gitgov/gitgov-server/src/main.rs:42-44`, `main.rs:617`, `main.rs:704`, `main.rs:716`.
+    - Dead-letter + retry + métricas: `gitgov/gitgov-server/src/db.rs:3752-3768`, `db.rs:3831-3855`, `db.rs:3932-3996`.
+    - Endpoints admin de jobs: `gitgov/gitgov-server/src/main.rs:1240-1255`.
+
+  9) Despliegue y operación
+  - Estado: CORRECTO.
+  - Evidencia:
+    - Docker + EC2 + Nginx + systemd: `docs/DEPLOYMENT.md:8-16`, `docs/DEPLOYMENT.md:100-123`.
+    - CI real activo: `.github/workflows/ci.yml:14-33`, `ci.yml:64-82`.
+
+  10) Evidencia, auditoría e inmutabilidad
+  - Estado: CORRECTO (más fuerte de lo que GPT sugiere).
+  - Evidencia:
+    - Triggers append-only: `gitgov/gitgov-server/supabase_schema.sql:211-227`.
+    - Violations con update limitado (solo campos de resolución): `supabase_schema.sql:238-265`.
+    - COALESCE en agregaciones JSON: `supabase_schema.sql:428`, `supabase_schema.sql:436-437`, `gitgov/gitgov-server/supabase/supabase_schema_v12.sql:23`, `v12.sql:31-32`.
+
+  Hallazgos desactualizados clave en el análisis GPT
+  - “Fallback API key hardcodeada” como situación actual: DESACTUALIZADO (ahora es env-gated).
+  - “Performance pendiente sin ejecutar”: PARCIAL (ya hubo sprint fuerte de fixes SSE/outbox).
+  - “Schema llega a v6”: DESACTUALIZADO (localmente hay v12).
+
+  NO VERIFICADO
+  - “GitHub mostró referencias incorrectas” en UI remota: no se verificó en GitHub web durante esta revisión; solo en repo local.
+
+  Conclusión validada
+  - El diagnóstico GPT sirve como brújula ejecutiva, pero para decisiones técnicas inmediatas debe usarse esta versión corregida con evidencia local.

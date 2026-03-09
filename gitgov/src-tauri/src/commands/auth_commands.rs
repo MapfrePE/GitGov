@@ -1,6 +1,6 @@
 use crate::github::{
-    delete_token, get_authenticated_user, load_token, migrate_legacy_tokens_from_disk, poll_for_token,
-    save_token, start_device_flow,
+    delete_token, get_authenticated_user, load_token, migrate_legacy_tokens_from_disk,
+    poll_for_token, save_token, start_device_flow,
 };
 use crate::models::AuthenticatedUser;
 use serde::{Deserialize, Serialize};
@@ -95,7 +95,10 @@ pub async fn cmd_start_auth() -> Result<DeviceFlowInfo, String> {
 }
 
 #[tauri::command]
-pub async fn cmd_poll_auth(device_code: String, interval: u64) -> Result<AuthenticatedUser, String> {
+pub async fn cmd_poll_auth(
+    device_code: String,
+    interval: u64,
+) -> Result<AuthenticatedUser, String> {
     run_blocking_auth_command("POLL_AUTH", move || {
         let token = match poll_for_token(&device_code, interval) {
             Ok(t) => t,
@@ -109,7 +112,8 @@ pub async fn cmd_poll_auth(device_code: String, interval: u64) -> Result<Authent
             }
         };
 
-        let gh_user = get_authenticated_user(&token).map_err(|e| to_command_error(e, "API_ERROR"))?;
+        let gh_user =
+            get_authenticated_user(&token).map_err(|e| to_command_error(e, "API_ERROR"))?;
 
         tracing::info!(
             login = %gh_user.login,
@@ -198,7 +202,8 @@ pub fn cmd_logout(username: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn cmd_validate_token(token: String) -> Result<AuthenticatedUser, String> {
     run_blocking_auth_command("VALIDATE_TOKEN", move || {
-        let gh_user = get_authenticated_user(&token).map_err(|e| to_command_error(e, "API_ERROR"))?;
+        let gh_user =
+            get_authenticated_user(&token).map_err(|e| to_command_error(e, "API_ERROR"))?;
 
         Ok(AuthenticatedUser {
             login: gh_user.login,

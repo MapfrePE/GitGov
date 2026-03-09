@@ -16,4 +16,6 @@ include!("handlers/gdpr_clients_identities_scope.rs");
 include!("handlers/conversational_runtime.rs");
 include!("handlers/chat_handler.rs");
 include!("handlers/feature_requests.rs");
+include!("handlers/sse.rs");
+include!("handlers/metrics_endpoint.rs");
 include!("handlers/tests.rs");

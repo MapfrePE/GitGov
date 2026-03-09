@@ -260,14 +260,14 @@ impl EventStatus {
 // BATCH INGEST FROM CLIENT
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ClientEventBatch {
     pub events: Vec<ClientEventInput>,
     pub client_id: Option<String>,
     pub client_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ClientEventInput {
     pub event_uuid: String,
     pub event_type: String,
@@ -284,14 +284,14 @@ pub struct ClientEventInput {
     pub timestamp: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ClientEventResponse {
     pub accepted: Vec<String>,
     pub duplicates: Vec<String>,
     pub errors: Vec<EventError>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EventError {
     pub event_uuid: String,
     pub error: String,
@@ -369,7 +369,7 @@ pub struct EventFilter {
     pub offset: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct AuditStats {
     pub github_events: GitHubEventStats,
     pub client_events: ClientEventStats,
@@ -380,7 +380,7 @@ pub struct AuditStats {
     pub active_repos: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct DailyActivityPoint {
     pub day: String,
     pub commits: i64,
@@ -393,7 +393,7 @@ pub struct DailyActivityQuery {
     pub days: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct GitHubEventStats {
     pub total: i64,
     pub today: i64,
@@ -402,7 +402,7 @@ pub struct GitHubEventStats {
     pub by_type: HashMap<String, i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct ClientEventStats {
     pub total: i64,
     pub today: i64,
@@ -415,14 +415,14 @@ pub struct ClientEventStats {
     pub by_status: HashMap<String, i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct ViolationStats {
     pub total: i64,
     pub unresolved: i64,
     pub critical: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct PipelineHealthStats {
     pub total_7d: i64,
     pub success_7d: i64,
@@ -433,7 +433,7 @@ pub struct PipelineHealthStats {
     pub repos_with_failures_7d: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CombinedEvent {
     pub id: String,
     pub source: String,
@@ -458,6 +458,12 @@ pub struct GitGovConfig {
     pub groups: HashMap<String, GroupConfig>,
     #[serde(default)]
     pub admins: Vec<String>,
+    #[serde(default)]
+    pub rules: RulesConfig,
+    #[serde(default)]
+    pub checklist: ChecklistConfig,
+    #[serde(default)]
+    pub enforcement: EnforcementConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -471,6 +477,55 @@ pub struct GroupConfig {
     pub members: Vec<String>,
     pub allowed_branches: Vec<String>,
     pub allowed_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RulesConfig {
+    #[serde(default)]
+    pub require_pull_request: bool,
+    #[serde(default)]
+    pub min_approvals: u32,
+    #[serde(default)]
+    pub require_conventional_commits: bool,
+    #[serde(default)]
+    pub require_signed_commits: bool,
+    #[serde(default)]
+    pub max_files_per_commit: Option<u32>,
+    #[serde(default)]
+    pub require_linked_ticket: bool,
+    #[serde(default)]
+    pub block_force_push: bool,
+    #[serde(default)]
+    pub forbidden_patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChecklistConfig {
+    #[serde(default)]
+    pub confirm: Vec<String>,
+    #[serde(default)]
+    pub auto_check: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EnforcementConfig {
+    #[serde(default)]
+    pub pull_requests: EnforcementLevel,
+    #[serde(default)]
+    pub commits: EnforcementLevel,
+    #[serde(default)]
+    pub branches: EnforcementLevel,
+    #[serde(default)]
+    pub traceability: EnforcementLevel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EnforcementLevel {
+    #[default]
+    Off,
+    Warn,
+    Block,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -551,7 +606,7 @@ pub struct ApiKeyInfo {
     pub is_active: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MeResponse {
     pub client_id: String,
     pub role: String,
@@ -804,7 +859,7 @@ pub struct ExportStats {
 // SERVER HEALTH
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DetailedHealthResponse {
     pub status: String,
     pub version: String,
@@ -813,7 +868,7 @@ pub struct DetailedHealthResponse {
     pub timestamp: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DatabaseHealth {
     pub connected: bool,
     pub latency_ms: Option<i64>,
@@ -931,7 +986,7 @@ impl PipelineStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PipelineStage {
     pub name: String,
     pub status: String,
@@ -939,7 +994,7 @@ pub struct PipelineStage {
     pub duration_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct JenkinsPipelineEventInput {
     pub pipeline_id: String,
     pub job_name: String,
@@ -962,7 +1017,7 @@ pub struct JenkinsPipelineEventInput {
     pub timestamp: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct JenkinsPipelineEventResponse {
     pub accepted: bool,
     pub duplicate: bool,
@@ -1021,7 +1076,7 @@ pub struct JenkinsCorrelationsResponse {
     pub correlations: Vec<CommitPipelineCorrelation>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PolicyCheckRequest {
     pub repo: String,
     #[serde(default)]
@@ -1031,7 +1086,7 @@ pub struct PolicyCheckRequest {
     pub user_login: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub struct PolicyCheckResponse {
     pub advisory: bool,
     pub allowed: bool,
@@ -1041,6 +1096,18 @@ pub struct PolicyCheckResponse {
     pub warnings: Vec<String>,
     #[serde(default)]
     pub evaluated_rules: Vec<String>,
+    #[serde(default)]
+    pub enforcement_applied: String,
+    #[serde(default)]
+    pub violations: Vec<RuleViolation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RuleViolation {
+    pub rule: String,
+    pub category: String,
+    pub enforcement: String,
+    pub message: String,
 }
 
 // ============================================================================

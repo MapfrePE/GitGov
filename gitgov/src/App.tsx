@@ -34,13 +34,16 @@ function App() {
 
   useEffect(() => {
     const init = async () => {
-      await Promise.all([
-        checkExistingSession(),
-        initFromEnv(),
-      ])
-      setInitialized(true)
+      try {
+        // Startup must render fast even if Control Plane is unreachable.
+        await checkExistingSession()
+      } finally {
+        setInitialized(true)
+        // Keep Control Plane bootstrap in background; do not block Splash.
+        void initFromEnv()
+      }
     }
-    init()
+    void init()
   }, [checkExistingSession, initFromEnv])
 
   useEffect(() => {

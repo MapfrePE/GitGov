@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window
 
@@ -29,4 +30,12 @@ export function parseCommandError(error: string): { code: string; message: strin
 
 export function isTauriDesktop(): boolean {
   return isTauri
+}
+
+/** Subscribe to a Tauri backend event. Returns an unlisten function. */
+export async function tauriListen<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> {
+  if (!isTauri) {
+    return () => {}
+  }
+  return listen<T>(event, (e) => handler(e.payload))
 }

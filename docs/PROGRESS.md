@@ -2,6 +2,139 @@
 
 ---
 
+## Actualización (2026-03-07) — Cambio 29: CSP en webview de Tauri
+
+### Qué se implementó
+- `gitgov/src-tauri/tauri.conf.json`
+  - CSP configurado (antes era `null` — sin protección):
+    - `default-src 'self' tauri:` — solo scripts locales y Tauri IPC.
+    - `connect-src` permite `127.0.0.1:*`, `localhost:*`, `https://*` para conexiones al server.
+    - `style-src 'unsafe-inline'` — requerido por Tailwind inline styles.
+    - `img-src data: blob: https:` — para avatars e iconos.
+  - Previene ejecución de scripts inyectados (XSS) en el webview.
+
+### Validación ejecutada
+- `cd gitgov/src-tauri && cargo check` → OK
+
+### Impacto Golden Path
+- Sin cambios en funcionalidad. CSP permite todas las conexiones legítimas existentes.
+
+---
+
+## Actualización (2026-03-07) — Cambio 28: rate limit + semáforo en /sse
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+  - `sse_max_connections: Arc<Semaphore>` añadido a `AppState`.
+- `gitgov/gitgov-server/src/handlers/sse.rs`
+  - `try_acquire_owned()` al inicio — si no hay permit, retorna `503 Service Unavailable`.
+  - Permit se mantiene vivo dentro del `async_stream` con `let _permit = permit;`.
+  - Se libera automáticamente cuando el cliente desconecta.
+- `gitgov/gitgov-server/src/main.rs`
+  - Semáforo inicializado con `GITGOV_SSE_MAX_CONNECTIONS` (default: 50).
+  - Ruta `/sse` ahora tiene `rate_limit_middleware` con `admin_rate_limit`.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` → 99 passed; 0 failed
+
+### Impacto Golden Path
+- Sin cambios en flujo de eventos. `/sse` es ruta aditiva.
+
+---
+
+## Actualización (2026-03-07) — Cambio 27: notificaciones nativas de escritorio (tauri-plugin-notification)
+
+### Qué se implementó
+- `gitgov/src-tauri/Cargo.toml` — Dependencia `tauri-plugin-notification = "2"`.
+- `gitgov/src-tauri/src/lib.rs` — Plugin registrado: `.plugin(tauri_plugin_notification::init())`.
+- `gitgov/src-tauri/capabilities/default.json` — Permisos: `notification:default`, `allow-notify`, `allow-is-permission-granted`, `allow-request-permission`, etc.
+- `gitgov/src/lib/notifications.ts` (NUEVO) — Módulo de notificaciones:
+  - `NotificationPrefs` con master switch + toggles por tipo (nuevos eventos, push bloqueado, governance warn).
+  - Persistencia en `localStorage` bajo key `gitgov:notification-prefs`.
+  - `ensurePermission()` — solicita permiso OS una sola vez por sesión.
+  - `notifyNewEvents(count)` — alerta cuando llegan eventos al Control Plane vía SSE.
+  - `notifyBlockedPush(branch, reason)` — alerta cuando un push es rechazado por rama protegida o gobernanza.
+  - `notifyGovernanceWarning(warnings)` — alerta cuando un push tiene advertencias de gobernanza.
+- `gitgov/src/store/useControlPlaneStore.ts` — Importa `notifyNewEvents` y lo dispara dentro del handler SSE (debounced).
+- `gitgov/src/store/useRepoStore.ts` — Importa `notifyBlockedPush` y lo dispara en `catch` de `push()` cuando `code === BLOCKED | GOVERNANCE_BLOCKED`.
+- `gitgov/src/pages/SettingsPage.tsx` — Nueva sección "Notificaciones de Escritorio" con:
+  - Master switch para activar/desactivar todas.
+  - Toggles individuales: nuevos eventos, push bloqueado, advertencias de gobernanza.
+  - Persistencia inmediata en `localStorage`.
+- `gitgov/package.json` — Dependencia `@tauri-apps/plugin-notification` instalada.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` → 99 passed; 0 failed
+- `cd gitgov/src-tauri && cargo check` → OK (plugin compila)
+- `cd gitgov && npx tsc --noEmit` → 0 errores
+- ESLint en archivos tocados → 0 errores nuevos
+
+### Impacto Golden Path
+- Golden Path: sin cambios en flujo de eventos, auth ni handlers. Todo es aditivo.
+- Notificaciones son fire-and-forget — si el permiso OS no se otorga, se ignora silenciosamente.
+- Preferencias default: todo activado (opt-out, no opt-in).
+
+---
+
+## Actualización (2026-03-07) — Cambio 26: SSE real-time + performance fixes en dashboard
+
+### Qué se implementó
+
+**Performance fixes (4 cuellos de botella resueltos):**
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - `mergeRecentLogs` devuelve la misma referencia cuando no hay datos nuevos (evita re-renders innecesarios).
+  - `Math.max(...spread)` reemplazado por `reduce` (evita stack overflow con 500+ items).
+  - Cache de `jiraTicketDetails` limitado a 50 entries con evicción LRU.
+- `gitgov/src/pages/DashboardPage.tsx`
+  - Polling de repo status reducido de 30s a 120s.
+
+**SSE (Server-Sent Events) — 3 capas:**
+- `gitgov/gitgov-server/src/handlers/sse.rs` (NUEVO)
+  - Endpoint `GET /sse` con `async_stream` + heartbeat cada 30s.
+- `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+  - `SseNotification` enum (`NewEvents`, `StatsUpdated`, `Heartbeat`) + `sse_tx` broadcast channel en `AppState`.
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - Tras `invalidate_logs_cache()`, broadcast `NewEvents { count }` si hay eventos aceptados.
+- `gitgov/gitgov-server/src/main.rs`
+  - Broadcast channel `tokio::sync::broadcast::channel(64)` en `AppState` + ruta `/sse`.
+- `gitgov/gitgov-server/Cargo.toml`
+  - Dependencias: `async-stream = "0.3"`, `futures = "0.3"`.
+- `gitgov/src-tauri/src/commands/server_commands.rs`
+  - `SseGeneration` con `AtomicU64` (generation counter para cancelación segura).
+  - `cmd_server_sse_connect` — streaming HTTP, parseo SSE robusto (`\n\n` y `\r\n\r\n`), emite Tauri events.
+  - `cmd_server_sse_disconnect` — incrementa generation para cancelar conexión activa.
+- `gitgov/src-tauri/src/lib.rs`
+  - `.manage(SseGeneration(...))` + registro de comandos SSE.
+- `gitgov/src-tauri/Cargo.toml`
+  - Feature `stream` en reqwest + `futures = "0.3"`.
+- `gitgov/src/lib/tauri.ts`
+  - Helper `tauriListen<T>()` para suscribirse a eventos Tauri.
+- `gitgov/src/store/useControlPlaneStore.ts`
+  - Estado `sseConnected`, acciones `connectSse()` / `disconnectSse()`.
+  - Debounce 200ms en eventos SSE antes de refrescar datos.
+  - Cleanup completo: cancela reconnect timer, llama disconnect, limpia listeners.
+- `gitgov/src/components/control_plane/ServerDashboard.tsx`
+  - SSE connect on mount, disconnect on unmount.
+  - Polling solo como fallback cuando SSE no está conectado.
+  - Refresh pesado (Jenkins/Jira/PR) cada 5 min separado del SSE.
+
+### Bugs corregidos por code review (2 rondas)
+- **Ronda 1 (4 bugs):** disconnectSse no-op, listener leak on invoke failure, eventos duplicados (2→1 notification), parser SSE frágil.
+- **Ronda 2 (3 bugs):** Race condition AtomicBool→AtomicU64 generation counter, reconnect timer no cancelable→clearTimeout, doc drift en sse.rs.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` → 99 passed; 0 failed
+- `cd gitgov/src-tauri && cargo check` → OK
+- `cd gitgov && npx tsc --noEmit` → 0 errores
+- ESLint en archivos tocados → 0 errores nuevos
+
+### Impacto Golden Path
+- Golden Path: sin cambios en contrato de `/events`, `/logs`, `/stats`. La ruta `/sse` es aditiva.
+- Dashboard sigue funcionando con polling como fallback si SSE no conecta.
+- No se modificaron handlers de auth ni de eventos existentes.
+
+---
+
 ## Actualización (2026-03-05) — Cambio 22: tuning operativo de lease/window/deferral con telemetría real
 
 ### Qué se implementó
@@ -4711,3 +4844,238 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
   - `cd gitgov && npx tsc -b` -> sin errores
   - `cd gitgov/src-tauri && cargo test` -> `17 passed; 0 failed`
   - `cd gitgov/gitgov-server && cargo test` -> `99 passed; 0 failed`
+
+## 2026-03-06 - Fix arranque Tauri: eliminar pantallazo blanco pre-React
+
+- Problema atendido:
+  - Al abrir la ventana de Tauri aparecía una pantalla blanca durante varios segundos antes de renderizar la UI.
+  - Causa: `index.html` dependía de clases Tailwind (`bg-surface-900`) que aún no existen antes de cargar `main.tsx`/`globals.css`.
+
+- Cambios implementados:
+  - `gitgov/index.html`
+    - Estilos inline de arranque para `html`, `body` y `#root` con fondo oscuro inmediato.
+    - Boot splash estático mínimo dentro de `#root` para evitar estado visual en blanco mientras monta React.
+  - `gitgov/src/App.tsx`
+    - Inicialización no bloqueante del Control Plane (`initFromEnv`) para que no retrase la salida del splash interno.
+  - `gitgov/src-tauri/src/lib.rs`
+    - La migración de tokens legacy (`migrate_legacy_tokens_from_disk`) se movió a `std::thread::spawn` para evitar bloqueo de arranque por I/O de keyring/disco.
+
+- Validación ejecutada:
+  - `cd gitgov && npx eslint src/App.tsx` -> sin errores
+  - `cd gitgov && npx tsc -b` -> sin errores
+  - `cd gitgov/src-tauri && cargo test` -> `17 passed; 0 failed`
+
+## 2026-03-06 - Fix arranque Tauri v2: sin flash blanco y sin splash intermedio
+
+- Problema atendido:
+  - Persistía secuencia visual no deseada al abrir (`blanco -> splash azul "Inicializando" -> login`).
+
+- Cambios implementados:
+  - `gitgov/src-tauri/tauri.conf.json`
+    - Ventana principal ahora inicia oculta (`"visible": false`).
+  - `gitgov/src-tauri/src/lib.rs`
+    - `on_page_load` muestra y enfoca la ventana (`window.show()` + `window.set_focus()`) solo cuando la página ya cargó.
+  - `gitgov/index.html`
+    - Se eliminó el splash HTML intermedio ("GitGov / Inicializando..."); queda solo fondo oscuro base.
+  - `gitgov/src/main.tsx`
+    - Se retiró `React.StrictMode` para evitar doble ejecución de efectos de arranque en dev (reduce latencia percibida de inicio).
+
+- Validación ejecutada:
+  - `cd gitgov && npx eslint src/main.tsx src/App.tsx` -> sin errores
+  - `cd gitgov && npx tsc -b` -> sin errores
+  - `cd gitgov/src-tauri && cargo test` -> `17 passed; 0 failed`
+
+## 2026-03-06 - Fix arranque Tauri v3: fondo nativo oscuro pre-WebView
+
+- Problema atendido:
+  - En algunos equipos seguía apareciendo pantalla blanca antes del primer paint del WebView, incluso con HTML oscuro.
+
+- Cambios implementados:
+  - `gitgov/src-tauri/src/lib.rs`
+    - En `setup`, la ventana principal fija color de fondo nativo oscuro con:
+      - `window.set_background_color(Some(tauri::window::Color(5, 7, 15, 255)))`
+    - Se fuerza `window.show()` + `window.set_focus()` en startup para evitar arranques con ventana oculta/no enfocada.
+    - Objetivo: eliminar flash blanco previo a carga de HTML/CSS/React.
+
+- Validación ejecutada:
+  - `cd gitgov/src-tauri && cargo test` -> `17 passed; 0 failed`
+  - `cd gitgov && npx tsc -b` -> sin errores
+
+## 2026-03-08 - Hardening secretos locales: API key y PIN fuera de localStorage
+
+- Problema atendido:
+  - `API key` del Control Plane y `PIN` local se estaban persistiendo en `localStorage` del frontend.
+  - Riesgo: exposición por inspección local del WebView/devtools o por lectura accidental de storage.
+
+- Cambios implementados:
+  - `gitgov/src-tauri/src/commands/server_commands.rs`
+    - Nuevos comandos Tauri para secure storage en keyring:
+      - `cmd_cp_get_api_key`, `cmd_cp_set_api_key`, `cmd_cp_clear_api_key`
+      - `cmd_pin_get`, `cmd_pin_set`, `cmd_pin_clear`
+    - Validación de formato de PIN (4-6 dígitos) en backend.
+  - `gitgov/src-tauri/src/lib.rs`
+    - Registro de los nuevos comandos en `invoke_handler`.
+  - `gitgov/src/store/useControlPlaneStore.ts`
+    - `persistServerConfig` ahora guarda solo `url` en `localStorage`.
+    - API key del Control Plane ahora se lee/escribe/borra vía keyring (comandos Tauri).
+    - Migración compatible: si existe `api_key` legacy en `localStorage`, se toma en arranque y se mueve a keyring.
+    - `disconnect()` limpia también la API key en keyring.
+  - `gitgov/src/store/useAuthStore.ts`
+    - PIN local ahora se guarda/lee/elimina exclusivamente vía keyring.
+    - Migración one-shot de `gitgov.local_pin_v1` (legacy en `localStorage`) hacia keyring.
+    - Estado de bloqueo/desbloqueo usa cache en memoria (`cachedLocalPin`) alimentada desde keyring.
+  - `gitgov/src/pages/SettingsPage.tsx`
+    - Ajuste de handlers para nuevas acciones async de PIN (`setLocalPin`, `clearLocalPin`).
+
+- Impacto esperado:
+  - No se persisten secretos (API key/PIN) en `localStorage`.
+  - Se mantiene contrato de autenticación `Authorization: Bearer` y flujo Golden Path sin cambios de endpoint.
+  - La URL de Control Plane sigue en `localStorage` (no sensible), evitando perder configuración de entorno local.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov/gitgov-server && cargo test` -> `99 passed; 0 failed`
+  - `cd gitgov/src-tauri && cargo test` -> `17 passed; 0 failed`
+  - `cd gitgov/src-tauri && cargo check` -> OK
+  - `cd gitgov/gitgov-server && cargo check` -> OK (warning preexistente `StatsUpdated` no construido)
+  - `cd gitgov && npx tsc -b` -> sin errores
+  - `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/store/useAuthStore.ts src/pages/SettingsPage.tsx src/components/auth/ControlPlaneAuthScreen.tsx src/components/control_plane/ServerConfigPanel.tsx` -> 0 errores nuevos
+
+## 2026-03-08 - Fix web download 404: validacion de URL remota y endpoint sin hardcode
+
+- Problema atendido:
+  - El portal web podia mostrar CTA de descarga activa aunque la URL externa del instalador devolviera `404`.
+  - `gitgov-web/app/api/download/route.ts` estaba hardcodeado a `/downloads/GitGov_0.1.0_x64-setup.exe`, sin reflejar la metadata real de release.
+
+- Cambios implementados:
+  - `gitgov-web/lib/release.ts`
+    - En modo URL externa (`NEXT_PUBLIC_DESKTOP_DOWNLOAD_URL`), ahora valida disponibilidad remota con `HEAD`.
+    - Si el servidor remoto no soporta `HEAD` (`405`), usa fallback `GET` con `Range: bytes=0-0`.
+    - Si la validación falla (404/timeout/error), marca `available: false` para no exponer enlace roto.
+  - `gitgov-web/app/api/download/route.ts`
+    - Elimina placeholders hardcodeados.
+    - Ahora consume `getReleaseMetadata()` y devuelve `url`, `version`, `checksum`, `msiUrl` y `fileName` reales.
+    - Si el instalador no está disponible, responde `503` con payload explícito.
+
+- Impacto esperado:
+  - Menos falsos positivos de disponibilidad en la UI de descarga.
+  - Menor riesgo de 404 visibles para usuarios finales por URL stale o typo en Vercel env vars.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov-web && pnpm typecheck` -> sin errores
+  - `cd gitgov-web && npx eslint lib/release.ts app/api/download/route.ts` -> sin errores
+  - `cd gitgov/gitgov-server && cargo test` -> `99 passed; 0 failed`
+  - `cd gitgov && npx tsc -b` -> sin errores
+
+## 2026-03-08 - Fix CI Clippy (`-D warnings`) desktop + server
+
+- Problema atendido:
+  - Pipeline fallaba en `Desktop Rust Clippy` y `Server Clippy + Check` por reglas estrictas (`-D warnings`).
+  - Errores reportados: `ptr_arg`, `type_complexity`, `too_many_arguments`, `if_same_then_else`, `collapsible_if`, `derivable_impls`, `useless_conversion`.
+
+- Cambios implementados:
+  - Desktop (`gitgov/src-tauri`):
+    - `src/outbox/queue.rs`: firmas `&PathBuf` -> `&Path` en jitter/identity helpers.
+    - `src/github/auth.rs`: simplificado `else { if ... }` a `else if`.
+    - `src/models/branch_rule.rs`: `EnforcementLevel` ahora deriva `Default` con variante `Off` marcada como `#[default]`.
+  - Server (`gitgov/gitgov-server`):
+    - `src/db.rs`: alias de tipo para auth cache (`ApiKeyAuthCacheValue`, `StaleApiKeyAuthCacheValue`) para reducir complejidad de tipos.
+    - `src/handlers/prelude_health.rs`:
+      - nuevo `OutboxLeaseTelemetryRecord` para registrar telemetría sin firma con demasiados argumentos.
+      - `SseNotification::StatsUpdated` marcado con `#[allow(dead_code)]` (reservado para uso futuro).
+    - `src/handlers/client_ingest_dashboard.rs`:
+      - helper de telemetría migrado a struct `OutboxLeaseTelemetryInput`.
+      - `if` anidado colapsado en reglas de traceability.
+    - `src/handlers/tests.rs`: tests de telemetría actualizados a la nueva estructura `OutboxLeaseTelemetryRecord`.
+    - `src/handlers/conversational/query.rs`: removido branch redundante con bloques idénticos.
+    - `src/models.rs`: `EnforcementLevel` ahora deriva `Default` con `#[default]`.
+    - `src/openapi.rs`: removido `.into()` redundante en `security_scheme`.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov/src-tauri && cargo test` -> `17 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo test` -> `110 passed; 0 failed`
+
+## 2026-03-08 - Fix precisión `related_prs` (evitar sobre-correlación por `head_sha`)
+
+- Problema atendido:
+  - En fase 2 de `POST /integrations/jira/correlate`, cuando un PR coincidía por `head_sha`, se agregaban **todos** los tickets correlacionados de la corrida en vez de solo los tickets del commit específico.
+  - Riesgo: falsos positivos en `related_prs` y trazabilidad incorrecta ticket↔PR.
+
+- Cambios implementados:
+  - `gitgov/gitgov-server/src/handlers/integrations.rs`
+    - Nuevo helper `collect_pr_ticket_matches(...)`:
+      - Match por `head_sha` usando mapa `commit_sha -> tickets`.
+      - Match por título de PR limitado a tickets candidatos de fase 1.
+    - `correlate_jira_tickets` ahora mantiene:
+      - `phase1_tickets` (tickets candidatos reales de la corrida),
+      - `tickets_by_commit_sha` (relación exacta commit→tickets).
+    - Fase 2 ahora consulta PRs con esos candidatos y asigna `related_prs` únicamente a tickets realmente matcheados.
+    - Tests unitarios nuevos:
+      - `head_sha_match_only_returns_tickets_for_that_commit`
+      - `title_match_is_limited_to_phase1_candidates`
+
+- Impacto esperado:
+  - Se elimina la contaminación cruzada de tickets en `related_prs`.
+  - No hay cambios de contrato en auth, endpoints Golden Path, ni esquema de payload.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov/gitgov-server && cargo test` -> `112 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov && npx tsc -b` -> **falló por deuda preexistente en tests TS** (tipos de runner `describe/it/expect/vi` y errores de tipado en `src/test/*`; no introducido por este cambio Rust)
+
+## 2026-03-08 - Hardening rate-limit key por identidad autenticada (scope multi-tenant)
+
+- Problema atendido:
+  - El cambio a key `client_id` per-user funciona para IP dinámica, pero podía colisionar entre tenants si dos orgs usan el mismo login.
+
+- Cambios implementados:
+  - `gitgov/gitgov-server/src/main.rs`
+    - `rate_limit_key_from_request` ahora usa:
+      - autenticado con org: `org:{org_id}:user:{client_id}`
+      - autenticado sin org: `user:{client_id}`
+      - fallback sin auth: `IP:SHA256(Authorization)[0..12]` (comportamiento anterior).
+    - Tests unitarios nuevos para la construcción de key:
+      - `rate_limit_key_prefers_authenticated_identity_scoped_by_org`
+      - `rate_limit_key_uses_client_identity_when_org_missing`
+      - `rate_limit_key_fallback_matches_ip_and_auth_fingerprint`
+      - `auth_layer_populates_identity_before_route_level_rate_limit_key` (valida orden de middlewares en `auth_routes`)
+
+- Impacto esperado:
+  - Bucket estable por identidad autenticada aunque cambie IP.
+  - Sin colisiones cross-tenant por login repetido en orgs distintas.
+  - No cambia contrato de auth (`Authorization: Bearer`) ni endpoints Golden Path.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov/gitgov-server && cargo test` -> `116 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov && npx tsc -b --pretty false` -> errores preexistentes en `src/test/*` (globals de runner y tipados), no relacionados a este cambio Rust
+
+## 2026-03-08 - UX cambios Git: ocultar archivos puntuales desde FileList (local-only)
+
+- Problema atendido:
+  - Faltaba una acción directa para quitar archivos específicos de la UI de cambios cuando el usuario no quiere verlos/considerarlos para commit en esa sesión/equipo.
+
+- Cambios implementados:
+  - `gitgov/src/components/diff/FileList.tsx`
+    - Nuevo menú por archivo (click izquierdo en botón de opciones `...`) con acciones:
+      - `Quitar de GitGov (local)`.
+      - `Ignorar local en Git (.git/info/exclude)`.
+    - El ocultamiento:
+      - se guarda por repo en `localStorage` (preferencias de `FileList`);
+      - no modifica Git, no borra archivo, no toca servidor;
+      - si el archivo estaba staged, fuerza confirmación y lo saca de staging antes de ocultarlo (evita commit invisible).
+    - En la acción de `.git/info/exclude`, si el archivo sigue visible por estar trackeado, se informa en UI y se recomienda usar ocultamiento local de GitGov.
+    - Nuevo panel de control:
+      - contador de archivos ocultos localmente;
+      - botón `Restaurar ocultos` para volver a mostrarlos.
+    - La lista, contadores y detección de “cambios masivos” ahora respetan este filtro local.
+
+- Impacto esperado:
+  - UX más segura y rápida para limpiar la vista de cambios sin editar `.gitignore` ni crear reglas globales involuntarias.
+  - Sin impacto en Golden Path (auth, ingest, commit/push backend).
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov && npx eslint src/components/diff/FileList.tsx` -> OK
+  - `cd gitgov && npx tsc -b --pretty false` -> errores preexistentes en `src/test/*` (globals de runner y tipados), no relacionados al cambio
+  - `cd gitgov/gitgov-server && cargo test` -> `116 passed; 0 failed`

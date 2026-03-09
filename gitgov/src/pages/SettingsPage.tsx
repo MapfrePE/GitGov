@@ -7,15 +7,17 @@ import { Header } from '@/components/layout/Header'
 import { Button } from '@/components/shared/Button'
 import { Modal } from '@/components/shared/Modal'
 import { Link } from 'react-router-dom'
-import { User, FolderOpen, FileCode, LogOut, Shield, Users, Download, RefreshCw, Sparkles, ExternalLink, Globe } from 'lucide-react'
+import { User, FolderOpen, FileCode, LogOut, Shield, Users, Download, RefreshCw, Sparkles, ExternalLink, Globe, Bell } from 'lucide-react'
 import { TIMEZONES, detectBrowserTimezone, formatTs } from '@/lib/timezone'
 import { AdminOnboardingPanel } from '@/components/control_plane/AdminOnboardingPanel'
 import { TeamManagementPanel } from '@/components/control_plane/TeamManagementPanel'
 import { ApiKeyManagerWidget } from '@/components/control_plane/ApiKeyManagerWidget'
+import { GovernanceRulesPanel } from '@/components/control_plane/GovernanceRulesPanel'
+import { loadNotificationPrefs, saveNotificationPrefs, type NotificationPrefs } from '@/lib/notifications'
 
 export function SettingsPage() {
   const { user, logout, isPinEnabled, setLocalPin, clearLocalPin, lockSession, pinError } = useAuthStore()
-  const { repoPath, config } = useRepoStore()
+  const { repoPath, config, validation } = useRepoStore()
   const displayTimezone = useControlPlaneStore((s) => s.displayTimezone)
   const setDisplayTimezone = useControlPlaneStore((s) => s.setDisplayTimezone)
   const isConnected = useControlPlaneStore((s) => s.isConnected)
@@ -44,8 +46,15 @@ export function SettingsPage() {
   } = useUpdateStore()
   const [showRepoSelector, setShowRepoSelector] = useState(false)
   const [pinInput, setPinInput] = useState('')
+  const [notifPrefs, setNotifPrefs] = useState<NotificationPrefs>(loadNotificationPrefs)
   const isControlPlaneAdmin = userRole === 'Admin'
   const canManageOrgSettings = Boolean(user?.is_admin) || isControlPlaneAdmin
+
+  const updateNotifPrefs = (patch: Partial<NotificationPrefs>) => {
+    const next = { ...notifPrefs, ...patch }
+    setNotifPrefs(next)
+    saveNotificationPrefs(next)
+  }
 
   return (
     <div className="h-full flex flex-col bg-surface-950">
@@ -92,6 +101,61 @@ export function SettingsPage() {
             </div>
           </section>
 
+          <section className="rounded-2xl border border-surface-700/30 bg-surface-800/40 p-6">
+            <div className="card-header mb-2">
+              <Bell size={12} strokeWidth={1.5} />
+              Notificaciones de Escritorio
+            </div>
+            <p className="text-xs text-surface-400 mb-4">
+              Recibe alertas nativas del sistema operativo cuando ocurren eventos relevantes en GitGov.
+            </p>
+            <div className="space-y-2">
+              <label className="flex items-center gap-3 rounded-lg border border-surface-700/30 bg-surface-900/50 px-3 py-2.5 cursor-pointer" aria-label="Activar notificaciones">
+                <input
+                  type="checkbox"
+                  checked={notifPrefs.enabled}
+                  onChange={(e) => updateNotifPrefs({ enabled: e.target.checked })}
+                  className="accent-brand-500"
+                />
+                <div>
+                  <span className="text-xs text-surface-100 font-medium">Activar notificaciones</span>
+                  <p className="text-[10px] text-surface-500">Master switch — desactiva todas las notificaciones</p>
+                </div>
+              </label>
+              {notifPrefs.enabled && (
+                <div className="ml-4 space-y-1.5">
+                  <label className="flex items-center gap-3 rounded-lg border border-surface-700/20 bg-surface-900/30 px-3 py-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={notifPrefs.onNewEvents}
+                      onChange={(e) => updateNotifPrefs({ onNewEvents: e.target.checked })}
+                      className="accent-brand-500"
+                    />
+                    <span className="text-xs text-surface-200">Nuevos eventos en el Control Plane</span>
+                  </label>
+                  <label className="flex items-center gap-3 rounded-lg border border-surface-700/20 bg-surface-900/30 px-3 py-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={notifPrefs.onBlockedPush}
+                      onChange={(e) => updateNotifPrefs({ onBlockedPush: e.target.checked })}
+                      className="accent-brand-500"
+                    />
+                    <span className="text-xs text-surface-200">Push bloqueado (rama protegida o gobernanza)</span>
+                  </label>
+                  <label className="flex items-center gap-3 rounded-lg border border-surface-700/20 bg-surface-900/30 px-3 py-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={notifPrefs.onGovernanceWarn}
+                      onChange={(e) => updateNotifPrefs({ onGovernanceWarn: e.target.checked })}
+                      className="accent-brand-500"
+                    />
+                    <span className="text-xs text-surface-200">Advertencias de gobernanza (modo warn)</span>
+                  </label>
+                </div>
+              )}
+            </div>
+          </section>
+
           {canManageOrgSettings && (
             <section className="rounded-2xl border border-surface-700/30 bg-surface-800/40 p-6">
               <div className="card-header mb-2">Administración de Organización</div>
@@ -118,6 +182,18 @@ export function SettingsPage() {
               )}
             </section>
           )}
+
+          {canManageOrgSettings && isConnected && (() => {
+            const remoteUrl = validation?.remote_url ?? ''
+            const match = remoteUrl.match(/[/:]([^/]+\/[^/.]+?)(?:\.git)?$/)
+            const repoFullName = match?.[1] ?? ''
+            if (!repoFullName) return null
+            return (
+              <section className="rounded-2xl border border-surface-700/30 bg-surface-800/40 p-6">
+                <GovernanceRulesPanel repoFullName={repoFullName} />
+              </section>
+            )
+          })()}
 
           <section className="rounded-2xl border border-surface-700/30 bg-surface-800/40 p-6">
             <div className="card-header mb-5">
@@ -378,15 +454,15 @@ export function SettingsPage() {
                     />
                     <Button
                       size="sm"
-                      onClick={() => {
-                        setLocalPin(pinInput)
+                      onClick={async () => {
+                        await setLocalPin(pinInput)
                         setPinInput('')
                       }}
                     >
                       {isPinEnabled ? 'Actualizar PIN' : 'Activar PIN'}
                     </Button>
                     {isPinEnabled && (
-                      <Button variant="outline" size="sm" onClick={clearLocalPin}>
+                      <Button variant="outline" size="sm" onClick={() => { void clearLocalPin() }}>
                         Desactivar PIN
                       </Button>
                     )}

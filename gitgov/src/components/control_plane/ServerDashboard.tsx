@@ -11,6 +11,7 @@ import { EventBreakdownGrid } from './EventBreakdownGrid'
 import { RecentCommitsTable } from './RecentCommitsTable'
 import { DeveloperAccessPanel } from './DeveloperAccessPanel'
 import { ConversationalChatPanel } from './ConversationalChatPanel'
+import { PolicyEditorPanel } from './PolicyEditorPanel'
 import { MaintenanceOverlay } from './MaintenanceOverlay'
 import { Modal } from '@/components/shared/Modal'
 import { Badge } from '@/components/shared/Badge'
@@ -33,6 +34,9 @@ export function ServerDashboard() {
   const loadActiveDevs7d = useControlPlaneStore((s) => s.loadActiveDevs7d)
   const displayTimezone = useControlPlaneStore((s) => s.displayTimezone)
   const isChatLoading = useControlPlaneStore((s) => s.isChatLoading)
+  const sseConnected = useControlPlaneStore((s) => s.sseConnected)
+  const connectSse = useControlPlaneStore((s) => s.connectSse)
+  const disconnectSse = useControlPlaneStore((s) => s.disconnectSse)
 
   const isAdmin = userRole === 'Admin'
 
@@ -55,10 +59,28 @@ export function ServerDashboard() {
     return () => document.removeEventListener('visibilitychange', onVisibilityChange)
   }, [])
 
+  // Connect SSE when dashboard mounts + connected; disconnect on unmount
   useEffect(() => {
     if (!isConnected) return
+    void connectSse()
+    return () => disconnectSse()
+  }, [isConnected, connectSse, disconnectSse])
 
-    const runRefresh = () => {
+  // Initial data load on connect
+  useEffect(() => {
+    if (!isConnected) return
+    if (userRole === 'Admin') {
+      void refreshForCurrentRole()
+    } else {
+      void loadLogsIncremental(DASHBOARD_LOG_LIMIT)
+    }
+  }, [isConnected, refreshForCurrentRole, loadLogsIncremental, userRole])
+
+  // Polling fallback: only active when SSE is NOT connected
+  useEffect(() => {
+    if (!isConnected || !autoRefresh || sseConnected) return
+
+    const interval = setInterval(() => {
       if (isChatLoadingRef.current) return
       if (!isWindowVisible) return
       if (userRole === 'Admin') {
@@ -66,16 +88,19 @@ export function ServerDashboard() {
       } else {
         void loadLogsIncremental(DASHBOARD_LOG_LIMIT)
       }
-    }
-
-    runRefresh()
-    if (!autoRefresh) return
-
-    const interval = setInterval(() => {
-      runRefresh()
     }, 30000)
     return () => clearInterval(interval)
-  }, [isConnected, autoRefresh, refreshForCurrentRole, loadLogsIncremental, userRole, isWindowVisible])
+  }, [isConnected, autoRefresh, sseConnected, refreshForCurrentRole, loadLogsIncremental, userRole, isWindowVisible])
+
+  // Heavy refresh (Jenkins/Jira/PR correlations) — every 5 min regardless of SSE
+  useEffect(() => {
+    if (!isConnected || !autoRefresh || userRole !== 'Admin') return
+    const interval = setInterval(() => {
+      if (!isWindowVisible) return
+      void refreshForCurrentRole({ forceHeavy: true })
+    }, 5 * 60 * 1000)
+    return () => clearInterval(interval)
+  }, [isConnected, autoRefresh, userRole, refreshForCurrentRole, isWindowVisible])
 
   /* ── maintenance mode ── */
   if (connectionStatus === 'maintenance') {
@@ -164,6 +189,8 @@ export function ServerDashboard() {
           />
 
           <RecentCommitsTable />
+
+          <PolicyEditorPanel />
 
           <ConversationalChatPanel />
 

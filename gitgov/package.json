@@ -17,6 +17,7 @@
     "@tailwindcss/postcss": "^4.2.0",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-updater": "^2.10.0",
     "autoprefixer": "^10.4.24",
     "clsx": "^2.1.1",

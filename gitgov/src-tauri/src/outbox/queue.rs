@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -1036,7 +1036,7 @@ impl Outbox {
         (value % max_jitter_ms as u64) as i64
     }
 
-    fn stable_worker_jitter_ms(path: &PathBuf, max_jitter_ms: u64) -> u64 {
+    fn stable_worker_jitter_ms(path: &Path, max_jitter_ms: u64) -> u64 {
         if max_jitter_ms == 0 {
             return 0;
         }
@@ -1046,7 +1046,7 @@ impl Outbox {
         hasher.finish() % max_jitter_ms
     }
 
-    fn global_coordination_identity(api_key: Option<&str>, path: &PathBuf) -> String {
+    fn global_coordination_identity(api_key: Option<&str>, path: &Path) -> String {
         if let Some(key) = api_key {
             let trimmed = key.trim();
             if !trimmed.is_empty() {

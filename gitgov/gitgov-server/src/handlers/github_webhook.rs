@@ -481,6 +481,7 @@ async fn process_pull_request_event(
         );
     }
 
+    let head_sha_clone = head_sha.clone();
     let record = PrMergeRecord {
         id: Uuid::new_v4().to_string(),
         org_id: Some(org_id),
@@ -507,6 +508,37 @@ async fn process_pull_request_event(
                 approvals_count,
                 delivery_id,
             );
+
+            // Auto-correlate: if PR title contains ticket IDs, update related_prs
+            let mut sources: Vec<&str> = Vec::new();
+            if let Some(ref title) = pr_title {
+                sources.push(title.as_str());
+            }
+            let ticket_ids = extract_ticket_ids(&sources);
+            if !ticket_ids.is_empty() {
+                let repo_full_name = &repo.full_name;
+                let pr_ref = format!("{}#{}", repo_full_name, pr_number);
+                for ticket_id in &ticket_ids {
+                    if let Err(e) = state
+                        .db
+                        .append_project_ticket_relations_full(ticket_id, head_sha_clone.as_deref(), None, Some(&pr_ref))
+                        .await
+                    {
+                        tracing::debug!(
+                            ticket_id = %ticket_id,
+                            pr_ref = %pr_ref,
+                            error = %e,
+                            "Could not append PR relation to ticket (ticket may not exist yet)"
+                        );
+                    }
+                }
+                tracing::info!(
+                    pr_ref = format!("{}#{}", repo_full_name, pr_number),
+                    tickets = ?ticket_ids,
+                    "Auto-correlated PR with tickets from title"
+                );
+            }
+
             Ok(())
         }
         Err(DbError::Duplicate(_)) => {
