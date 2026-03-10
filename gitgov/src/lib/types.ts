@@ -193,3 +193,98 @@ export interface CommitMessageValidation {
   valid: boolean
   error?: string
 }
+
+// ============================================================================
+// CLI EMBEDDED TERMINAL
+// ============================================================================
+
+export type TerminalLineType = 'command' | 'stdout' | 'stderr' | 'system' | 'gitgov'
+
+export interface TerminalLine {
+  id: string
+  type: TerminalLineType
+  text: string
+  timestamp: number
+}
+
+export type CommandOrigin = 'button_click' | 'manual_input'
+
+export interface CommandEntry {
+  id: string
+  command: string
+  args: string[]
+  origin: CommandOrigin
+  cwd: string
+  branch: string
+  user_login: string
+  started_at: number
+  finished_at?: number
+  exit_code?: number
+  output_lines: TerminalLine[]
+}
+
+/** Payload emitted by Tauri for each line of CLI output. */
+export interface CliOutputEvent {
+  command_id: string
+  line_type: TerminalLineType
+  text: string
+}
+
+/** Payload emitted by Tauri when a CLI command finishes. */
+export interface CliFinishedEvent {
+  command_id: string
+  exit_code: number
+}
+
+// ============================================================================
+// PIPELINE VISUALIZER
+// ============================================================================
+
+export type PipelineNodeKind =
+  | 'ticket'      // Jira ticket linked to branch
+  | 'branch'      // Branch creation/checkout
+  | 'commit'      // Individual commit
+  | 'pr'          // Pull request
+  | 'review'      // Code review status
+  | 'merge'       // Merge into target branch
+  | 'pipeline'    // Jenkins pipeline run
+  | 'deploy'      // Deployment (future)
+
+export type PipelineNodeStatus =
+  | 'pending'
+  | 'active'
+  | 'success'
+  | 'warning'
+  | 'failed'
+
+export interface PipelineNode {
+  id: string
+  kind: PipelineNodeKind
+  status: PipelineNodeStatus
+  label: string
+  detail?: string
+  branch: string
+  timestamp: number
+  /** True if this node was created in the current session */
+  is_current_session: boolean
+  /** Link to related entity (Jira URL, PR URL, Jenkins build URL) */
+  url?: string
+  /** For commits: short SHA */
+  sha?: string
+  /** For tickets: ticket key (e.g., PROJ-123) */
+  ticket_key?: string
+  /** For pipelines: build number */
+  build_number?: number
+}
+
+export interface PipelineBranch {
+  name: string
+  is_current: boolean
+  is_target: boolean  // develop or main
+  nodes: PipelineNode[]
+}
+
+export interface PipelineGraph {
+  branches: PipelineBranch[]
+  session_start: number
+}

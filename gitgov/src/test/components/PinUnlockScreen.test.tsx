@@ -15,7 +15,7 @@ describe('PinUnlockScreen', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useAuthStore.setState({
-      user: { login: 'testuser', name: 'Test User', avatarUrl: '' },
+      user: { login: 'testuser', name: 'Test User', avatar_url: '', is_admin: false },
       pinError: null,
       unlockWithPin: vi.fn(),
       logout: vi.fn().mockResolvedValue(undefined),

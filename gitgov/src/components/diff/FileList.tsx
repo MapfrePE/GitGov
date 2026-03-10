@@ -326,11 +326,8 @@ export function FileList() {
       return
     }
 
-    if (saved.noiseFilterMode === 'all' || saved.noiseFilterMode === 'code' || saved.noiseFilterMode === 'noise') {
-      setNoiseFilterMode(saved.noiseFilterMode)
-    } else {
-      setNoiseFilterMode('all')
-    }
+    // UX simplificado: mantenemos solo el chip "Todo" visible.
+    setNoiseFilterMode('all')
     setSelectedStackTemplateId(saved.selectedStackTemplateId ?? null)
     setSelectedStackRuleGroupId(saved.selectedStackRuleGroupId ?? null)
     setShowGitGovHidden(saved.showGitGovHidden === true)
@@ -563,9 +560,6 @@ export function FileList() {
     }
     return set
   }, [gitgovVisibleFiles])
-  const noiseFilesCount = noisePathSet.size
-  const codeFilesCount = Math.max(0, gitgovVisibleFiles.length - noiseFilesCount)
-
   const noiseFilteredFiles = useMemo(() => {
     if (noiseFilterMode === 'all') return gitgovVisibleFiles
     if (noiseFilterMode === 'noise') return gitgovVisibleFiles.filter((f) => noisePathSet.has(f.path))
@@ -1006,39 +1000,7 @@ export function FileList() {
           >
             Todo ({gitgovVisibleFiles.length.toLocaleString()})
           </button>
-          <button
-            type="button"
-            onClick={() => setNoiseFilterMode('code')}
-            className={clsx(
-              'text-[10px] px-2 py-1 rounded border transition-colors',
-              noiseFilterMode === 'code'
-                ? 'border-brand-500/40 bg-brand-500/10 text-brand-300'
-                : 'border-white/6 bg-white/3 text-surface-300 hover:bg-white/5'
-            )}
-            title="Oculta archivos generados/cache detectados por heurística"
-          >
-            Solo código ({codeFilesCount.toLocaleString()})
-          </button>
-          <button
-            type="button"
-            onClick={() => setNoiseFilterMode('noise')}
-            className={clsx(
-              'text-[10px] px-2 py-1 rounded border transition-colors',
-              noiseFilterMode === 'noise'
-                ? 'border-warning-500/40 bg-warning-500/10 text-warning-300'
-                : 'border-white/6 bg-white/3 text-surface-300 hover:bg-white/5'
-            )}
-            title="Ver solo archivos generados/cache detectados por heurística"
-          >
-            Solo ruido ({noiseFilesCount.toLocaleString()})
-          </button>
         </div>
-
-        {noiseFilterMode !== 'all' && (
-          <p className="mt-1.5 text-[10px] text-surface-600">
-            Filtro activo: {noiseFilterMode === 'code' ? 'solo código' : 'solo ruido generado'} (heurística, no altera Git)
-          </p>
-        )}
 
         {(gitgovIgnoreExists || gitgovIgnoreRules.length > 0 || gitgovHiddenCount > 0 || gitgovIgnoreLoadError) && (
           <div className="mt-2 rounded border border-white/6 bg-surface-950/45 p-2">

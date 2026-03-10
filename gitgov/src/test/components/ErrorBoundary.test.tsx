@@ -1,4 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/react'
+import type { ReactElement } from 'react'
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary'
 
 function ThrowingComponent({ shouldThrow }: { shouldThrow: boolean }) {
@@ -45,7 +46,7 @@ describe('ErrorBoundary', () => {
   })
 
   it('resets error state on retry click', () => {
-    const { rerender } = render(
+    render(
       <ErrorBoundary>
         <ThrowingComponent shouldThrow={true} />
       </ErrorBoundary>
@@ -59,7 +60,7 @@ describe('ErrorBoundary', () => {
   })
 
   it('shows default message when error has no message', () => {
-    function ThrowEmpty() {
+    function ThrowEmpty(): ReactElement {
       throw new Error('')
     }
     render(

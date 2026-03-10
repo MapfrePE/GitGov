@@ -51,8 +51,8 @@ describe('useRepoStore', () => {
       // Manually set fileChanges (simulate loaded state)
       useRepoStore.setState({
         fileChanges: [
-          { path: 'a.ts', status: 'modified', staged: false },
-          { path: 'b.ts', status: 'new', staged: false },
+          { path: 'a.ts', status: 'Modified', staged: false },
+          { path: 'b.ts', status: 'Added', staged: false },
         ],
       })
       useRepoStore.getState().selectAll()
@@ -89,6 +89,62 @@ describe('useRepoStore', () => {
       expect(useRepoStore.getState().repoPath).toBeNull()
       expect(useRepoStore.getState().error).toBeNull()
       expect(useRepoStore.getState().currentBranch).toBeNull()
+    })
+  })
+
+  describe('repo switch UX', () => {
+    it('beginRepoSwitch preserves previous repo and clears active repo', () => {
+      useRepoStore.setState({
+        repoPath: '/repo/actual',
+        currentBranch: 'main',
+        fileChanges: [{ path: 'a.ts', status: 'Modified', staged: false }],
+      })
+
+      useRepoStore.getState().beginRepoSwitch()
+      const state = useRepoStore.getState()
+      expect(state.previousRepoPath).toBe('/repo/actual')
+      expect(state.repoPath).toBeNull()
+      expect(state.currentBranch).toBeNull()
+      expect(state.fileChanges).toEqual([])
+    })
+
+    it('cancelRepoSwitch restores previous repo', async () => {
+      useRepoStore.setState({
+        repoPath: null,
+        previousRepoPath: '/repo/anterior',
+      })
+
+      mockInvoke
+        .mockResolvedValueOnce({
+          path_exists: true,
+          is_git_repo: true,
+          has_remote_origin: true,
+          has_gitgov_toml: false,
+        }) // cmd_validate_repo
+        .mockResolvedValueOnce([]) // cmd_get_status
+        .mockResolvedValueOnce([]) // cmd_list_branches
+        .mockResolvedValueOnce({
+          branch: 'main',
+          upstream: null,
+          has_upstream: false,
+          ahead: 0,
+          behind: 0,
+          pending_local_commits: 0,
+        }) // cmd_get_branch_sync_status (from refreshBranches)
+        .mockResolvedValueOnce({
+          branch: 'main',
+          upstream: null,
+          has_upstream: false,
+          ahead: 0,
+          behind: 0,
+          pending_local_commits: 0,
+        }) // cmd_get_branch_sync_status (explicit)
+
+      await useRepoStore.getState().cancelRepoSwitch()
+      const state = useRepoStore.getState()
+      expect(state.repoPath).toBe('/repo/anterior')
+      expect(state.previousRepoPath).toBeNull()
+      expect(mockInvoke).toHaveBeenCalledWith('cmd_validate_repo', { repoPath: '/repo/anterior' })
     })
   })
 

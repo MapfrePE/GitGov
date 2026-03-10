@@ -37,3 +37,4 @@ dotenvy = "0.15"
 tauri-plugin-updater = "2"
 tauri-plugin-notification = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
+portable-pty = "0.8"

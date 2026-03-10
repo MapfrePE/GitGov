@@ -1,10 +1,11 @@
 use crate::control_plane::{
     AcceptOrgInvitationRequest, AcceptOrgInvitationResponse, ApiKeyInfo, ApiKeyResponse,
-    AuditFilter, ChatAskRequest, ChatAskResponse, CombinedEvent, CommitPipelineCorrelation,
-    ControlPlaneClient, CreateOrgInvitationRequest, CreateOrgInvitationResponse, CreateOrgRequest,
-    CreateOrgResponse, CreateOrgUserRequest, CreateOrgUserResponse, DailyActivityFilter,
-    DailyActivityPoint, EventPayload, ExportLogEntry, ExportResponse, FeatureRequestCreated,
-    FeatureRequestInput, JenkinsCorrelationFilter, JiraCorrelateRequest, JiraCorrelateResponse,
+    AuditFilter, ChatAskRequest, ChatAskResponse, CliCommandInput, CliCommandListResponse,
+    CliCommandResponse, CombinedEvent, CommitPipelineCorrelation, ControlPlaneClient,
+    CreateOrgInvitationRequest, CreateOrgInvitationResponse, CreateOrgRequest, CreateOrgResponse,
+    CreateOrgUserRequest, CreateOrgUserResponse, DailyActivityFilter, DailyActivityPoint,
+    EventPayload, ExportLogEntry, ExportResponse, FeatureRequestCreated, FeatureRequestInput,
+    JenkinsCorrelationFilter, JiraCorrelateRequest, JiraCorrelateResponse,
     JiraTicketDetailResponse, MeResponse, OrgInvitation, OrgInvitationsResponse, OrgUser,
     OrgUsersResponse, PolicyCheckResponse, PolicyHistoryEntry, PolicyResponse,
     PrMergeEvidenceEntry, PrMergeEvidenceFilter, ResendOrgInvitationRequest, RevokeApiKeyResponse,
@@ -302,6 +303,46 @@ pub async fn cmd_server_send_event(
             }
             Err(e) => Err(to_command_error(e, "SERVER_ERROR")),
         }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_server_ingest_cli_command(
+    config: ServerConnectionConfig,
+    payload: CliCommandInput,
+) -> Result<CliCommandResponse, String> {
+    run_blocking_command("INGEST_CLI_COMMAND", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .ingest_cli_command(&payload)
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_server_list_cli_commands(
+    config: ServerConnectionConfig,
+    user_login: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<CliCommandListResponse, String> {
+    run_blocking_command("LIST_CLI_COMMANDS", move || {
+        let client = ControlPlaneClient::new(ServerConfig {
+            url: config.url,
+            api_key: config.api_key,
+        });
+        client
+            .list_cli_commands(
+                user_login.as_deref(),
+                limit.unwrap_or(50).clamp(1, 200),
+                offset.unwrap_or(0).max(0),
+            )
+            .map_err(|e| to_command_error(e, "SERVER_ERROR"))
     })
     .await
 }

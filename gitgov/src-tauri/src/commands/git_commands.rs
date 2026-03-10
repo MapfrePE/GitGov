@@ -28,6 +28,11 @@ fn trigger_flush(outbox: &Arc<Outbox>) {
     outbox.notify_flush();
 }
 
+/// Public wrapper for cross-module access (used by cli_commands).
+pub fn infer_repo_full_name_pub(repo: &Repository) -> Option<String> {
+    infer_repo_full_name(repo)
+}
+
 fn infer_repo_full_name(repo: &Repository) -> Option<String> {
     let remote = repo.find_remote("origin").ok()?;
     let url = remote.url()?.trim();

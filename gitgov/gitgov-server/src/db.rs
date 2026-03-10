@@ -5896,6 +5896,107 @@ impl Database {
 
         Ok(row.get("id"))
     }
+
+    // ========================================================================
+    // CLI COMMAND AUDIT
+    // ========================================================================
+
+    pub async fn insert_cli_command(
+        &self,
+        record: &crate::models::CliCommandRecord,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            r#"
+            INSERT INTO cli_commands (
+                id, org_id, user_login, command, origin, branch,
+                repo_name, exit_code, duration_ms, metadata, created_at
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3, $4, $5, $6,
+                $7, $8, $9, $10::jsonb, to_timestamp($11::bigint / 1000.0)
+            )
+            "#,
+        )
+        .bind(&record.id)
+        .bind(&record.org_id)
+        .bind(&record.user_login)
+        .bind(&record.command)
+        .bind(&record.origin)
+        .bind(&record.branch)
+        .bind(&record.repo_name)
+        .bind(record.exit_code)
+        .bind(record.duration_ms)
+        .bind(&record.metadata)
+        .bind(record.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub async fn list_cli_commands(
+        &self,
+        org_id: Option<&str>,
+        user_login: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<crate::models::CliCommandRecord>, i64), DbError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id::text, org_id::text, user_login, command, origin, branch,
+                repo_name, exit_code, duration_ms,
+                COALESCE(metadata, '{}'::jsonb) AS metadata,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms
+            FROM cli_commands
+            WHERE ($1::uuid IS NULL OR org_id = $1::uuid)
+              AND ($2::text IS NULL OR user_login = $2)
+            ORDER BY created_at DESC
+            LIMIT $3 OFFSET $4
+            "#,
+        )
+        .bind(org_id)
+        .bind(user_login)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM cli_commands
+            WHERE ($1::uuid IS NULL OR org_id = $1::uuid)
+              AND ($2::text IS NULL OR user_login = $2)
+            "#,
+        )
+        .bind(org_id)
+        .bind(user_login)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let records: Vec<crate::models::CliCommandRecord> = rows
+            .iter()
+            .map(|row| crate::models::CliCommandRecord {
+                id: row.get("id"),
+                org_id: row.get("org_id"),
+                user_login: row.get("user_login"),
+                command: row.get("command"),
+                origin: row.get("origin"),
+                branch: row.get("branch"),
+                repo_name: row.get("repo_name"),
+                exit_code: row.get("exit_code"),
+                duration_ms: row.get("duration_ms"),
+                metadata: row.get("metadata"),
+                created_at: row.get("created_at_ms"),
+            })
+            .collect();
+
+        Ok((records, count))
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

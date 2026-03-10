@@ -80,6 +80,10 @@ fn clear_current_user_session() {
     let _ = std::fs::remove_file(path);
 }
 
+pub fn load_current_user_session_login() -> Option<String> {
+    load_current_user_session().map(|u| u.login)
+}
+
 #[tauri::command]
 pub async fn cmd_start_auth() -> Result<DeviceFlowInfo, String> {
     run_blocking_auth_command("START_AUTH", move || {

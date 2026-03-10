@@ -171,6 +171,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(audit_db)
         .manage(outbox)
+        .manage(commands::CliShellManager::default())
+        .manage(commands::CliNativeTerminalManager::default())
         .manage(commands::SseGeneration(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0))))
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -236,6 +238,8 @@ pub fn run() {
             commands::cmd_server_sync_outbox,
             commands::cmd_server_health,
             commands::cmd_server_send_event,
+            commands::cmd_server_ingest_cli_command,
+            commands::cmd_server_list_cli_commands,
             commands::cmd_server_get_logs,
             commands::cmd_server_get_stats,
             commands::cmd_server_get_daily_activity,
@@ -270,6 +274,16 @@ pub fn run() {
             commands::cmd_server_policy_check,
             commands::cmd_server_sse_connect,
             commands::cmd_server_sse_disconnect,
+            commands::cmd_start_native_terminal,
+            commands::cmd_write_native_terminal,
+            commands::cmd_resize_native_terminal,
+            commands::cmd_stop_native_terminal,
+            commands::cmd_start_shell_session,
+            commands::cmd_send_shell_input,
+            commands::cmd_stop_shell_session,
+            commands::cmd_execute_cli,
+            commands::cmd_get_cli_whitelist,
+            commands::cmd_get_pipeline_graph,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

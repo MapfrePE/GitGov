@@ -83,7 +83,7 @@ describe('useAuthStore', () => {
     it('resets to idle and clears device flow info', () => {
       useAuthStore.setState({
         authStep: 'polling',
-        deviceFlowInfo: { device_code: 'x', user_code: 'Y', verification_uri: 'z', interval: 5, expires_in: 900 },
+        deviceFlowInfo: { device_code: 'x', user_code: 'Y', verification_uri: 'z', interval: 5 },
         error: 'some error',
       })
 

@@ -195,18 +195,18 @@ function CategorySection({
 
   return (
     <div className="rounded-xl border border-white/6 bg-white/[0.02] overflow-hidden">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/[0.02] transition-colors"
-      >
-        <Icon size={14} strokeWidth={1.5} className="text-brand-400 shrink-0" />
-        <span className="text-xs font-semibold text-surface-100 flex-1 text-left">{title}</span>
-        <div onClick={(e) => e.stopPropagation()}>
-          <EnforcementToggle value={enforcement} onChange={onEnforcementChange} />
-        </div>
-        <Chevron size={12} className="text-surface-500 shrink-0" />
-      </button>
+      <div className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/[0.02] transition-colors">
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          className="flex items-center gap-3 flex-1 min-w-0 text-left"
+        >
+          <Icon size={14} strokeWidth={1.5} className="text-brand-400 shrink-0" />
+          <span className="text-xs font-semibold text-surface-100 flex-1 text-left">{title}</span>
+          <Chevron size={12} className="text-surface-500 shrink-0" />
+        </button>
+        <EnforcementToggle value={enforcement} onChange={onEnforcementChange} />
+      </div>
       {open && (
         <div className="px-4 pb-4 pt-1 border-t border-white/5">
           {children}
@@ -337,6 +337,8 @@ export function GovernanceRulesPanel({ repoFullName }: { repoFullName: string })
   useEffect(() => {
     if (policyData?.config) {
       const cfg = policyData.config
+      // Syncing remote policy into local editable draft is intentional here.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setRules({ ...defaultRules(), ...cfg.rules })
       setEnforcement({ ...defaultEnforcement(), ...cfg.enforcement })
       setProtectedBranches(cfg.branches?.protected ?? [])

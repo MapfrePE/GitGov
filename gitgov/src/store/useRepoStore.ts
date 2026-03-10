@@ -12,6 +12,7 @@ import type {
 
 interface RepoState {
   repoPath: string | null
+  previousRepoPath: string | null
   config: GitGovConfig | null
   validation: RepoValidation | null
   currentBranch: string | null
@@ -29,6 +30,8 @@ interface RepoState {
 
 interface RepoActions {
   setRepoPath: (path: string) => Promise<void>
+  beginRepoSwitch: () => void
+  cancelRepoSwitch: () => Promise<void>
   validateRepo: (path: string) => Promise<RepoValidation>
   loadConfig: () => Promise<void>
   refreshStatus: () => Promise<void>
@@ -55,6 +58,7 @@ interface RepoActions {
 
 const initialState: RepoState = {
   repoPath: null,
+  previousRepoPath: null,
   config: null,
   validation: null,
   currentBranch: null,
@@ -74,9 +78,33 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
   ...initialState,
 
   setRepoPath: async (path: string) => {
-    set({ repoPath: path, isLoadingStatus: true })
+    const normalizedPath = path.trim()
+    if (!normalizedPath) {
+      set({
+        repoPath: null,
+        validation: null,
+        currentBranch: null,
+        branchSync: null,
+        pendingPushPreview: null,
+        activeDiffFile: null,
+        activeDiff: null,
+        fileChanges: [],
+        selectedFiles: new Set(),
+        stagedFiles: new Set(),
+        isLoadingStatus: false,
+        error: null,
+      })
+      return
+    }
+
+    set({
+      repoPath: normalizedPath,
+      previousRepoPath: null,
+      isLoadingStatus: true,
+      error: null,
+    })
     try {
-      const validation = await get().validateRepo(path)
+      const validation = await get().validateRepo(normalizedPath)
       set({ validation })
       if (validation.has_gitgov_toml) {
         await get().loadConfig()
@@ -89,6 +117,32 @@ export const useRepoStore = create<RepoState & RepoActions>((set, get) => ({
     } finally {
       set({ isLoadingStatus: false })
     }
+  },
+
+  beginRepoSwitch: () => {
+    const currentPath = get().repoPath
+    if (!currentPath) return
+
+    set({
+      previousRepoPath: currentPath,
+      repoPath: null,
+      validation: null,
+      currentBranch: null,
+      branchSync: null,
+      pendingPushPreview: null,
+      activeDiffFile: null,
+      activeDiff: null,
+      fileChanges: [],
+      selectedFiles: new Set(),
+      stagedFiles: new Set(),
+      error: null,
+    })
+  },
+
+  cancelRepoSwitch: async () => {
+    const previousPath = get().previousRepoPath
+    if (!previousPath) return
+    await get().setRepoPath(previousPath)
   },
 
   validateRepo: async (path: string) => {

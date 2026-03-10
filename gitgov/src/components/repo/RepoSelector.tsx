@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react'
 import { useRepoStore } from '@/store/useRepoStore'
 import { Button } from '@/components/shared/Button'
 import { Spinner } from '@/components/shared/Spinner'
-import { FolderOpen, CheckCircle, XCircle, FolderGit2 } from 'lucide-react'
+import { FolderOpen, CheckCircle, XCircle, FolderGit2, ArrowLeft } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-dialog'
 
 interface ValidationItemProps {
@@ -24,7 +24,14 @@ function ValidationItem({ label, valid }: ValidationItemProps) {
 }
 
 export function RepoSelector() {
-  const { setRepoPath, validation, isLoadingStatus, error } = useRepoStore()
+  const {
+    setRepoPath,
+    cancelRepoSwitch,
+    previousRepoPath,
+    validation,
+    isLoadingStatus,
+    error,
+  } = useRepoStore()
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
 
   const handleSelectFolder = useCallback(async () => {
@@ -57,6 +64,23 @@ export function RepoSelector() {
         </div>
 
         <div className="card">
+          {previousRepoPath && (
+            <div className="mb-4 rounded-lg border border-surface-700 bg-surface-800/70 p-3">
+              <p className="mb-2 text-xs text-surface-400">Repositorio anterior:</p>
+              <p className="mb-3 truncate text-xs font-mono text-surface-300">{previousRepoPath}</p>
+              <Button
+                variant="secondary"
+                className="w-full"
+                onClick={() => {
+                  void cancelRepoSwitch()
+                }}
+              >
+                <ArrowLeft size={16} className="mr-2" />
+                Volver al repo anterior
+              </Button>
+            </div>
+          )}
+
           {error && (
             <div className="mb-4 p-3 bg-danger-500/20 border border-danger-500/50 rounded-lg text-danger-400 text-sm">
               {error}

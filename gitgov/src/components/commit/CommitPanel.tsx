@@ -1,16 +1,34 @@
 import { useState, useMemo, useEffect } from 'react'
 import { useRepoStore } from '@/store/useRepoStore'
 import { useAuthStore } from '@/store/useAuthStore'
+import { useControlPlaneStore } from '@/store/useControlPlaneStore'
 import { Button } from '@/components/shared/Button'
 import { COMMIT_TYPES } from '@/lib/constants'
 import { AlertTriangle, ArrowDown, ArrowUp, GitCommit, Upload, RotateCcw } from 'lucide-react'
 import { toast } from '@/components/shared/Toast'
 import { tauriInvoke, parseCommandError } from '@/lib/tauri'
+import { emitCliLine } from '@/lib/cliEvents'
 import clsx from 'clsx'
 
 interface GitIdentity {
   name: string | null
   email: string | null
+}
+
+interface CliCommandAuditPayload {
+  command: string
+  origin: 'button_click' | 'manual_input'
+  branch: string
+  repo_name?: string
+  exit_code?: number
+  duration_ms?: number
+  metadata?: Record<string, unknown>
+}
+
+function inferRepoNameFromPath(path?: string | null): string | undefined {
+  if (!path) return undefined
+  const parts = path.split(/[\\/]/).filter(Boolean)
+  return parts.length > 0 ? parts[parts.length - 1] : undefined
 }
 
 function formatPushErrorForUser(rawError: unknown): string {
@@ -50,6 +68,7 @@ export function CommitPanel() {
     refreshBranchSync,
   } = useRepoStore()
   const { user } = useAuthStore()
+  const controlPlaneConfig = useControlPlaneStore((s) => s.serverConfig)
   const [message, setMessage] = useState('')
   const [commitType, setCommitType] = useState('feat')
   const [isCommitting, setIsCommitting] = useState(false)
@@ -111,6 +130,11 @@ export function CommitPanel() {
       toast('error', 'Commit bloqueado: la identidad git local no coincide con tu cuenta GitGov. Corrige user.name y user.email del repo para continuar.')
       return
     }
+    emitCliLine({
+      lineType: 'command',
+      text: `$ git commit -m "${fullMessage.replaceAll('"', '\\"')}"`,
+    })
+    const commitAuditStart = Date.now()
     setIsCommitting(true)
     try {
       const hash = await commit(
@@ -122,6 +146,25 @@ export function CommitPanel() {
       setLastCommitHash(hash)
       setMessage('')
       toast('success', `Commit creado: ${hash.substring(0, 7)}`)
+      emitCliLine({
+        lineType: 'gitgov',
+        text: `✓ Commit auditado en GitGov (${hash.substring(0, 7)})`,
+      })
+      if (controlPlaneConfig?.url && controlPlaneConfig.api_key) {
+        const payload: CliCommandAuditPayload = {
+          command: `git commit -m "${fullMessage}"`,
+          origin: 'button_click',
+          branch: currentBranch ?? 'unknown',
+          repo_name: inferRepoNameFromPath(repoPath),
+          exit_code: 0,
+          duration_ms: Date.now() - commitAuditStart,
+          metadata: { source: 'commit_panel' },
+        }
+        void tauriInvoke('cmd_server_ingest_cli_command', {
+          config: controlPlaneConfig,
+          payload,
+        }).catch(() => {})
+      }
       const sync = await refreshBranchSync(currentBranch ?? undefined)
       const pendingAfterCommit = sync?.pending_local_commits ?? sync?.ahead ?? 0
       if (pendingAfterCommit > 0) {
@@ -131,7 +174,27 @@ export function CommitPanel() {
         )
       }
     } catch (e) {
-      toast('error', parseCommandError(String(e)).message)
+      const parsed = parseCommandError(String(e))
+      toast('error', parsed.message)
+      emitCliLine({
+        lineType: 'stderr',
+        text: `✗ ${parsed.message}`,
+      })
+      if (controlPlaneConfig?.url && controlPlaneConfig.api_key) {
+        const payload: CliCommandAuditPayload = {
+          command: `git commit -m "${fullMessage}"`,
+          origin: 'button_click',
+          branch: currentBranch ?? 'unknown',
+          repo_name: inferRepoNameFromPath(repoPath),
+          exit_code: 1,
+          duration_ms: Date.now() - commitAuditStart,
+          metadata: { source: 'commit_panel', error: parsed.message },
+        }
+        void tauriInvoke('cmd_server_ingest_cli_command', {
+          config: controlPlaneConfig,
+          payload,
+        }).catch(() => {})
+      }
     } finally {
       setIsCommitting(false)
     }
@@ -143,6 +206,11 @@ export function CommitPanel() {
       toast('error', 'Push bloqueado: la identidad git local no coincide con tu cuenta GitGov. Corrige user.name y user.email del repo para continuar.')
       return
     }
+    emitCliLine({
+      lineType: 'command',
+      text: `$ git push origin ${currentBranch}`,
+    })
+    const pushAuditStart = Date.now()
     setIsPushing(true)
     try {
       await push(currentBranch, user.login)
@@ -153,13 +221,56 @@ export function CommitPanel() {
           'warning',
           `Push ejecutado pero aún quedan ${pendingAfterPush} commit(s) sin sincronizar en ${syncAfterPush?.branch ?? currentBranch}.`
         )
+        emitCliLine({
+          lineType: 'system',
+          text: `! Push parcial: quedan ${pendingAfterPush} commit(s) pendientes`,
+        })
       } else {
         toast('success', `Push exitoso a ${currentBranch}`)
+        emitCliLine({
+          lineType: 'gitgov',
+          text: `✓ Push auditado en GitGov (${currentBranch})`,
+        })
+      }
+      if (controlPlaneConfig?.url && controlPlaneConfig.api_key) {
+        const payload: CliCommandAuditPayload = {
+          command: `git push origin ${currentBranch}`,
+          origin: 'button_click',
+          branch: currentBranch,
+          repo_name: inferRepoNameFromPath(repoPath),
+          exit_code: 0,
+          duration_ms: Date.now() - pushAuditStart,
+          metadata: { source: 'commit_panel' },
+        }
+        void tauriInvoke('cmd_server_ingest_cli_command', {
+          config: controlPlaneConfig,
+          payload,
+        }).catch(() => {})
       }
       setLastCommitHash(null)
       await refreshStatus()
     } catch (e) {
-      toast('error', formatPushErrorForUser(e))
+      const userMessage = formatPushErrorForUser(e)
+      toast('error', userMessage)
+      emitCliLine({
+        lineType: 'stderr',
+        text: `✗ ${userMessage}`,
+      })
+      if (controlPlaneConfig?.url && controlPlaneConfig.api_key) {
+        const payload: CliCommandAuditPayload = {
+          command: `git push origin ${currentBranch}`,
+          origin: 'button_click',
+          branch: currentBranch,
+          repo_name: inferRepoNameFromPath(repoPath),
+          exit_code: 1,
+          duration_ms: Date.now() - pushAuditStart,
+          metadata: { source: 'commit_panel', error: userMessage },
+        }
+        void tauriInvoke('cmd_server_ingest_cli_command', {
+          config: controlPlaneConfig,
+          payload,
+        }).catch(() => {})
+      }
       const syncAfterError = await refreshBranchSync(currentBranch)
       const pendingAfterError = syncAfterError?.pending_local_commits ?? syncAfterError?.ahead ?? 0
       if (pendingAfterError > 0) {
@@ -177,12 +288,36 @@ export function CommitPanel() {
   }
 
   const handleUnstageAll = async () => {
+    emitCliLine({
+      lineType: 'command',
+      text: '$ git restore --staged .',
+    })
+    const unstageAuditStart = Date.now()
     await unstageAll()
     toast('info', 'Staging area limpiado')
+    emitCliLine({
+      lineType: 'gitgov',
+      text: '✓ Staging limpiado',
+    })
+    if (controlPlaneConfig?.url && controlPlaneConfig.api_key) {
+      const payload: CliCommandAuditPayload = {
+        command: 'git restore --staged .',
+        origin: 'button_click',
+        branch: currentBranch ?? 'unknown',
+        repo_name: inferRepoNameFromPath(repoPath),
+        exit_code: 0,
+        duration_ms: Date.now() - unstageAuditStart,
+        metadata: { source: 'commit_panel' },
+      }
+      void tauriInvoke('cmd_server_ingest_cli_command', {
+        config: controlPlaneConfig,
+        payload,
+      }).catch(() => {})
+    }
   }
 
   return (
-    <div className="border-t border-surface-700/30 bg-surface-900/50 px-5 py-4">
+    <div className="shrink-0 min-w-0 border-t border-surface-700/30 bg-surface-900/50 px-5 py-4">
       {identityMismatch && (
         <div className="mb-3 flex items-start gap-2 rounded-lg border border-warning-500/30 bg-warning-500/10 px-3 py-2">
           <AlertTriangle size={13} strokeWidth={1.75} className="mt-0.5 shrink-0 text-warning-400" />
@@ -215,9 +350,15 @@ export function CommitPanel() {
           </div>
         </div>
       )}
-      <div className="flex gap-4">
-        <div className="flex-1 space-y-2">
-          <div className="flex gap-2">
+      <div
+        className="grid items-start gap-4"
+        style={{ gridTemplateColumns: 'minmax(0, 1fr) 184px' }}
+      >
+        <div className="min-w-0 space-y-2">
+          <div
+            className="grid items-center gap-2"
+            style={{ gridTemplateColumns: 'auto minmax(0, 1fr)' }}
+          >
             <select
               value={commitType}
               onChange={(e) => setCommitType(e.target.value)}
@@ -239,7 +380,7 @@ export function CommitPanel() {
                 }
               }}
               placeholder="descripción del cambio"
-              className="flex-1 px-3 py-2 bg-surface-800 border border-surface-700/50 rounded-lg text-white text-xs placeholder-surface-600 focus:outline-none focus:border-brand-500/50 transition-colors"
+              className="w-full min-w-0 px-3 py-2 bg-surface-800 border border-surface-700/50 rounded-lg text-white text-xs placeholder-surface-600 focus:outline-none focus:border-brand-500/50 transition-colors"
             />
           </div>
 
@@ -270,18 +411,18 @@ export function CommitPanel() {
 
           <div className="flex items-center gap-2 text-[11px] px-0.5">
             <span className="text-surface-600">Preview:</span>
-            <code className={clsx(
-              'px-1.5 py-0.5 rounded mono-data text-[11px] transition-colors',
-              isValidMessage
-                ? 'bg-success-500/10 text-success-400'
-                : 'bg-surface-800/50 text-surface-600'
-            )}>
+            <code
+              className={clsx(
+                'px-1.5 py-0.5 rounded mono-data text-[11px] transition-colors',
+                isValidMessage ? 'bg-success-500/10 text-success-400' : 'bg-surface-800/50 text-surface-600',
+              )}
+            >
               {fullMessage || 'mensaje vacío'}
             </code>
           </div>
         </div>
 
-        <div className="flex flex-col gap-2 justify-center">
+        <div className="shrink-0 flex flex-col gap-2 justify-end" style={{ width: 184 }}>
           <div className="flex gap-2">
             <Button
               size="sm"
@@ -298,6 +439,7 @@ export function CommitPanel() {
               onClick={handleCommit}
               loading={isCommitting}
               disabled={!hasStagedFiles || !isValidMessage || isIdentityBlocked}
+              className="flex-1"
             >
               <GitCommit size={13} strokeWidth={1.5} />
               Commit ({stagedFiles.size})
@@ -310,6 +452,7 @@ export function CommitPanel() {
             onClick={handlePush}
             loading={isPushing}
             disabled={!canPush || isIdentityBlocked}
+            className="w-full"
           >
             <Upload size={13} strokeWidth={1.5} />
             Push

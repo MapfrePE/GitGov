@@ -218,6 +218,8 @@ export function PolicyEditorPanel() {
 
   useEffect(() => {
     if (policyData?.config) {
+      // Syncing remote policy payload into local editable config is intentional.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setConfig({
         ...EMPTY_CONFIG,
         ...policyData.config,
@@ -274,7 +276,8 @@ export function PolicyEditorPanel() {
 
   const removeGroup = (name: string) => {
     updateConfig((c) => {
-      const { [name]: _, ...rest } = c.groups
+      const rest = { ...c.groups }
+      delete rest[name]
       return { ...c, groups: rest }
     })
   }

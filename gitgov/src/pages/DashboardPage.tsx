@@ -2,13 +2,13 @@ import { useEffect } from 'react'
 import { useRepoStore } from '@/store/useRepoStore'
 import { Header } from '@/components/layout/Header'
 import { FileList } from '@/components/diff/FileList'
-import { DiffViewer } from '@/components/diff/DiffViewer'
+import { WorkspacePanel } from '@/components/cli/WorkspacePanel'
 import { CommitPanel } from '@/components/commit/CommitPanel'
 import { Button } from '@/components/shared/Button'
 import { FolderSync } from 'lucide-react'
 
 export function DashboardPage() {
-  const { repoPath, refreshStatus, refreshBranches, refreshBranchSync, setRepoPath } = useRepoStore()
+  const { repoPath, refreshStatus, refreshBranches, refreshBranchSync, beginRepoSwitch } = useRepoStore()
 
   useEffect(() => {
     if (repoPath) {
@@ -31,7 +31,7 @@ export function DashboardPage() {
   }, [repoPath, refreshStatus, refreshBranchSync])
 
   const handleChangeRepo = () => {
-    setRepoPath('')
+    beginRepoSwitch()
   }
 
   return (
@@ -48,8 +48,8 @@ export function DashboardPage() {
           <FileList />
         </div>
 
-        <div className="flex-1 flex flex-col bg-surface-900">
-          <DiffViewer />
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col bg-surface-900">
+          <WorkspacePanel />
           <CommitPanel />
         </div>
       </div>

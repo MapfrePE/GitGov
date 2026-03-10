@@ -12,7 +12,7 @@ import {
 import type { FileChange } from '@/lib/types'
 
 function fc(path: string): FileChange {
-  return { path, status: 'modified', staged: false }
+  return { path, status: 'Modified', staged: false }
 }
 
 describe('topLevelFolder', () => {

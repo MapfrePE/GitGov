@@ -18,4 +18,5 @@ include!("handlers/chat_handler.rs");
 include!("handlers/feature_requests.rs");
 include!("handlers/sse.rs");
 include!("handlers/metrics_endpoint.rs");
+include!("handlers/cli_audit.rs");
 include!("handlers/tests.rs");

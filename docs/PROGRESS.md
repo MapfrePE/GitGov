@@ -2,6 +2,358 @@
 
 ---
 
+## Actualización (2026-03-09) — Terminal nativa completa (PTY + xterm.js)
+
+### Problema atendido
+- La terminal embebida anterior era por líneas/comandos y no se comportaba como una TTY real (autocompletado shell, control de cursor, `vim/less/top`, resize real).
+
+### Qué se implementó
+- `gitgov/src-tauri/src/commands/cli_commands.rs`
+  - Nuevo backend PTY nativo cross-platform (ConPTY/PTY vía `portable-pty`).
+  - Nuevos comandos Tauri:
+    - `cmd_start_native_terminal`
+    - `cmd_write_native_terminal`
+    - `cmd_resize_native_terminal`
+    - `cmd_stop_native_terminal`
+  - Nuevos eventos de stream:
+    - `gitgov:pty-output` (chunks crudos del shell)
+    - `gitgov:pty-exit` (código de salida de la sesión)
+- `gitgov/src-tauri/src/lib.rs`
+  - Registro de `CliNativeTerminalManager`.
+  - Registro de los 4 comandos PTY en `invoke_handler`.
+- `gitgov/src-tauri/Cargo.toml`
+  - Dependencia nueva: `portable-pty`.
+- `gitgov/src/components/cli/TerminalPanel.tsx`
+  - Migración a `xterm.js` + `@xterm/addon-fit`.
+  - Input/output bidireccional byte-stream contra PTY (comportamiento de terminal real).
+  - Resize dinámico con `ResizeObserver` + `cmd_resize_native_terminal`.
+  - Reconexión manual de sesión (`Reconnect`) y estado de conexión visible.
+  - Mantiene impresión de líneas de acciones UI (`onCliLine`) dentro del terminal.
+- `gitgov/package.json`
+  - Nuevas dependencias frontend:
+    - `@xterm/xterm`
+    - `@xterm/addon-fit`
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/src-tauri && cargo check` -> OK
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+- `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+- `cd gitgov && npx eslint src/components/cli/TerminalPanel.tsx` -> OK
+- `cd gitgov && npm run typecheck` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `116 passed; 0 failed`
+
+### Impacto Golden Path
+- No se modificó auth del server, `/events`, `/stats`, `/logs`, ni handlers críticos de ingesta.
+- Commit/Push y panel de commit permanecen fuera de este cambio (cambio acotado al panel Terminal desktop).
+
+---
+
+## Actualización (2026-03-09) — Terminal persistente tipo VSCode (Shell por defecto)
+
+### Problema atendido
+- Aunque existía `Shell mode`, seguía siendo ejecución por comando aislado; `cd` no persistía y no se comportaba como terminal real.
+
+### Qué se implementó
+- `gitgov/src-tauri/src/commands/cli_commands.rs`
+  - Nuevo flujo de sesión persistente:
+    - `cmd_start_shell_session`
+    - `cmd_send_shell_input`
+    - `cmd_stop_shell_session`
+  - La sesión mantiene estado del shell entre comandos (CWD, variables, contexto), por lo que `cd` persiste.
+  - Parse de marcador de salida por comando (`__GITGOV_EXIT__`) para emitir `gitgov:cli-finished` con `exit_code`.
+  - Se mantiene `cmd_execute_cli` existente para modo `safe`/compat.
+- `gitgov/src-tauri/src/lib.rs`
+  - Registro de estado `CliShellManager`.
+  - Registro de los 3 nuevos comandos Tauri.
+- `gitgov/src/components/cli/TerminalPanel.tsx`
+  - `Shell` ahora es el modo por defecto (como experiencia VSCode).
+  - Inicio/cierre automático de sesión shell según modo/repo.
+  - En modo shell, los comandos se envían por `cmd_send_shell_input` (no por ejecución aislada).
+  - Indicador visual de estado de sesión (`shell...` / nombre de shell conectado).
+  - `Safe` sigue disponible como fallback con whitelist (`git`, `gitgov`).
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/src-tauri && cargo check` -> OK
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+- `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+- `cd gitgov && npx eslint src/components/cli/TerminalPanel.tsx` -> OK
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `116 passed; 0 failed`
+
+### Impacto Golden Path
+- Sin cambios en auth, outbox core, `/events`, `/stats`, `/logs` ni handlers críticos del server.
+- Cambio acotado a UX/ejecución de terminal embebida desktop.
+
+---
+
+## Actualización (2026-03-09) — Terminal con modo Safe/Shell (opt-in)
+
+### Problema atendido
+- La terminal embebida bloqueaba `ls`, `dir`, `cd` porque solo permitía whitelist `git/gitgov`, sin una opción clara para habilitar comandos de shell.
+
+### Qué se implementó
+- `gitgov/src-tauri/src/commands/cli_commands.rs`
+  - Nuevo `execution_mode` en `CliExecuteRequest` (`safe` por defecto, `shell` opt-in).
+  - `safe`: mantiene validación por whitelist (`git`, `gitgov`).
+  - `shell`: ejecuta en shell del sistema:
+    - Windows: `powershell -NoProfile -NonInteractive -Command`
+    - Linux/macOS: `bash -lc` (fallback a `sh -lc` si `bash` no está).
+  - Auditoría enriquecida con `execution_mode` en metadata de eventos.
+  - Línea de terminal ahora muestra prefijo `[safe]` o `[shell]`.
+- `gitgov/src/components/cli/TerminalPanel.tsx`
+  - Selector de modo en header: `Safe | Shell`.
+  - Persistencia local del modo (`localStorage`).
+  - Llamada a `cmd_get_cli_whitelist` para mostrar modo seguro con prefijos reales.
+  - `cmd_execute_cli` ahora envía `execution_mode` al backend.
+  - Placeholder adaptado al modo activo.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/components/cli/TerminalPanel.tsx` -> OK
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov/src-tauri && cargo check` -> OK
+- `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+
+### Impacto Golden Path
+- No cambia auth, `/events`, `/stats`, `/logs` ni flujo base commit/push.
+- El modo `safe` permanece como default; `shell` es opcional.
+
+---
+
+## Actualización (2026-03-09) — Pipeline: Execution Deck en espacio superior
+
+### Problema atendido
+- La sección `Pipeline Flow` mostraba los 6 nodos principales, pero dejaba demasiado espacio muerto y no comunicaba suficiente contexto operativo de la sesión.
+
+### Qué se implementó
+- `gitgov/src/components/cli/PipelineVisualizer.tsx`
+  - Se añadió un `Execution Deck` debajo de la línea principal del flujo.
+  - Nuevo bloque `Current Focus`:
+    - identifica el paso activo o más relevante de la sesión
+    - muestra detalle del paso y la siguiente acción sugerida.
+  - Nuevo bloque `Session Snapshot`:
+    - resumen compacto de ticket, branch, commit y staged state.
+  - Nuevo bloque `Gates / Blockers`:
+    - estado de trazabilidad, review/PR, CI y siguiente gate operativo.
+  - Se reaprovecha la señal existente de commits, PRs, Jenkins, Jira y eventos locales; no se añadió otro canal de datos.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/components/cli/PipelineVisualizer.tsx` -> OK
+- `cd gitgov && npx tsc -b` -> OK
+
+### Impacto Golden Path
+- Sin cambios en auth, outbox, `/events`, `/stats`, `/logs` ni flujo base de commit/push.
+- Cambio visual y de lectura de estado en workspace desktop.
+
+---
+
+## Actualización (2026-03-09) — Sidebar simplificado (FileList)
+
+### Problema atendido
+- En el sidebar de cambios, los chips `Solo código` y `Solo ruido` generaban ruido visual y poco valor en uso diario.
+
+### Qué se implementó
+- `gitgov/src/components/diff/FileList.tsx`
+  - Se removieron los chips `Solo código` y `Solo ruido`.
+  - Se mantiene `Todo (N)` como único filtro visible de ese bloque.
+  - Se normaliza el estado de filtro a `all` al cargar preferencias del repo.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/components/diff/FileList.tsx` -> OK
+- `cd gitgov && npx tsc -b` -> OK
+
+### Impacto Golden Path
+- Sin cambios en auth, outbox, endpoints ni flujo de commit/push.
+
+---
+
+## Actualización (2026-03-09) — UX cambio de repositorio reversible
+
+### Problema atendido
+- Al usar `Cambiar repo` en dashboard, la app entraba a `RepoSelector` sin una salida clara para volver al repo anterior.
+
+### Qué se implementó
+- `gitgov/src/store/useRepoStore.ts`
+  - Nuevo estado `previousRepoPath`.
+  - Nueva acción `beginRepoSwitch()`:
+    - guarda repo actual como `previousRepoPath`
+    - limpia el estado activo y abre selector de repositorio.
+  - Nueva acción `cancelRepoSwitch()`:
+    - restaura el repositorio previo usando `setRepoPath(previousRepoPath)`.
+  - `setRepoPath(...)` ahora limpia estado al recibir ruta vacía y al seleccionar ruta válida borra `previousRepoPath`.
+- `gitgov/src/pages/DashboardPage.tsx`
+  - `Cambiar repo` ahora usa `beginRepoSwitch()` en vez de `setRepoPath('')`.
+- `gitgov/src/components/repo/RepoSelector.tsx`
+  - Nuevo bloque de recuperación con botón `Volver al repo anterior`.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/store/useRepoStore.ts src/components/repo/RepoSelector.tsx src/pages/DashboardPage.tsx src/test/useRepoStore.test.ts` -> OK
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov && npm test -- --run src/test/useRepoStore.test.ts` -> `17 passed; 0 failed`
+
+### Impacto Golden Path
+- Sin cambios en auth, outbox, handlers de `/events`, `/stats` o `/logs`.
+- Cambio acotado a UX de selección de repositorio en desktop.
+
+---
+
+## Actualización (2026-03-09) — Workspace Pipeline rediseñado: Session Flow + Audit Trail (sin mover CommitPanel)
+
+### Qué se implementó
+- `gitgov/src/components/cli/WorkspacePanel.tsx`
+  - Nuevo layout de workspace (solo cuando no hay diff seleccionado):
+    - franja superior: `PipelineVisualizer` (Session Flow)
+    - franja inferior: split `TerminalPanel` (izquierda) + `AuditTrailPanel` (derecha)
+  - `CommitPanel` permanece fuera de este layout (intacto en su dock inferior del dashboard).
+- `gitgov/src/components/cli/PipelineVisualizer.tsx`
+  - Refactor completo de visualización:
+    - flujo fijo de sesión `Ticket -> Branch -> Stage -> Commit -> Push/PR -> CI`
+    - estados visuales por paso (`pending`, `active`, `success`, `warning`, `failed`)
+    - feed de eventos visuales recientes
+  - Señales en tiempo real:
+    - eventos locales de UI (`gitgov:cli-line`)
+    - eventos Tauri de ejecución (`gitgov:cli-output`, `gitgov:cli-finished`)
+    - SSE del server (`gitgov:sse-event`) para refresh y señal de actividad.
+  - Mantiene enriquecimiento con Jira/PR/Jenkins para detalles de ticket, PR y pipeline.
+- `gitgov/src/components/cli/AuditTrailPanel.tsx` (nuevo)
+  - Panel derecho con toggle `Session | History`.
+  - `Session`: bitácora en vivo de acciones locales (`button_click` y `manual_input`) con estado.
+  - `History`: carga paginada reciente desde endpoint `/cli/commands` vía Tauri command.
+- `gitgov/src-tauri/src/control_plane/server.rs`
+  - Nuevos tipos de cliente:
+    - `CliCommandRecord`
+    - `CliCommandListResponse`
+  - Nuevo método `ControlPlaneClient::list_cli_commands(...)` (GET `/cli/commands`).
+- `gitgov/src-tauri/src/commands/server_commands.rs`
+  - Nuevo comando Tauri `cmd_server_list_cli_commands`.
+- `gitgov/src-tauri/src/lib.rs`
+  - Registro de `cmd_server_list_cli_commands` en `invoke_handler`.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/components/cli/WorkspacePanel.tsx src/components/cli/PipelineVisualizer.tsx src/components/cli/AuditTrailPanel.tsx` -> OK
+- `cd gitgov && npx tsc -b` -> OK
+- `cd gitgov/src-tauri && cargo check` -> OK
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+- `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo test` -> `116 passed; 0 failed`
+
+### Impacto Golden Path
+- No se modificó auth (`Authorization: Bearer`), ni handlers core de `/events`, `/stats`, `/logs`.
+- Cambios concentrados en visualización del workspace y en consulta de historial CLI (read-only) para `Audit Trail`.
+
+---
+
+## Actualización (2026-03-09) — CLI/Pipeline hardening: CI verde + wiring con botones reales
+
+### Problema atendido
+- La implementación inicial de CLI embebida + pipeline visual no compilaba en frontend (`lint` y `typecheck` fallaban por variables no usadas y tipado incorrecto en listeners Tauri).
+- Los botones existentes de `CommitPanel` (commit/push/unstage) no estaban conectados al terminal embebido para mostrar comandos ejecutados.
+
+### Cambios implementados
+- `gitgov/src/components/cli/TerminalPanel.tsx`
+  - Corregido uso de `tauriListen`: el handler ahora consume payload directo (sin `event.payload`).
+  - Eliminado estado/handler no usados (`activeCommandId`, `executeFromButton`).
+  - Añadido listener de eventos UI (`gitgov:cli-line`) para reflejar comandos disparados por botones existentes.
+- `gitgov/src/lib/cliEvents.ts` (nuevo)
+  - Bus local de eventos para terminal embebido:
+    - `emitCliLine(...)`
+    - `onCliLine(...)`
+- `gitgov/src/components/commit/CommitPanel.tsx`
+  - Emite líneas al terminal al ejecutar acciones de botón:
+    - commit (`$ git commit -m ...`)
+    - push (`$ git push origin <branch>`)
+    - unstage (`$ git restore --staged .`)
+  - Emite confirmación/error en terminal según resultado.
+- `gitgov/src/components/cli/PipelineVisualizer.tsx`
+  - Limpieza de imports/constantes no usados para dejar CI en verde.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npm run lint` -> OK
+- `cd gitgov && npm run typecheck` -> OK
+- `cd gitgov && npm test -- --run` -> `22 files passed; 243 tests passed`
+- `cd gitgov/gitgov-server && cargo test` -> `116 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+
+### Impacto Golden Path
+- Sin cambios en auth Bearer ni contrato de `/events`.
+- Commit/push del flujo principal se mantienen en su path actual; el terminal embebido solo agrega visibilidad (no reemplaza la ejecución core del Golden Path).
+
+---
+
+## Actualización (2026-03-09) — CLI/Pipeline cierre de gaps (audit endpoint + sesión + señales reales)
+
+### Qué se implementó
+- `gitgov/src-tauri/src/commands/cli_commands.rs`
+  - `cmd_execute_cli` ahora recibe `CliExecuteRequest` (reduce argumentos y mantiene clippy limpio).
+  - Fallback de identidad de usuario desde sesión local (`current_user.json`) si no llega `user_login` desde UI.
+  - Fallback de rama desde `HEAD` del repo si no llega `branch`.
+  - Ingesta directa a `/cli/commands` al finalizar comando (incluye `exit_code`, `duration_ms` y preview de stdout/stderr), además del outbox existente.
+- `gitgov/src-tauri/src/control_plane/server.rs`
+  - Nuevos tipos `CliCommandInput` y `CliCommandResponse`.
+  - Nuevo método `ControlPlaneClient::ingest_cli_command(...)`.
+- `gitgov/src-tauri/src/commands/server_commands.rs`
+  - Nuevo comando Tauri `cmd_server_ingest_cli_command`.
+- `gitgov/src-tauri/src/lib.rs`
+  - Registro de `cmd_server_ingest_cli_command` en `invoke_handler`.
+- `gitgov/src/components/cli/TerminalPanel.tsx`
+  - `cmd_execute_cli` ahora envía `request` completo con `server_config` para auditoría directa.
+- `gitgov/src/components/commit/CommitPanel.tsx`
+  - Botones `Commit`, `Push` y `Unstage` ahora también registran audit trail CLI en `/cli/commands` con `origin=button_click`.
+- `gitgov/src/components/cli/PipelineVisualizer.tsx`
+  - Enriquecido con señales reales de Control Plane:
+    - Jenkins (`jenkinsCorrelations`) -> nodos `pipeline`.
+    - PR merges (`prMergeEvidence`) -> nodos `pr` y `review`.
+    - Jira (IDs detectados en commit + `loadJiraTicketDetail`) -> nodos `ticket`.
+  - Actualiza por polling y también por SSE (`gitgov:sse-event`) cuando hay nuevos eventos.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npm run lint` -> OK
+- `cd gitgov && npm run typecheck` -> OK
+- `cd gitgov && npm test -- --run` -> `22 files passed; 243 tests passed`
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+- `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `116 passed; 0 failed`
+
+### Impacto Golden Path
+- Sin cambios en contrato de autenticación (`Authorization: Bearer`) ni en `/events`.
+- Los cambios son aditivos: visibilidad/auditoría CLI y visualización de pipeline; no alteran la ruta core de commit/push/outbox.
+
+---
+
+## Actualización (2026-03-08) — Fix CI Frontend Lint + Typecheck
+
+### Problema atendido
+- El job `Frontend Lint + Typecheck` estaba fallando por reglas de eslint en paneles de control plane y por deuda de tipado en tests (`vitest` globals no tipados).
+
+### Qué se implementó
+- `gitgov/eslint.config.js`
+  - `globalIgnores` incluye `gitgov-server/target/**` para evitar lint en artefactos generados.
+- `gitgov/src/components/control_plane/GovernanceRulesPanel.tsx`
+  - Estructura del header de sección ajustada para evitar interacción no semántica (fix a11y).
+  - Sync de estado en `useEffect` mantenido con comentario/disable puntual de `react-hooks/set-state-in-effect`.
+- `gitgov/src/components/control_plane/PolicyEditorPanel.tsx`
+  - `removeGroup` reescrito sin variable descartada `_`.
+  - Sync en `useEffect` con disable puntual documentado.
+- `gitgov/tsconfig.app.json`
+  - `types` extendido con `vitest/globals` y `@testing-library/jest-dom`.
+- Tests ajustados para tipos actuales:
+  - `gitgov/src/test/components/ErrorBoundary.test.tsx`
+  - `gitgov/src/test/components/PinUnlockScreen.test.tsx`
+  - `gitgov/src/test/largeChangeset.test.ts`
+  - `gitgov/src/test/useAuthStore.test.ts`
+  - `gitgov/src/test/useRepoStore.test.ts`
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npm run lint` -> OK
+- `cd gitgov && npm run typecheck` -> OK
+- `cd gitgov && npm test -- --run` -> `22 files passed; 243 tests passed`
+
+### Impacto Golden Path
+- Sin cambios en auth/ingesta/outbox/handlers del server.
+- Cambio acotado a frontend/config de tipos y tests.
+
+---
+
 ## Actualización (2026-03-07) — Cambio 29: CSP en webview de Tauri
 
 ### Qué se implementó

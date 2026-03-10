@@ -1376,6 +1376,11 @@ async fn main() {
             "/feature-requests",
             post(handlers::create_feature_request_handler),
         )
+        // CLI Command Audit
+        .route(
+            "/cli/commands",
+            post(handlers::ingest_cli_command).get(handlers::list_cli_commands),
+        )
         .layer(middleware::from_fn_with_state(
             Arc::clone(&db),
             auth::auth_middleware,
