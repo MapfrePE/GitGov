@@ -45,11 +45,11 @@ pub fn run() {
     // Load .env file if present
     dotenvy::dotenv().ok();
 
-    // Keep logs actionable in dev: avoid noisy HMR socket resets from hyper at DEBUG.
+    // Keep logs actionable in dev: avoid noisy transport/runtime warnings by default.
     // Override with RUST_LOG when deeper diagnostics are needed.
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(
-            "info,hyper=warn,h2=warn,reqwest=warn,tungstenite=warn,tokio_tungstenite=warn",
+            "info,hyper=warn,h2=warn,reqwest=warn,tungstenite=warn,tokio_tungstenite=warn,tao=error,winit=error",
         )
     });
 

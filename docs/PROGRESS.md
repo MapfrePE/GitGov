@@ -2,6 +2,51 @@
 
 ---
 
+## Actualización (2026-03-10) — Cierre de entrega (Pasos 1, 2 y 3)
+
+### Estado de pasos
+- **Paso 1 (validación funcional): COMPLETADO**
+  - Reportado por usuario:
+    - `tests/e2e_flow_test.sh` ejecutado el día anterior en local
+    - Golden Path validado hoy con commit/push real desde la app
+- **Paso 2 (branch limpio de la entrega): COMPLETADO**
+  - Reportado por usuario: quedaron solo cambios de esta entrega
+- **Paso 3 (CI técnico local completo): COMPLETADO**
+  - Ejecutado en esta sesión con resultados en verde (abajo)
+
+### Validación ejecutada (resultados reales del Paso 3)
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `116 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+- `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+- `cd gitgov && npm run lint` -> OK
+- `cd gitgov && npm run typecheck` -> OK
+
+### Impacto Golden Path
+- Estado final de esta entrega: **intacto** (sin regresiones detectadas en las validaciones reportadas).
+
+---
+
+## Actualización (2026-03-09) — Reducción de ruido de logs Tauri/Windows
+
+### Problema atendido
+- En Windows aparecían warnings de runtime del event loop (`tao`/`winit`) que no eran fallos funcionales y contaminaban la consola de desarrollo.
+
+### Qué se implementó
+- `gitgov/src-tauri/src/lib.rs`
+  - Ajuste del filtro por defecto de `tracing` para incluir:
+    - `tao=error`
+    - `winit=error`
+  - Mantiene el override por `RUST_LOG` para debug detallado cuando se necesite.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+
+### Impacto Golden Path
+- Sin impacto en auth, outbox, commit/push ni endpoints del server.
+
+---
+
 ## Actualización (2026-03-09) — Terminal nativa completa (PTY + xterm.js)
 
 ### Problema atendido
