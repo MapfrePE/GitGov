@@ -204,17 +204,12 @@ fn is_command_allowed(command: &str) -> bool {
         .any(|prefix| trimmed == *prefix || trimmed.starts_with(&format!("{} ", prefix)))
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CliExecutionMode {
+    #[default]
     Safe,
     Shell,
-}
-
-impl Default for CliExecutionMode {
-    fn default() -> Self {
-        Self::Safe
-    }
 }
 
 impl CliExecutionMode {
