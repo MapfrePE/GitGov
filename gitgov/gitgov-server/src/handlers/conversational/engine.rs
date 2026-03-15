@@ -331,7 +331,8 @@ async fn call_llm(
         }],
         generation_config: GeminiGenerationConfig {
             temperature: 0.2,
-            max_output_tokens: 1024,
+            // Keep responses concise to reduce tail latency under chat bursts.
+            max_output_tokens: 512,
             response_mime_type: "application/json".to_string(),
         },
     };

@@ -23,8 +23,12 @@ pub async fn create_org(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateOrgRequest>,
 ) -> impl IntoResponse {
-    if let Err(resp) = require_admin(&auth_user) {
-        return resp.into_response();
+    if !crate::auth::is_founder_global_admin(&auth_user) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "Only founder can create organizations" })),
+        )
+            .into_response();
     }
 
     // Check if org already exists — upsert_org is idempotent on (login)

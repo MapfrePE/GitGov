@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::sync::Arc;
 
+const FOUNDER_CLIENT_ID: &str = "bootstrap-admin";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthUser {
     pub client_id: String,
@@ -19,15 +21,37 @@ pub struct AuthUser {
 }
 
 #[derive(Debug, Clone)]
-pub struct AuthError(pub String);
+pub struct AuthError {
+    message: String,
+    status: StatusCode,
+    code: &'static str,
+}
+
+impl AuthError {
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: StatusCode::UNAUTHORIZED,
+            code: "UNAUTHORIZED",
+        }
+    }
+
+    fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "AUTH_BACKEND_UNAVAILABLE",
+        }
+    }
+}
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> axum::response::Response {
         (
-            StatusCode::UNAUTHORIZED,
+            self.status,
             axum::Json(serde_json::json!({
-                "error": self.0,
-                "code": "UNAUTHORIZED"
+                "error": self.message,
+                "code": self.code
             })),
         )
             .into_response()
@@ -45,13 +69,13 @@ pub async fn auth_middleware(
         .and_then(|h| h.to_str().ok())
         .ok_or_else(|| {
             metrics::counter!("gitgov_auth_total", "result" => "missing_header", "role" => "unknown").increment(1);
-            AuthError("Missing Authorization header".to_string())
+            AuthError::unauthorized("Missing Authorization header")
         })?;
 
     let token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
         metrics::counter!("gitgov_auth_total", "result" => "bad_format", "role" => "unknown")
             .increment(1);
-        AuthError("Invalid Authorization header format".to_string())
+        AuthError::unauthorized("Invalid Authorization header format")
     })?;
 
     let key_hash = format!("{:x}", sha2::Sha256::digest(token.as_bytes()));
@@ -59,12 +83,12 @@ pub async fn auth_middleware(
     let path = req.uri().path().to_string();
     let auth_validation = db.validate_api_key(&key_hash).await.map_err(|e| {
         tracing::error!("Authentication backend error: {}", e);
-        AuthError("Authentication backend unavailable".to_string())
+        AuthError::service_unavailable("Authentication backend unavailable")
     })?;
     let auth_user = auth_validation.auth.ok_or_else(|| {
         metrics::counter!("gitgov_auth_total", "result" => "invalid_key", "role" => "unknown")
             .increment(1);
-        AuthError("Invalid or expired API key".to_string())
+        AuthError::unauthorized("Invalid or expired API key")
     })?;
 
     let (client_id, role, org_id) = auth_user;
@@ -77,9 +101,8 @@ pub async fn auth_middleware(
             client_id = %client_id,
             "Blocking stale auth cache for sensitive admin endpoint"
         );
-        return Err(AuthError(
-            "Authentication temporarily unavailable for this admin endpoint; retry shortly"
-                .to_string(),
+        return Err(AuthError::service_unavailable(
+            "Authentication temporarily unavailable for this admin endpoint; retry shortly",
         ));
     }
 
@@ -106,9 +129,15 @@ fn is_sensitive_admin_path(path: &str) -> bool {
 
 pub fn require_admin(user: &AuthUser) -> Result<(), AuthError> {
     if user.role != UserRole::Admin {
-        return Err(AuthError("Admin access required".to_string()));
+        return Err(AuthError::unauthorized("Admin access required"));
     }
     Ok(())
+}
+
+pub fn is_founder_global_admin(user: &AuthUser) -> bool {
+    user.role == UserRole::Admin
+        && user.org_id.is_none()
+        && user.client_id.eq_ignore_ascii_case(FOUNDER_CLIENT_ID)
 }
 
 #[cfg(test)]
@@ -118,7 +147,7 @@ pub fn require_same_user_or_admin(user: &AuthUser, target_login: &str) -> Result
     }
 
     if user.client_id != target_login {
-        return Err(AuthError("Can only access your own data".to_string()));
+        return Err(AuthError::unauthorized("Can only access your own data"));
     }
 
     Ok(())
@@ -155,6 +184,30 @@ mod tests {
     }
 
     #[test]
+    fn founder_global_admin_detection_matches_expected_scope() {
+        assert!(is_founder_global_admin(&AuthUser {
+            client_id: "bootstrap-admin".to_string(),
+            role: UserRole::Admin,
+            org_id: None,
+        }));
+        assert!(is_founder_global_admin(&AuthUser {
+            client_id: "BOOTSTRAP-ADMIN".to_string(),
+            role: UserRole::Admin,
+            org_id: None,
+        }));
+        assert!(!is_founder_global_admin(&AuthUser {
+            client_id: "bootstrap-admin".to_string(),
+            role: UserRole::Admin,
+            org_id: Some("org-123".to_string()),
+        }));
+        assert!(!is_founder_global_admin(&AuthUser {
+            client_id: "admin1".to_string(),
+            role: UserRole::Admin,
+            org_id: None,
+        }));
+    }
+
+    #[test]
     fn require_same_user_or_admin_allows_admin_for_any_target() {
         assert!(require_same_user_or_admin(&admin_user(), "anyone").is_ok());
     }
@@ -178,5 +231,11 @@ mod tests {
         assert!(is_sensitive_admin_path("/outbox/lease/metrics"));
         assert!(!is_sensitive_admin_path("/logs"));
         assert!(!is_sensitive_admin_path("/stats"));
+    }
+
+    #[test]
+    fn auth_error_service_unavailable_maps_to_503() {
+        let response = AuthError::service_unavailable("backend down").into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

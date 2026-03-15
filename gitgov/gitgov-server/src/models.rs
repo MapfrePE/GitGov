@@ -659,6 +659,11 @@ pub enum SignalType {
     MissingTelemetry,
     PolicyViolation,
     CorrelationMismatch,
+    CommitNoTicket,
+    TicketNoCoverage,
+    PipelineFailureStreak,
+    StaleInProgress,
+    DoneNotDeployed,
 }
 
 impl SignalType {
@@ -668,6 +673,11 @@ impl SignalType {
             SignalType::MissingTelemetry => "missing_telemetry",
             SignalType::PolicyViolation => "policy_violation",
             SignalType::CorrelationMismatch => "correlation_mismatch",
+            SignalType::CommitNoTicket => "commit_no_ticket",
+            SignalType::TicketNoCoverage => "ticket_no_coverage",
+            SignalType::PipelineFailureStreak => "pipeline_failure_streak",
+            SignalType::StaleInProgress => "stale_in_progress",
+            SignalType::DoneNotDeployed => "done_not_deployed",
         }
     }
 
@@ -676,6 +686,11 @@ impl SignalType {
             "untrusted_path" => SignalType::UntrustedPath,
             "missing_telemetry" => SignalType::MissingTelemetry,
             "policy_violation" => SignalType::PolicyViolation,
+            "commit_no_ticket" => SignalType::CommitNoTicket,
+            "ticket_no_coverage" => SignalType::TicketNoCoverage,
+            "pipeline_failure_streak" => SignalType::PipelineFailureStreak,
+            "stale_in_progress" => SignalType::StaleInProgress,
+            "done_not_deployed" => SignalType::DoneNotDeployed,
             _ => SignalType::CorrelationMismatch,
         }
     }
@@ -752,6 +767,53 @@ pub struct PolicyHistory {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyChangeRequestInput {
+    pub config: GitGovConfig,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicyChangeRequestDecisionInput {
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyChangeRequestRecord {
+    pub id: String,
+    pub org_id: Option<String>,
+    pub repo_id: String,
+    pub repo_name: String,
+    pub requested_by: String,
+    pub requested_checksum: String,
+    pub requested_config: GitGovConfig,
+    pub reason: Option<String>,
+    pub status: String, // pending | approved | rejected
+    pub decided_by: Option<String>,
+    pub decision_note: Option<String>,
+    pub created_at: i64,
+    pub decided_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyChangeRequestCreateResponse {
+    pub accepted: bool,
+    pub request_id: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyChangeRequestListResponse {
+    pub requests: Vec<PolicyChangeRequestRecord>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
 // ============================================================================
 // CORRELATION CONFIG
 // ============================================================================
@@ -820,22 +882,27 @@ pub struct ExportResponse {
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ComplianceDashboard {
     pub signals: SignalStats,
     pub correlation: CorrelationStats,
     pub policy: PolicyStats,
     pub exports: ExportStats,
+    pub timeline: Vec<ComplianceTimelinePoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct SignalStats {
     pub total: i64,
     pub pending: i64,
     pub high_confidence: i64,
+    #[serde(default)]
     pub by_type: HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct CorrelationStats {
     pub github_pushes_24h: i64,
     pub client_pushes_24h: i64,
@@ -843,6 +910,7 @@ pub struct CorrelationStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct PolicyStats {
     pub repos_with_policy: i64,
     pub total_repos: i64,
@@ -850,9 +918,23 @@ pub struct PolicyStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ExportStats {
     pub total: i64,
     pub last_7_days: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ComplianceTimelinePoint {
+    pub month: String,
+    pub signals_detected: i64,
+    pub violations_confirmed: i64,
+    pub commits_total: i64,
+    pub commits_with_ticket: i64,
+    pub ticket_coverage_pct: f64,
+    pub pipeline_runs_total: i64,
+    pub pipeline_success_pct: f64,
 }
 
 // ============================================================================
@@ -1231,6 +1313,45 @@ pub struct TicketCoverageQuery {
     pub branch: Option<String>,
     #[serde(default)]
     pub hours: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CorrelationV2Query {
+    #[serde(default)]
+    pub org_name: Option<String>,
+    #[serde(default)]
+    pub repo_full_name: Option<String>,
+    #[serde(default)]
+    pub ticket_id: Option<String>,
+    #[serde(default)]
+    pub hours: Option<i64>,
+    #[serde(default)]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketFlowCorrelation {
+    pub ticket_id: String,
+    pub ticket_status: Option<String>,
+    pub correlation_source: Option<String>,
+    pub correlation_confidence: Option<f64>,
+    pub commit_sha: String,
+    pub branch: Option<String>,
+    pub user_login: Option<String>,
+    pub repo_name: Option<String>,
+    pub commit_created_at: Option<i64>,
+    pub pipeline: Option<CommitPipelineRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CorrelationV2Response {
+    #[serde(default)]
+    pub items: Vec<TicketFlowCorrelation>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
 }
 
 pub const RELEVANT_AUDIT_ACTIONS: &[&str] = &[
@@ -1837,6 +1958,11 @@ mod tests {
             SignalType::MissingTelemetry,
             SignalType::PolicyViolation,
             SignalType::CorrelationMismatch,
+            SignalType::CommitNoTicket,
+            SignalType::TicketNoCoverage,
+            SignalType::PipelineFailureStreak,
+            SignalType::StaleInProgress,
+            SignalType::DoneNotDeployed,
         ];
         for t in &types {
             assert_eq!(&SignalType::from_str(t.as_str()), t);
@@ -1889,6 +2015,36 @@ mod tests {
         assert!(!resp.allowed);
         assert!(resp.reasons.is_empty());
         assert!(resp.warnings.is_empty());
+    }
+
+    #[test]
+    fn compliance_dashboard_deserialize_missing_timeline_defaults() {
+        let payload = serde_json::json!({
+            "signals": {
+                "total": 1,
+                "pending": 1,
+                "high_confidence": 0,
+                "by_type": {"commit_no_ticket": 1}
+            },
+            "correlation": {
+                "github_pushes_24h": 3,
+                "client_pushes_24h": 3,
+                "correlation_rate": 1.0
+            },
+            "policy": {
+                "repos_with_policy": 1,
+                "total_repos": 2,
+                "recent_changes": 1
+            },
+            "exports": {
+                "total": 2,
+                "last_7_days": 1
+            }
+        });
+
+        let parsed: ComplianceDashboard =
+            serde_json::from_value(payload).expect("deserialize compliance dashboard");
+        assert!(parsed.timeline.is_empty());
     }
 
     #[test]
@@ -2129,6 +2285,50 @@ pub struct CliCommandRecord {
     pub branch: String,
     pub repo_name: Option<String>,
     pub exit_code: Option<i32>,
+    pub duration_ms: Option<i64>,
+    pub metadata: serde_json::Value,
+    pub created_at: i64,
+}
+
+// ============================================================================
+// POLICY DRIFT AUDIT — dedicated audit trail for policy sync/push/drift snapshot
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyDriftEventInput {
+    /// "sync_local" | "push_local" | "drift_snapshot"
+    pub action: String,
+    pub repo_name: String,
+    /// "success" | "failed" | "observed"
+    pub result: String,
+    #[serde(default)]
+    pub before_checksum: Option<String>,
+    #[serde(default)]
+    pub after_checksum: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyDriftEventResponse {
+    pub accepted: bool,
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyDriftEventRecord {
+    pub id: String,
+    pub org_id: Option<String>,
+    pub user_login: String,
+    pub action: String,
+    pub repo_name: String,
+    pub result: String,
+    pub before_checksum: Option<String>,
+    pub after_checksum: Option<String>,
     pub duration_ms: Option<i64>,
     pub metadata: serde_json::Value,
     pub created_at: i64,

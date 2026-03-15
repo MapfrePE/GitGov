@@ -684,3 +684,54 @@ pub async fn get_jenkins_commit_correlations(
     }
 }
 
+pub async fn get_correlation_v2(
+    Extension(auth_user): Extension<AuthUser>,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CorrelationV2Query>,
+) -> impl IntoResponse {
+    if require_admin(&auth_user).is_err() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(CorrelationV2Response::default()),
+        );
+    }
+
+    let limit = if query.limit == 0 {
+        50
+    } else {
+        query.limit.min(500)
+    };
+    let offset = query.offset;
+
+    let filter = CorrelationV2Query {
+        ticket_id: query
+            .ticket_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_uppercase()),
+        limit,
+        offset,
+        ..query
+    };
+
+    match state.db.get_ticket_flow_correlations_v2(&filter).await {
+        Ok((items, total)) => (
+            StatusCode::OK,
+            Json(CorrelationV2Response {
+                items,
+                total,
+                limit: limit as i64,
+                offset: offset as i64,
+            }),
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get correlation v2 view");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(CorrelationV2Response::default()),
+            )
+        }
+    }
+}
+

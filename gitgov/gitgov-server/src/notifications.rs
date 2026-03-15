@@ -40,3 +40,20 @@ pub fn format_signal_confirmed_alert(signal_type: &str, actor: &str, repo: Optio
         repo_part = repo_part
     )
 }
+
+pub fn format_critical_policy_drift_alert(
+    actor: &str,
+    repo: &str,
+    drift_count: i64,
+    critical_count: i64,
+) -> String {
+    format!(
+        ":rotating_light: *Policy Drift Crítico* — `{actor}` detectó drift crítico en `{repo}`. \
+         Drift total: `{drift_count}` | Drift crítico: `{critical_count}`. \
+         Revisar y resolver desde Pipeline Drift Detection (sync/push policy).",
+        actor = actor,
+        repo = repo,
+        drift_count = drift_count,
+        critical_count = critical_count
+    )
+}

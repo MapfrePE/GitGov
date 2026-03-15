@@ -123,6 +123,18 @@ pub struct CreateOrgInvitationInput<'a> {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+pub struct CreatePolicyChangeRequestInput<'a> {
+    pub request_id: &'a str,
+    pub org_id: Option<&'a str>,
+    pub repo_id: &'a str,
+    pub repo_name: &'a str,
+    pub requested_by: &'a str,
+    pub requested_config: &'a GitGovConfig,
+    pub requested_checksum: &'a str,
+    pub reason: Option<&'a str>,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct AcceptedOrgInvitation {
     pub invitation: OrgInvitation,
@@ -436,6 +448,24 @@ impl Database {
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
         Ok(result.rows_affected())
+    }
+
+    pub async fn publish_sse_notification(
+        &self,
+        channel: &str,
+        payload: &str,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            r#"
+            SELECT pg_notify($1::text, $2::text)
+            "#,
+        )
+        .bind(channel)
+        .bind(payload)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        Ok(())
     }
 
     pub async fn check_distributed_rate_limit(
@@ -1017,12 +1047,6 @@ impl Database {
             event: &'a ClientEvent,
         }
 
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
-
         let mut accepted = Vec::new();
         let mut duplicates = Vec::new();
         let mut errors = Vec::new();
@@ -1150,15 +1174,11 @@ impl Database {
 
             let inserted_event_uuids = match query_builder
                 .build_query_scalar::<String>()
-                .fetch_all(&mut *tx)
+                .fetch_all(&self.pool)
                 .await
             {
                 Ok(rows) => rows,
-                Err(e) => {
-                    // Abort fast so caller can retry with per-row path preserving legacy behavior.
-                    let _ = tx.rollback().await;
-                    return Err(DbError::DatabaseError(e.to_string()));
-                }
+                Err(e) => return Err(DbError::DatabaseError(e.to_string())),
             };
 
             let inserted_set: HashSet<&str> =
@@ -1171,10 +1191,6 @@ impl Database {
                 }
             }
         }
-
-        tx.commit()
-            .await
-            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
         Ok(ClientEventResponse {
             accepted,
@@ -1378,7 +1394,77 @@ impl Database {
             .before_created_at
             .and_then(chrono::DateTime::from_timestamp_millis);
 
-        let result = sqlx::query(
+        // Fast path: skip the expensive UNION ALL with github_events when
+        // the caller does not explicitly request source='github'.
+        let use_client_only_fast_path =
+            filter.source.as_deref() != Some("github");
+
+        let result = if use_client_only_fast_path {
+            sqlx::query(
+                r#"
+                SELECT
+                    c.id::TEXT AS id,
+                    'client'::TEXT AS source,
+                    c.event_type,
+                    c.created_at,
+                    COALESCE(ica.canonical_login, c.user_login) AS user_login,
+                    r.full_name AS repo_name,
+                    c.branch,
+                    c.status,
+                    jsonb_strip_nulls(
+                        jsonb_build_object(
+                            'reason', c.reason,
+                            'files', c.files,
+                            'event_uuid', c.event_uuid,
+                            'commit_sha', c.commit_sha,
+                            'user_name', c.user_name
+                        )
+                        || CASE
+                            WHEN jsonb_typeof(COALESCE(c.metadata, '{}'::jsonb)) = 'object'
+                                THEN COALESCE(c.metadata, '{}'::jsonb)
+                            ELSE jsonb_build_object('metadata', COALESCE(c.metadata, 'null'::jsonb))
+                        END
+                    ) AS details
+                FROM client_events c
+                LEFT JOIN repos r ON c.repo_id = r.id
+                LEFT JOIN identity_aliases ica
+                  ON ica.alias_login = c.user_login
+                 AND ($1::uuid IS NULL OR ica.org_id = $1::uuid)
+                WHERE ($1::uuid IS NULL OR c.org_id = $1::uuid)
+                  AND ($2::uuid IS NULL OR c.repo_id = $2::uuid)
+                  AND ($4::text IS NULL OR c.event_type = $4)
+                  AND ($5::text IS NULL OR c.user_login = $5 OR COALESCE(ica.canonical_login, c.user_login) = $5)
+                  AND ($6::text IS NULL OR c.branch = $6)
+                  AND ($7::timestamptz IS NULL OR c.created_at >= $7)
+                  AND ($8::timestamptz IS NULL OR c.created_at <= $8)
+                  AND ($9::text IS NULL OR c.status = $9)
+                  AND (
+                      $12::timestamptz IS NULL
+                      OR c.created_at < $12
+                      OR ($13::text IS NOT NULL AND c.created_at = $12 AND c.id::text < $13::text)
+                  )
+                ORDER BY c.created_at DESC, c.id DESC
+                LIMIT $10 OFFSET $11
+                "#
+            )
+            .bind(&org_id)          // $1
+            .bind(&repo_id)         // $2
+            .bind(&filter.source)   // $3 (unused in fast path but keeps bind order)
+            .bind(&filter.event_type) // $4
+            .bind(&filter.user_login) // $5
+            .bind(&filter.branch)   // $6
+            .bind(start_date)       // $7
+            .bind(end_date)         // $8
+            .bind(&filter.status)   // $9
+            .bind(limit)            // $10
+            .bind(offset)           // $11
+            .bind(before_created_at) // $12
+            .bind(&filter.before_id) // $13
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?
+        } else {
+            sqlx::query(
             r#"
             SELECT id, source, event_type, created_at, user_login, repo_name, branch, status, details
             FROM (
@@ -1474,7 +1560,8 @@ impl Database {
         .bind(&filter.before_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?
+        };
 
         let events: Vec<CombinedEvent> = result
             .iter()
@@ -1516,6 +1603,159 @@ impl Database {
             ..filter.clone()
         };
         self.get_combined_events(&export_filter).await
+    }
+
+    /// Export helper for policy drift audit events.
+    /// Applies the same date/user/repo/org scoping model used in compliance exports.
+    pub async fn get_policy_drift_events_for_export(
+        &self,
+        filter: &EventFilter,
+    ) -> Result<Vec<crate::models::PolicyDriftEventRecord>, DbError> {
+        let limit = if filter.limit == 0 {
+            50_000_i64
+        } else {
+            (filter.limit.min(50_000)) as i64
+        };
+        let start_date = filter
+            .start_date
+            .and_then(chrono::DateTime::from_timestamp_millis);
+        let end_date = filter
+            .end_date
+            .and_then(chrono::DateTime::from_timestamp_millis);
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id::text,
+                org_id::text,
+                user_login,
+                action,
+                repo_name,
+                result,
+                before_checksum,
+                after_checksum,
+                duration_ms,
+                COALESCE(metadata, '{}'::jsonb) AS metadata,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms
+            FROM policy_drift_events
+            WHERE ($1::uuid IS NULL OR org_id = $1::uuid)
+              AND ($2::text IS NULL OR user_login = $2)
+              AND ($3::text IS NULL OR repo_name = $3)
+              AND ($4::timestamptz IS NULL OR created_at >= $4)
+              AND ($5::timestamptz IS NULL OR created_at <= $5)
+            ORDER BY created_at DESC
+            LIMIT $6
+            "#,
+        )
+        .bind(filter.org_id.as_deref())
+        .bind(filter.user_login.as_deref())
+        .bind(filter.repo_full_name.as_deref())
+        .bind(start_date)
+        .bind(end_date)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let records = rows
+            .iter()
+            .map(|row| crate::models::PolicyDriftEventRecord {
+                id: row.get("id"),
+                org_id: row.get("org_id"),
+                user_login: row.get("user_login"),
+                action: row.get("action"),
+                repo_name: row.get("repo_name"),
+                result: row.get("result"),
+                before_checksum: row.get("before_checksum"),
+                after_checksum: row.get("after_checksum"),
+                duration_ms: row.get("duration_ms"),
+                metadata: row.get("metadata"),
+                created_at: row.get("created_at_ms"),
+            })
+            .collect();
+
+        Ok(records)
+    }
+
+    /// Export helper for policy change requests (request/approve/reject workflow).
+    /// Applies date/user/repo/org scoping compatible with compliance exports.
+    pub async fn get_policy_change_requests_for_export(
+        &self,
+        filter: &EventFilter,
+    ) -> Result<Vec<crate::models::PolicyChangeRequestRecord>, DbError> {
+        let limit = if filter.limit == 0 {
+            50_000_i64
+        } else {
+            (filter.limit.min(50_000)) as i64
+        };
+        let start_date = filter
+            .start_date
+            .and_then(chrono::DateTime::from_timestamp_millis);
+        let end_date = filter
+            .end_date
+            .and_then(chrono::DateTime::from_timestamp_millis);
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                r.id::text AS id,
+                r.org_id::text AS org_id,
+                r.repo_id::text AS repo_id,
+                r.repo_name AS repo_name,
+                r.requested_by AS requested_by,
+                r.requested_checksum AS requested_checksum,
+                COALESCE(r.requested_config, '{}'::jsonb) AS requested_config,
+                r.reason AS reason,
+                COALESCE(d.decision, 'pending') AS status,
+                d.decided_by AS decided_by,
+                d.note AS decision_note,
+                EXTRACT(EPOCH FROM r.created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM d.created_at)::bigint * 1000 AS decided_at_ms
+            FROM policy_change_requests r
+            LEFT JOIN policy_change_request_decisions d
+              ON d.request_id = r.id
+            WHERE ($1::uuid IS NULL OR r.org_id = $1::uuid)
+              AND ($2::text IS NULL OR r.requested_by = $2)
+              AND ($3::text IS NULL OR r.repo_name = $3)
+              AND ($4::timestamptz IS NULL OR r.created_at >= $4)
+              AND ($5::timestamptz IS NULL OR r.created_at <= $5)
+            ORDER BY r.created_at DESC
+            LIMIT $6
+            "#,
+        )
+        .bind(filter.org_id.as_deref())
+        .bind(filter.user_login.as_deref())
+        .bind(filter.repo_full_name.as_deref())
+        .bind(start_date)
+        .bind(end_date)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let records = rows
+            .iter()
+            .map(|row| {
+                let config: serde_json::Value = row.get("requested_config");
+                crate::models::PolicyChangeRequestRecord {
+                    id: row.get("id"),
+                    org_id: row.get("org_id"),
+                    repo_id: row.get("repo_id"),
+                    repo_name: row.get("repo_name"),
+                    requested_by: row.get("requested_by"),
+                    requested_checksum: row.get("requested_checksum"),
+                    requested_config: serde_json::from_value(config).unwrap_or_default(),
+                    reason: row.get("reason"),
+                    status: row.get("status"),
+                    decided_by: row.get("decided_by"),
+                    decision_note: row.get("decision_note"),
+                    created_at: row.get("created_at_ms"),
+                    decided_at: row.get("decided_at_ms"),
+                }
+            })
+            .collect();
+
+        Ok(records)
     }
 
     pub async fn list_export_logs(&self, org_id: Option<&str>) -> Result<Vec<ExportLog>, DbError> {
@@ -1837,7 +2077,8 @@ impl Database {
         commit_sha: Option<&str>,
         branch: Option<&str>,
     ) -> Result<bool, DbError> {
-        self.append_project_ticket_relations_full(ticket_id, commit_sha, branch, None).await
+        self.append_project_ticket_relations_full(ticket_id, commit_sha, branch, None)
+            .await
     }
 
     pub async fn append_project_ticket_relations_full(
@@ -2304,6 +2545,188 @@ impl Database {
             .collect();
 
         Ok(correlations)
+    }
+
+    pub async fn get_ticket_flow_correlations_v2(
+        &self,
+        filter: &CorrelationV2Query,
+    ) -> Result<(Vec<TicketFlowCorrelation>, i64), DbError> {
+        let limit = if filter.limit == 0 {
+            50
+        } else {
+            filter.limit.min(500)
+        } as i64;
+        let offset = filter.offset as i64;
+        let hours = filter.hours.unwrap_or(24 * 7).clamp(1, 24 * 90);
+
+        let org_id = if let Some(org_name) = filter.org_name.as_deref() {
+            self.get_org_by_login(org_name).await?.map(|o| o.id)
+        } else {
+            None
+        };
+        let repo_id = if let Some(repo_full_name) = filter.repo_full_name.as_deref() {
+            self.get_repo_by_full_name(repo_full_name)
+                .await?
+                .map(|r| r.id)
+        } else {
+            None
+        };
+        let ticket_id = filter
+            .ticket_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_uppercase());
+
+        if filter.org_name.is_some() && org_id.is_none() {
+            return Ok((vec![], 0));
+        }
+        if filter.repo_full_name.is_some() && repo_id.is_none() {
+            return Ok((vec![], 0));
+        }
+
+        let count_row = sqlx::query(
+            r#"
+            WITH base AS (
+                SELECT
+                    ct.ticket_id,
+                    ct.commit_sha,
+                    COALESCE(c.created_at, ct.created_at) AS ordering_ts
+                FROM commit_ticket_correlations ct
+                LEFT JOIN project_tickets pt
+                  ON pt.ticket_id = ct.ticket_id
+                 AND (ct.org_id IS NULL OR pt.org_id = ct.org_id)
+                LEFT JOIN LATERAL (
+                    SELECT c.created_at, c.repo_id
+                    FROM client_events c
+                    WHERE c.event_type = 'commit'
+                      AND c.commit_sha = ct.commit_sha
+                    ORDER BY c.created_at DESC
+                    LIMIT 1
+                ) c ON TRUE
+                WHERE ($1::uuid IS NULL OR ct.org_id = $1::uuid OR pt.org_id = $1::uuid)
+                  AND ($2::uuid IS NULL OR c.repo_id = $2::uuid)
+                  AND ($3::text IS NULL OR ct.ticket_id = $3)
+                  AND COALESCE(c.created_at, ct.created_at) >= NOW() - make_interval(hours => $4::int)
+            )
+            SELECT COUNT(*)::bigint AS total
+            FROM base
+            "#,
+        )
+        .bind(&org_id)
+        .bind(&repo_id)
+        .bind(&ticket_id)
+        .bind(hours as i32)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let total: i64 = count_row.get("total");
+        if total == 0 {
+            return Ok((vec![], 0));
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                ct.ticket_id,
+                pt.status AS ticket_status,
+                ct.correlation_source,
+                ct.confidence AS correlation_confidence,
+                ct.commit_sha,
+                c.branch,
+                c.user_login,
+                r.full_name AS repo_name,
+                CASE
+                    WHEN c.created_at IS NULL THEN NULL
+                    ELSE EXTRACT(EPOCH FROM c.created_at)::bigint * 1000
+                END AS commit_created_at_ms,
+                p.id::text AS pipeline_event_id,
+                p.pipeline_id,
+                p.job_name,
+                p.status AS pipeline_status,
+                p.duration_ms AS pipeline_duration_ms,
+                p.triggered_by,
+                CASE
+                    WHEN p.ingested_at IS NULL THEN NULL
+                    ELSE EXTRACT(EPOCH FROM p.ingested_at)::bigint * 1000
+                END AS pipeline_ingested_at_ms
+            FROM commit_ticket_correlations ct
+            LEFT JOIN project_tickets pt
+              ON pt.ticket_id = ct.ticket_id
+             AND (ct.org_id IS NULL OR pt.org_id = ct.org_id)
+            LEFT JOIN LATERAL (
+                SELECT c.branch, c.user_login, c.repo_id, c.created_at
+                FROM client_events c
+                WHERE c.event_type = 'commit'
+                  AND c.commit_sha = ct.commit_sha
+                ORDER BY c.created_at DESC
+                LIMIT 1
+            ) c ON TRUE
+            LEFT JOIN repos r ON r.id = c.repo_id
+            LEFT JOIN LATERAL (
+                SELECT pe.*
+                FROM pipeline_events pe
+                WHERE pe.commit_sha IS NOT NULL
+                  AND (
+                    pe.commit_sha = ct.commit_sha
+                    OR pe.commit_sha LIKE ct.commit_sha || '%'
+                    OR ct.commit_sha LIKE pe.commit_sha || '%'
+                  )
+                ORDER BY pe.ingested_at DESC
+                LIMIT 1
+            ) p ON TRUE
+            WHERE ($1::uuid IS NULL OR ct.org_id = $1::uuid OR pt.org_id = $1::uuid)
+              AND ($2::uuid IS NULL OR c.repo_id = $2::uuid)
+              AND ($3::text IS NULL OR ct.ticket_id = $3)
+              AND COALESCE(c.created_at, ct.created_at) >= NOW() - make_interval(hours => $4::int)
+            ORDER BY COALESCE(c.created_at, ct.created_at) DESC, ct.ticket_id, ct.commit_sha
+            LIMIT $5 OFFSET $6
+            "#,
+        )
+        .bind(&org_id)
+        .bind(&repo_id)
+        .bind(&ticket_id)
+        .bind(hours as i32)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let items = rows
+            .into_iter()
+            .map(|row| {
+                let pipeline =
+                    row.get::<Option<String>, _>("pipeline_event_id")
+                        .map(|pipeline_event_id| CommitPipelineRun {
+                            pipeline_event_id,
+                            pipeline_id: row.get("pipeline_id"),
+                            job_name: row.get("job_name"),
+                            status: row.get("pipeline_status"),
+                            duration_ms: row.get("pipeline_duration_ms"),
+                            triggered_by: row.get("triggered_by"),
+                            ingested_at: row
+                                .get::<Option<i64>, _>("pipeline_ingested_at_ms")
+                                .unwrap_or_default(),
+                        });
+
+                TicketFlowCorrelation {
+                    ticket_id: row.get("ticket_id"),
+                    ticket_status: row.get("ticket_status"),
+                    correlation_source: row.get("correlation_source"),
+                    correlation_confidence: row.get("correlation_confidence"),
+                    commit_sha: row.get("commit_sha"),
+                    branch: row.get("branch"),
+                    user_login: row.get("user_login"),
+                    repo_name: row.get("repo_name"),
+                    commit_created_at: row.get("commit_created_at_ms"),
+                    pipeline,
+                }
+            })
+            .collect();
+
+        Ok((items, total))
     }
 
     pub async fn get_pipeline_health_stats(
@@ -3439,19 +3862,774 @@ impl Database {
         Ok(violation_id)
     }
 
-    pub async fn detect_noncompliance_signals(&self, org_id: &str) -> Result<i64, DbError> {
-        let result = sqlx::query("SELECT detect_noncompliance_signals($1::uuid) as count")
-            .bind(org_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+    async fn detect_v2_commit_no_ticket_signals(
+        &self,
+        org_id: &str,
+        hours: i64,
+    ) -> Result<i64, DbError> {
+        let result = sqlx::query(
+            r#"
+            WITH latest_commits AS (
+                SELECT DISTINCT ON (c.commit_sha)
+                    c.id,
+                    c.org_id,
+                    c.repo_id,
+                    c.user_login,
+                    c.branch,
+                    c.commit_sha,
+                    c.created_at,
+                    COALESCE(r.full_name, c.metadata->>'repo_name') AS repo_name
+                FROM client_events c
+                LEFT JOIN repos r ON r.id = c.repo_id
+                WHERE c.org_id = $1::uuid
+                  AND c.event_type = 'commit'
+                  AND c.commit_sha IS NOT NULL
+                  AND c.commit_sha <> ''
+                  AND c.created_at >= NOW() - make_interval(hours => $2::int)
+                ORDER BY c.commit_sha, c.created_at DESC
+            ),
+            candidates AS (
+                SELECT lc.*
+                FROM latest_commits lc
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM commit_ticket_correlations ct
+                    WHERE ct.commit_sha = lc.commit_sha
+                      AND (ct.org_id = lc.org_id OR ct.org_id IS NULL)
+                )
+                  AND (
+                    lc.branch IN ('main', 'master')
+                    OR EXISTS (
+                        SELECT 1
+                        FROM policies p
+                        WHERE p.repo_id = lc.repo_id
+                          AND jsonb_typeof(p.config->'branches'->'protected') = 'array'
+                          AND (p.config->'branches'->'protected') ? lc.branch
+                    )
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM noncompliance_signals ns
+                    WHERE ns.org_id = lc.org_id
+                      AND ns.signal_type = 'commit_no_ticket'
+                      AND ns.commit_sha = lc.commit_sha
+                  )
+            )
+            INSERT INTO noncompliance_signals (
+                org_id,
+                repo_id,
+                client_event_id,
+                signal_type,
+                confidence,
+                actor_login,
+                branch,
+                commit_sha,
+                evidence,
+                context
+            )
+            SELECT
+                c.org_id,
+                c.repo_id,
+                c.id,
+                'commit_no_ticket',
+                'medium',
+                c.user_login,
+                c.branch,
+                c.commit_sha,
+                jsonb_build_object(
+                    'reason', 'Commit on protected branch without linked ticket',
+                    'repo_name', c.repo_name,
+                    'commit_created_at', EXTRACT(EPOCH FROM c.created_at)::bigint * 1000
+                ),
+                jsonb_build_object(
+                    'detection_window_hours', $2::int,
+                    'source', 'v2_minimal'
+                )
+            FROM candidates c
+            "#,
+        )
+        .bind(org_id)
+        .bind(hours as i32)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
-        Ok(result.get("count"))
+        Ok(result.rows_affected() as i64)
+    }
+
+    async fn detect_v2_ticket_no_coverage_signals(
+        &self,
+        org_id: &str,
+        hours: i64,
+    ) -> Result<i64, DbError> {
+        let result = sqlx::query(
+            r#"
+            WITH candidates AS (
+                SELECT
+                    pt.org_id,
+                    pt.ticket_id,
+                    pt.status,
+                    pt.title,
+                    pt.priority,
+                    pt.ticket_type,
+                    pt.assignee,
+                    pt.reporter,
+                    COALESCE(pt.updated_at, pt.ingested_at) AS ticket_updated_at
+                FROM project_tickets pt
+                WHERE pt.org_id = $1::uuid
+                  AND COALESCE(pt.updated_at, pt.ingested_at)
+                      >= NOW() - make_interval(hours => $2::int)
+                  AND (
+                    lower(COALESCE(pt.status, '')) IN ('done', 'closed', 'resolved')
+                    OR lower(COALESCE(pt.status, '')) LIKE '%done%'
+                    OR lower(COALESCE(pt.status, '')) LIKE '%closed%'
+                    OR lower(COALESCE(pt.status, '')) LIKE '%resolved%'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM commit_ticket_correlations ct
+                    WHERE ct.ticket_id = pt.ticket_id
+                      AND ct.org_id = pt.org_id
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM noncompliance_signals ns
+                    WHERE ns.org_id = pt.org_id
+                      AND ns.signal_type = 'ticket_no_coverage'
+                      AND ns.evidence->>'ticket_id' = pt.ticket_id
+                  )
+            )
+            INSERT INTO noncompliance_signals (
+                org_id,
+                signal_type,
+                confidence,
+                actor_login,
+                evidence,
+                context
+            )
+            SELECT
+                c.org_id,
+                'ticket_no_coverage',
+                'high',
+                COALESCE(NULLIF(c.assignee, ''), NULLIF(c.reporter, ''), 'system'),
+                jsonb_build_object(
+                    'ticket_id', c.ticket_id,
+                    'ticket_status', c.status,
+                    'ticket_updated_at', CASE
+                        WHEN c.ticket_updated_at IS NULL THEN NULL
+                        ELSE EXTRACT(EPOCH FROM c.ticket_updated_at)::bigint * 1000
+                    END,
+                    'reason', 'Done ticket without correlated commits'
+                ),
+                jsonb_build_object(
+                    'title', c.title,
+                    'priority', c.priority,
+                    'ticket_type', c.ticket_type,
+                    'detection_window_hours', $2::int,
+                    'source', 'v2_minimal'
+                )
+            FROM candidates c
+            "#,
+        )
+        .bind(org_id)
+        .bind(hours as i32)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(result.rows_affected() as i64)
+    }
+
+    async fn detect_v2_pipeline_failure_streak_signals(
+        &self,
+        org_id: &str,
+        hours: i64,
+        streak_size: i32,
+    ) -> Result<i64, DbError> {
+        let result = sqlx::query(
+            r#"
+            WITH ranked AS (
+                SELECT
+                    pe.org_id,
+                    COALESCE(NULLIF(pe.repo_full_name, ''), '__unknown_repo__') AS repo_name_key,
+                    COALESCE(NULLIF(pe.branch, ''), '__unknown_branch__') AS branch_key,
+                    pe.status,
+                    pe.job_name,
+                    pe.triggered_by,
+                    pe.id::text AS pipeline_event_id,
+                    pe.ingested_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            COALESCE(NULLIF(pe.repo_full_name, ''), '__unknown_repo__'),
+                            COALESCE(NULLIF(pe.branch, ''), '__unknown_branch__')
+                        ORDER BY pe.ingested_at DESC, pe.id DESC
+                    ) AS rn
+                FROM pipeline_events pe
+                WHERE pe.org_id = $1::uuid
+                  AND pe.ingested_at >= NOW() - make_interval(hours => $2::int)
+            ),
+            streaks AS (
+                SELECT
+                    r.org_id,
+                    r.repo_name_key,
+                    r.branch_key,
+                    MAX(r.ingested_at) AS latest_ingested_at,
+                    (array_agg(r.pipeline_event_id ORDER BY r.ingested_at DESC, r.pipeline_event_id DESC))[1] AS latest_pipeline_event_id,
+                    (array_agg(r.job_name ORDER BY r.ingested_at DESC, r.pipeline_event_id DESC))[1] AS latest_job_name,
+                    COALESCE(
+                        (array_agg(NULLIF(r.triggered_by, '') ORDER BY r.ingested_at DESC, r.pipeline_event_id DESC))[1],
+                        'system'
+                    ) AS actor_login,
+                    array_agg(r.status ORDER BY r.ingested_at DESC, r.pipeline_event_id DESC) AS recent_statuses,
+                    COUNT(*)::int AS sample_size
+                FROM ranked r
+                WHERE r.rn <= $3::int
+                GROUP BY r.org_id, r.repo_name_key, r.branch_key
+                HAVING COUNT(*) = $3::int
+                   AND BOOL_AND(lower(COALESCE(r.status, '')) IN ('failure', 'aborted', 'unstable'))
+            ),
+            candidates AS (
+                SELECT s.*
+                FROM streaks s
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM noncompliance_signals ns
+                    WHERE ns.org_id = s.org_id
+                      AND ns.signal_type = 'pipeline_failure_streak'
+                      AND COALESCE(ns.evidence->>'repo_name', '__unknown_repo__') = s.repo_name_key
+                      AND COALESCE(ns.evidence->>'branch', '__unknown_branch__') = s.branch_key
+                      AND ns.evidence->>'latest_pipeline_event_id' = s.latest_pipeline_event_id
+                )
+            )
+            INSERT INTO noncompliance_signals (
+                org_id,
+                signal_type,
+                confidence,
+                actor_login,
+                branch,
+                evidence,
+                context
+            )
+            SELECT
+                c.org_id,
+                'pipeline_failure_streak',
+                'high',
+                c.actor_login,
+                NULLIF(c.branch_key, '__unknown_branch__'),
+                jsonb_build_object(
+                    'repo_name', NULLIF(c.repo_name_key, '__unknown_repo__'),
+                    'branch', NULLIF(c.branch_key, '__unknown_branch__'),
+                    'latest_pipeline_event_id', c.latest_pipeline_event_id,
+                    'latest_job_name', c.latest_job_name,
+                    'recent_statuses', c.recent_statuses,
+                    'sample_size', c.sample_size,
+                    'latest_ingested_at', EXTRACT(EPOCH FROM c.latest_ingested_at)::bigint * 1000,
+                    'reason', 'Three or more consecutive failing pipelines on the same branch'
+                ),
+                jsonb_build_object(
+                    'detection_window_hours', $2::int,
+                    'streak_size', $3::int,
+                    'source', 'v2_advanced'
+                )
+            FROM candidates c
+            "#,
+        )
+        .bind(org_id)
+        .bind(hours as i32)
+        .bind(streak_size)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(result.rows_affected() as i64)
+    }
+
+    async fn detect_v2_stale_in_progress_signals(
+        &self,
+        org_id: &str,
+        hours: i64,
+        stale_days: i32,
+    ) -> Result<i64, DbError> {
+        let result = sqlx::query(
+            r#"
+            WITH ticket_activity AS (
+                SELECT
+                    pt.org_id,
+                    pt.ticket_id,
+                    pt.status,
+                    pt.title,
+                    pt.priority,
+                    pt.ticket_type,
+                    pt.assignee,
+                    pt.reporter,
+                    COALESCE(pt.updated_at, pt.ingested_at) AS ticket_updated_at,
+                    corr.last_commit_at,
+                    COALESCE(corr.commit_links, 0)::bigint AS commit_links,
+                    CASE
+                        WHEN corr.last_commit_at IS NULL THEN ''
+                        ELSE (EXTRACT(EPOCH FROM corr.last_commit_at)::bigint * 1000)::text
+                    END AS last_commit_at_ms_text
+                FROM project_tickets pt
+                LEFT JOIN LATERAL (
+                    SELECT
+                        MAX(c.created_at) AS last_commit_at,
+                        COUNT(*) AS commit_links
+                    FROM commit_ticket_correlations ct
+                    LEFT JOIN client_events c
+                      ON c.commit_sha = ct.commit_sha
+                     AND c.event_type = 'commit'
+                     AND (c.org_id = pt.org_id OR c.org_id IS NULL)
+                    WHERE ct.ticket_id = pt.ticket_id
+                      AND (ct.org_id = pt.org_id OR ct.org_id IS NULL)
+                ) corr ON TRUE
+                WHERE pt.org_id = $1::uuid
+                  AND COALESCE(pt.updated_at, pt.ingested_at) >= NOW() - make_interval(hours => $2::int)
+                  AND (
+                    lower(COALESCE(pt.status, '')) IN (
+                        'in progress', 'in_progress', 'doing', 'open', 'todo', 'to do', 'in review'
+                    )
+                    OR lower(COALESCE(pt.status, '')) LIKE '%progress%'
+                    OR lower(COALESCE(pt.status, '')) LIKE '%doing%'
+                    OR lower(COALESCE(pt.status, '')) LIKE '%review%'
+                  )
+            ),
+            candidates AS (
+                SELECT ta.*
+                FROM ticket_activity ta
+                WHERE (
+                        ta.last_commit_at IS NULL
+                        OR ta.last_commit_at < NOW() - make_interval(days => $3::int)
+                      )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM noncompliance_signals ns
+                    WHERE ns.org_id = ta.org_id
+                      AND ns.signal_type = 'stale_in_progress'
+                      AND ns.evidence->>'ticket_id' = ta.ticket_id
+                      AND COALESCE(ns.evidence->>'last_commit_at', '') = ta.last_commit_at_ms_text
+                  )
+            )
+            INSERT INTO noncompliance_signals (
+                org_id,
+                signal_type,
+                confidence,
+                actor_login,
+                evidence,
+                context
+            )
+            SELECT
+                c.org_id,
+                'stale_in_progress',
+                'medium',
+                COALESCE(NULLIF(c.assignee, ''), NULLIF(c.reporter, ''), 'system'),
+                jsonb_build_object(
+                    'ticket_id', c.ticket_id,
+                    'ticket_status', c.status,
+                    'ticket_updated_at', CASE
+                        WHEN c.ticket_updated_at IS NULL THEN NULL
+                        ELSE EXTRACT(EPOCH FROM c.ticket_updated_at)::bigint * 1000
+                    END,
+                    'last_commit_at', CASE
+                        WHEN c.last_commit_at IS NULL THEN NULL
+                        ELSE EXTRACT(EPOCH FROM c.last_commit_at)::bigint * 1000
+                    END,
+                    'correlated_commit_count', c.commit_links,
+                    'reason', 'Ticket in progress without recent commit activity'
+                ),
+                jsonb_build_object(
+                    'detection_window_hours', $2::int,
+                    'stale_days', $3::int,
+                    'source', 'v2_advanced'
+                )
+            FROM candidates c
+            "#,
+        )
+        .bind(org_id)
+        .bind(hours as i32)
+        .bind(stale_days)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(result.rows_affected() as i64)
+    }
+
+    async fn detect_v2_done_not_deployed_signals(
+        &self,
+        org_id: &str,
+        done_window_hours: i64,
+        pipeline_lookback_hours: i64,
+    ) -> Result<i64, DbError> {
+        let result = sqlx::query(
+            r#"
+            WITH done_tickets AS (
+                SELECT
+                    pt.org_id,
+                    pt.ticket_id,
+                    pt.status,
+                    pt.title,
+                    pt.priority,
+                    pt.ticket_type,
+                    pt.assignee,
+                    pt.reporter,
+                    COALESCE(pt.updated_at, pt.ingested_at) AS ticket_updated_at
+                FROM project_tickets pt
+                WHERE pt.org_id = $1::uuid
+                  AND COALESCE(pt.updated_at, pt.ingested_at) >= NOW() - make_interval(hours => $2::int)
+                  AND (
+                    lower(COALESCE(pt.status, '')) IN ('done', 'closed', 'resolved')
+                    OR lower(COALESCE(pt.status, '')) LIKE '%done%'
+                    OR lower(COALESCE(pt.status, '')) LIKE '%closed%'
+                    OR lower(COALESCE(pt.status, '')) LIKE '%resolved%'
+                  )
+            ),
+            ticket_commits AS (
+                SELECT
+                    dt.*,
+                    ct.commit_sha
+                FROM done_tickets dt
+                JOIN commit_ticket_correlations ct
+                  ON ct.ticket_id = dt.ticket_id
+                 AND (ct.org_id = dt.org_id OR ct.org_id IS NULL)
+            ),
+            ticket_pipeline_eval AS (
+                SELECT
+                    tc.org_id,
+                    tc.ticket_id,
+                    tc.status,
+                    tc.title,
+                    tc.priority,
+                    tc.ticket_type,
+                    tc.assignee,
+                    tc.reporter,
+                    tc.ticket_updated_at,
+                    COUNT(DISTINCT tc.commit_sha)::bigint AS correlated_commit_count,
+                    COALESCE(BOOL_OR(
+                        lower(COALESCE(pe.status, '')) = 'success'
+                        AND (
+                            lower(COALESCE(pe.job_name, '')) LIKE '%deploy%'
+                            OR lower(COALESCE(pe.job_name, '')) LIKE '%release%'
+                            OR lower(COALESCE(pe.job_name, '')) LIKE '%prod%'
+                            OR lower(COALESCE(pe.payload::text, '')) LIKE '%\"environment\":\"production\"%'
+                            OR lower(COALESCE(pe.payload::text, '')) LIKE '%deploy%'
+                        )
+                    ), FALSE) AS has_successful_deploy,
+                    MAX(pe.ingested_at) FILTER (WHERE lower(COALESCE(pe.status, '')) = 'success') AS last_success_pipeline_at,
+                    MAX(pe.id::text) FILTER (WHERE lower(COALESCE(pe.status, '')) = 'success') AS last_success_pipeline_id
+                FROM ticket_commits tc
+                LEFT JOIN pipeline_events pe
+                  ON pe.org_id = tc.org_id
+                 AND pe.commit_sha IS NOT NULL
+                 AND (
+                    pe.commit_sha = tc.commit_sha
+                    OR pe.commit_sha LIKE tc.commit_sha || '%'
+                    OR tc.commit_sha LIKE pe.commit_sha || '%'
+                 )
+                 AND pe.ingested_at >= NOW() - make_interval(hours => $3::int)
+                GROUP BY
+                    tc.org_id,
+                    tc.ticket_id,
+                    tc.status,
+                    tc.title,
+                    tc.priority,
+                    tc.ticket_type,
+                    tc.assignee,
+                    tc.reporter,
+                    tc.ticket_updated_at
+            ),
+            candidates AS (
+                SELECT tpe.*
+                FROM ticket_pipeline_eval tpe
+                WHERE tpe.correlated_commit_count > 0
+                  AND tpe.has_successful_deploy = FALSE
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM noncompliance_signals ns
+                    WHERE ns.org_id = tpe.org_id
+                      AND ns.signal_type = 'done_not_deployed'
+                      AND ns.evidence->>'ticket_id' = tpe.ticket_id
+                  )
+            )
+            INSERT INTO noncompliance_signals (
+                org_id,
+                signal_type,
+                confidence,
+                actor_login,
+                evidence,
+                context
+            )
+            SELECT
+                c.org_id,
+                'done_not_deployed',
+                'high',
+                COALESCE(NULLIF(c.assignee, ''), NULLIF(c.reporter, ''), 'system'),
+                jsonb_build_object(
+                    'ticket_id', c.ticket_id,
+                    'ticket_status', c.status,
+                    'ticket_updated_at', CASE
+                        WHEN c.ticket_updated_at IS NULL THEN NULL
+                        ELSE EXTRACT(EPOCH FROM c.ticket_updated_at)::bigint * 1000
+                    END,
+                    'correlated_commit_count', c.correlated_commit_count,
+                    'last_success_pipeline_at', CASE
+                        WHEN c.last_success_pipeline_at IS NULL THEN NULL
+                        ELSE EXTRACT(EPOCH FROM c.last_success_pipeline_at)::bigint * 1000
+                    END,
+                    'last_success_pipeline_id', c.last_success_pipeline_id,
+                    'reason', 'Done ticket has correlated commits but no successful deployment-like pipeline'
+                ),
+                jsonb_build_object(
+                    'done_window_hours', $2::int,
+                    'pipeline_lookback_hours', $3::int,
+                    'source', 'v2_advanced'
+                )
+            FROM candidates c
+            "#,
+        )
+        .bind(org_id)
+        .bind(done_window_hours as i32)
+        .bind(pipeline_lookback_hours as i32)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(result.rows_affected() as i64)
+    }
+
+    pub async fn detect_noncompliance_signals(&self, org_id: &str) -> Result<i64, DbError> {
+        // Legacy SQL detector can be unavailable/misaligned when a deployment
+        // has partial migrations. Keep detection resilient and continue with
+        // V2 server-side rules instead of failing the endpoint/job.
+        let mut total_created: i64 = match sqlx::query(
+            "SELECT detect_noncompliance_signals($1::uuid)::bigint as count",
+        )
+        .bind(org_id)
+        .fetch_one(&self.pool)
+        .await
+        {
+            Ok(row) => row.get("count"),
+            Err(e) => {
+                tracing::warn!(
+                    org_id = %org_id,
+                    error = %e,
+                    "Legacy SQL detect_noncompliance_signals failed; continuing with V2 fallback detection"
+                );
+                0
+            }
+        };
+        let commit_window_hours = 24 * 7;
+        let ticket_window_hours = 24 * 30;
+        let pipeline_streak_window_hours = 24 * 14;
+        let stale_in_progress_window_hours = 24 * 30;
+        let done_ticket_window_hours = 24 * 45;
+        let pipeline_lookback_hours = 24 * 45;
+
+        match self
+            .detect_v2_commit_no_ticket_signals(org_id, commit_window_hours)
+            .await
+        {
+            Ok(count) => {
+                total_created += count;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    org_id = %org_id,
+                    error = %e,
+                    "V2 commit_no_ticket detection skipped due to database error"
+                );
+            }
+        }
+
+        match self
+            .detect_v2_ticket_no_coverage_signals(org_id, ticket_window_hours)
+            .await
+        {
+            Ok(count) => {
+                total_created += count;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    org_id = %org_id,
+                    error = %e,
+                    "V2 ticket_no_coverage detection skipped due to database error"
+                );
+            }
+        }
+
+        match self
+            .detect_v2_pipeline_failure_streak_signals(org_id, pipeline_streak_window_hours, 3)
+            .await
+        {
+            Ok(count) => {
+                total_created += count;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    org_id = %org_id,
+                    error = %e,
+                    "V2 pipeline_failure_streak detection skipped due to database error"
+                );
+            }
+        }
+
+        match self
+            .detect_v2_stale_in_progress_signals(org_id, stale_in_progress_window_hours, 3)
+            .await
+        {
+            Ok(count) => {
+                total_created += count;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    org_id = %org_id,
+                    error = %e,
+                    "V2 stale_in_progress detection skipped due to database error"
+                );
+            }
+        }
+
+        match self
+            .detect_v2_done_not_deployed_signals(
+                org_id,
+                done_ticket_window_hours,
+                pipeline_lookback_hours,
+            )
+            .await
+        {
+            Ok(count) => {
+                total_created += count;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    org_id = %org_id,
+                    error = %e,
+                    "V2 done_not_deployed detection skipped due to database error"
+                );
+            }
+        }
+
+        Ok(total_created)
     }
 
     // ========================================================================
     // COMPLIANCE DASHBOARD
     // ========================================================================
+
+    async fn get_compliance_timeline_monthly(
+        &self,
+        org_id: &str,
+        months: i64,
+    ) -> Result<Vec<ComplianceTimelinePoint>, DbError> {
+        let safe_months = months.clamp(1, 24) as i32;
+        let rows = sqlx::query(
+            r#"
+            WITH bounds AS (
+              SELECT
+                date_trunc('month', (NOW() AT TIME ZONE 'UTC'))::date AS end_month,
+                (
+                  date_trunc('month', (NOW() AT TIME ZONE 'UTC'))::date
+                  - (($2::int - 1) * INTERVAL '1 month')
+                )::date AS start_month
+            ),
+            months AS (
+              SELECT generate_series(
+                (SELECT start_month FROM bounds),
+                (SELECT end_month FROM bounds),
+                INTERVAL '1 month'
+              )::date AS month_start
+            ),
+            signals AS (
+              SELECT
+                date_trunc('month', ns.created_at AT TIME ZONE 'UTC')::date AS month_start,
+                COUNT(*)::bigint AS signals_detected
+              FROM noncompliance_signals ns
+              WHERE ns.org_id = $1::uuid
+                AND ns.created_at >= (SELECT start_month::timestamp FROM bounds)
+              GROUP BY 1
+            ),
+            violations AS (
+              SELECT
+                date_trunc('month', v.created_at AT TIME ZONE 'UTC')::date AS month_start,
+                COUNT(*)::bigint AS violations_confirmed
+              FROM violations v
+              WHERE v.org_id = $1::uuid
+                AND v.created_at >= (SELECT start_month::timestamp FROM bounds)
+              GROUP BY 1
+            ),
+            commit_coverage AS (
+              SELECT
+                date_trunc('month', ce.created_at AT TIME ZONE 'UTC')::date AS month_start,
+                COUNT(DISTINCT ce.commit_sha)::bigint AS commits_total,
+                COUNT(DISTINCT CASE WHEN ctc.commit_sha IS NOT NULL THEN ce.commit_sha END)::bigint AS commits_with_ticket
+              FROM client_events ce
+              LEFT JOIN (
+                SELECT DISTINCT org_id, commit_sha
+                FROM commit_ticket_correlations
+                WHERE org_id = $1::uuid
+              ) ctc
+                ON ctc.org_id = ce.org_id
+               AND ctc.commit_sha = ce.commit_sha
+              WHERE ce.org_id = $1::uuid
+                AND ce.event_type = 'commit'
+                AND ce.commit_sha IS NOT NULL
+                AND ce.created_at >= (SELECT start_month::timestamp FROM bounds)
+              GROUP BY 1
+            ),
+            pipeline AS (
+              SELECT
+                date_trunc('month', pe.ingested_at AT TIME ZONE 'UTC')::date AS month_start,
+                COUNT(*)::bigint AS pipeline_runs_total,
+                COUNT(*) FILTER (WHERE pe.status = 'success')::bigint AS pipeline_runs_success
+              FROM pipeline_events pe
+              WHERE pe.org_id = $1::uuid
+                AND pe.ingested_at >= (SELECT start_month::timestamp FROM bounds)
+              GROUP BY 1
+            )
+            SELECT
+              to_char(m.month_start, 'YYYY-MM') AS month,
+              COALESCE(s.signals_detected, 0)::bigint AS signals_detected,
+              COALESCE(v.violations_confirmed, 0)::bigint AS violations_confirmed,
+              COALESCE(c.commits_total, 0)::bigint AS commits_total,
+              COALESCE(c.commits_with_ticket, 0)::bigint AS commits_with_ticket,
+              CASE
+                WHEN COALESCE(c.commits_total, 0) > 0 THEN
+                  ROUND((COALESCE(c.commits_with_ticket, 0)::numeric * 100.0) / NULLIF(c.commits_total, 0), 1)::double precision
+                ELSE 100.0
+              END AS ticket_coverage_pct,
+              COALESCE(p.pipeline_runs_total, 0)::bigint AS pipeline_runs_total,
+              CASE
+                WHEN COALESCE(p.pipeline_runs_total, 0) > 0 THEN
+                  ROUND((COALESCE(p.pipeline_runs_success, 0)::numeric * 100.0) / NULLIF(p.pipeline_runs_total, 0), 1)::double precision
+                ELSE 100.0
+              END AS pipeline_success_pct
+            FROM months m
+            LEFT JOIN signals s ON s.month_start = m.month_start
+            LEFT JOIN violations v ON v.month_start = m.month_start
+            LEFT JOIN commit_coverage c ON c.month_start = m.month_start
+            LEFT JOIN pipeline p ON p.month_start = m.month_start
+            ORDER BY m.month_start ASC
+            "#,
+        )
+        .bind(org_id)
+        .bind(safe_months)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| ComplianceTimelinePoint {
+                month: row.get("month"),
+                signals_detected: row.get("signals_detected"),
+                violations_confirmed: row.get("violations_confirmed"),
+                commits_total: row.get("commits_total"),
+                commits_with_ticket: row.get("commits_with_ticket"),
+                ticket_coverage_pct: row.get("ticket_coverage_pct"),
+                pipeline_runs_total: row.get("pipeline_runs_total"),
+                pipeline_success_pct: row.get("pipeline_success_pct"),
+            })
+            .collect())
+    }
 
     pub async fn get_compliance_dashboard(
         &self,
@@ -3463,9 +4641,59 @@ impl Database {
             .await
             .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
-        let dashboard: sqlx::types::Json<ComplianceDashboard> = row.get("dashboard");
+        let mut dashboard_value: serde_json::Value = row
+            .try_get::<sqlx::types::Json<serde_json::Value>, _>("dashboard")
+            .map(|json| json.0)
+            .or_else(|_| row.try_get::<serde_json::Value, _>("dashboard"))
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
 
-        Ok(dashboard.0)
+        if let Some(obj) = dashboard_value.as_object_mut() {
+            for key in ["signals", "correlation", "policy", "exports"] {
+                let is_null = obj.get(key).map(|v| v.is_null()).unwrap_or(false);
+                if is_null {
+                    obj.remove(key);
+                }
+            }
+            let timeline_is_null = obj.get("timeline").map(|v| v.is_null()).unwrap_or(false);
+            if timeline_is_null {
+                obj.insert("timeline".to_string(), serde_json::json!([]));
+            }
+            if let Some(signals_obj) = obj.get_mut("signals").and_then(|v| v.as_object_mut()) {
+                let by_type_is_null = signals_obj
+                    .get("by_type")
+                    .map(|v| v.is_null())
+                    .unwrap_or(false);
+                if by_type_is_null {
+                    signals_obj.insert("by_type".to_string(), serde_json::json!({}));
+                }
+            }
+        }
+
+        let mut resolved = match serde_json::from_value::<ComplianceDashboard>(dashboard_value) {
+            Ok(value) => value,
+            Err(e) => {
+                tracing::warn!(
+                    org_id = %org_id,
+                    error = %e,
+                    "Failed to deserialize compliance dashboard payload; using defaults"
+                );
+                ComplianceDashboard::default()
+            }
+        };
+        match self.get_compliance_timeline_monthly(org_id, 6).await {
+            Ok(timeline) => {
+                resolved.timeline = timeline;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    org_id = %org_id,
+                    error = %e,
+                    "Monthly compliance timeline skipped due to database error"
+                );
+            }
+        }
+
+        Ok(resolved)
     }
 
     // ========================================================================
@@ -3499,6 +4727,426 @@ impl Database {
             .collect();
 
         Ok(history)
+    }
+
+    pub async fn create_policy_change_request(
+        &self,
+        input: CreatePolicyChangeRequestInput<'_>,
+    ) -> Result<(), DbError> {
+        let requested_config_json = serde_json::to_value(input.requested_config)
+            .map_err(|e| DbError::SerializationError(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO policy_change_requests (
+                id, org_id, repo_id, repo_name, requested_by,
+                requested_config, requested_checksum, reason, created_at
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3::uuid, $4, $5,
+                $6::jsonb, $7, $8, to_timestamp($9::bigint / 1000.0)
+            )
+            "#,
+        )
+        .bind(input.request_id)
+        .bind(input.org_id)
+        .bind(input.repo_id)
+        .bind(input.repo_name)
+        .bind(input.requested_by)
+        .bind(&requested_config_json)
+        .bind(input.requested_checksum)
+        .bind(input.reason)
+        .bind(input.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub async fn list_policy_change_requests(
+        &self,
+        org_id: Option<&str>,
+        repo_name: Option<&str>,
+        requested_by: Option<&str>,
+        status: Option<&str>,
+        limit: i64,
+        offset: i64,
+        include_config: bool,
+    ) -> Result<(Vec<PolicyChangeRequestRecord>, i64), DbError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                r.id::text AS id,
+                r.org_id::text AS org_id,
+                r.repo_id::text AS repo_id,
+                r.repo_name AS repo_name,
+                r.requested_by AS requested_by,
+                r.requested_checksum AS requested_checksum,
+                CASE
+                  WHEN $7::boolean THEN r.requested_config
+                  ELSE '{}'::jsonb
+                END AS requested_config,
+                r.reason AS reason,
+                COALESCE(d.decision, 'pending') AS status,
+                d.decided_by AS decided_by,
+                d.note AS decision_note,
+                EXTRACT(EPOCH FROM r.created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM d.created_at)::bigint * 1000 AS decided_at_ms
+            FROM policy_change_requests r
+            LEFT JOIN policy_change_request_decisions d
+              ON d.request_id = r.id
+            WHERE ($1::uuid IS NULL OR r.org_id = $1::uuid)
+              AND ($2::text IS NULL OR r.repo_name = $2)
+              AND ($3::text IS NULL OR r.requested_by = $3)
+              AND ($4::text IS NULL OR COALESCE(d.decision, 'pending') = $4)
+            ORDER BY r.created_at DESC
+            LIMIT $5 OFFSET $6
+            "#,
+        )
+        .bind(org_id)
+        .bind(repo_name)
+        .bind(requested_by)
+        .bind(status)
+        .bind(limit)
+        .bind(offset)
+        .bind(include_config)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM policy_change_requests r
+            LEFT JOIN policy_change_request_decisions d
+              ON d.request_id = r.id
+            WHERE ($1::uuid IS NULL OR r.org_id = $1::uuid)
+              AND ($2::text IS NULL OR r.repo_name = $2)
+              AND ($3::text IS NULL OR r.requested_by = $3)
+              AND ($4::text IS NULL OR COALESCE(d.decision, 'pending') = $4)
+            "#,
+        )
+        .bind(org_id)
+        .bind(repo_name)
+        .bind(requested_by)
+        .bind(status)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let records = rows
+            .iter()
+            .map(|row| {
+                let config: serde_json::Value = row.get("requested_config");
+                PolicyChangeRequestRecord {
+                    id: row.get("id"),
+                    org_id: row.get("org_id"),
+                    repo_id: row.get("repo_id"),
+                    repo_name: row.get("repo_name"),
+                    requested_by: row.get("requested_by"),
+                    requested_checksum: row.get("requested_checksum"),
+                    requested_config: serde_json::from_value(config).unwrap_or_default(),
+                    reason: row.get("reason"),
+                    status: row.get("status"),
+                    decided_by: row.get("decided_by"),
+                    decision_note: row.get("decision_note"),
+                    created_at: row.get("created_at_ms"),
+                    decided_at: row.get("decided_at_ms"),
+                }
+            })
+            .collect();
+
+        Ok((records, count))
+    }
+
+    pub async fn get_policy_change_request_by_id(
+        &self,
+        request_id: &str,
+        org_id: Option<&str>,
+    ) -> Result<Option<PolicyChangeRequestRecord>, DbError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                r.id::text AS id,
+                r.org_id::text AS org_id,
+                r.repo_id::text AS repo_id,
+                r.repo_name AS repo_name,
+                r.requested_by AS requested_by,
+                r.requested_checksum AS requested_checksum,
+                r.requested_config AS requested_config,
+                r.reason AS reason,
+                COALESCE(d.decision, 'pending') AS status,
+                d.decided_by AS decided_by,
+                d.note AS decision_note,
+                EXTRACT(EPOCH FROM r.created_at)::bigint * 1000 AS created_at_ms,
+                EXTRACT(EPOCH FROM d.created_at)::bigint * 1000 AS decided_at_ms
+            FROM policy_change_requests r
+            LEFT JOIN policy_change_request_decisions d
+              ON d.request_id = r.id
+            WHERE r.id = $1::uuid
+              AND ($2::uuid IS NULL OR r.org_id = $2::uuid)
+            "#,
+        )
+        .bind(request_id)
+        .bind(org_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let config: serde_json::Value = row.get("requested_config");
+        Ok(Some(PolicyChangeRequestRecord {
+            id: row.get("id"),
+            org_id: row.get("org_id"),
+            repo_id: row.get("repo_id"),
+            repo_name: row.get("repo_name"),
+            requested_by: row.get("requested_by"),
+            requested_checksum: row.get("requested_checksum"),
+            requested_config: serde_json::from_value(config)
+                .map_err(|e| DbError::SerializationError(e.to_string()))?,
+            reason: row.get("reason"),
+            status: row.get("status"),
+            decided_by: row.get("decided_by"),
+            decision_note: row.get("decision_note"),
+            created_at: row.get("created_at_ms"),
+            decided_at: row.get("decided_at_ms"),
+        }))
+    }
+
+    pub async fn approve_policy_change_request(
+        &self,
+        request_id: &str,
+        org_id: Option<&str>,
+        decided_by: &str,
+        note: Option<&str>,
+        decided_at_ms: i64,
+    ) -> Result<PolicyChangeRequestRecord, DbError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let request_row = sqlx::query(
+            r#"
+            SELECT
+                id::text AS id,
+                org_id::text AS org_id,
+                repo_id::text AS repo_id,
+                repo_name AS repo_name,
+                requested_by AS requested_by,
+                requested_checksum AS requested_checksum,
+                requested_config AS requested_config,
+                reason AS reason,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms
+            FROM policy_change_requests
+            WHERE id = $1::uuid
+              AND ($2::uuid IS NULL OR org_id = $2::uuid)
+            FOR UPDATE
+            "#,
+        )
+        .bind(request_id)
+        .bind(org_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let Some(request_row) = request_row else {
+            return Err(DbError::NotFound("policy_change_request".to_string()));
+        };
+
+        let existing_decision: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT decision
+            FROM policy_change_request_decisions
+            WHERE request_id = $1::uuid
+            LIMIT 1
+            "#,
+        )
+        .bind(request_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        if existing_decision.is_some() {
+            return Err(DbError::Duplicate(
+                "policy_change_request already decided".to_string(),
+            ));
+        }
+
+        let requested_config_json: serde_json::Value = request_row.get("requested_config");
+        let requested_checksum: String = request_row.get("requested_checksum");
+        let repo_id: String = request_row.get("repo_id");
+
+        sqlx::query(
+            r#"
+            INSERT INTO policy_change_request_decisions (
+                id, request_id, org_id, decision, decided_by, note, created_at
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3::uuid, 'approved', $4, $5, to_timestamp($6::bigint / 1000.0)
+            )
+            "#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(request_id)
+        .bind(request_row.get::<Option<String>, _>("org_id"))
+        .bind(decided_by)
+        .bind(note)
+        .bind(decided_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO policies (repo_id, config, checksum, override_actor, updated_at)
+            VALUES ($1::uuid, $2::jsonb, $3, $4, NOW())
+            ON CONFLICT (repo_id) DO UPDATE SET
+                config = $2,
+                checksum = $3,
+                override_actor = $4,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&repo_id)
+        .bind(&requested_config_json)
+        .bind(&requested_checksum)
+        .bind(decided_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let requested_config: GitGovConfig = serde_json::from_value(requested_config_json)
+            .map_err(|e| DbError::SerializationError(e.to_string()))?;
+        Ok(PolicyChangeRequestRecord {
+            id: request_row.get("id"),
+            org_id: request_row.get("org_id"),
+            repo_id,
+            repo_name: request_row.get("repo_name"),
+            requested_by: request_row.get("requested_by"),
+            requested_checksum,
+            requested_config,
+            reason: request_row.get("reason"),
+            status: "approved".to_string(),
+            decided_by: Some(decided_by.to_string()),
+            decision_note: note.map(str::to_string),
+            created_at: request_row.get("created_at_ms"),
+            decided_at: Some(decided_at_ms),
+        })
+    }
+
+    pub async fn reject_policy_change_request(
+        &self,
+        request_id: &str,
+        org_id: Option<&str>,
+        decided_by: &str,
+        note: Option<&str>,
+        decided_at_ms: i64,
+    ) -> Result<PolicyChangeRequestRecord, DbError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let request_row = sqlx::query(
+            r#"
+            SELECT
+                id::text AS id,
+                org_id::text AS org_id,
+                repo_id::text AS repo_id,
+                repo_name AS repo_name,
+                requested_by AS requested_by,
+                requested_checksum AS requested_checksum,
+                requested_config AS requested_config,
+                reason AS reason,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms
+            FROM policy_change_requests
+            WHERE id = $1::uuid
+              AND ($2::uuid IS NULL OR org_id = $2::uuid)
+            FOR UPDATE
+            "#,
+        )
+        .bind(request_id)
+        .bind(org_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let Some(request_row) = request_row else {
+            return Err(DbError::NotFound("policy_change_request".to_string()));
+        };
+
+        let existing_decision: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT decision
+            FROM policy_change_request_decisions
+            WHERE request_id = $1::uuid
+            LIMIT 1
+            "#,
+        )
+        .bind(request_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        if existing_decision.is_some() {
+            return Err(DbError::Duplicate(
+                "policy_change_request already decided".to_string(),
+            ));
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO policy_change_request_decisions (
+                id, request_id, org_id, decision, decided_by, note, created_at
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3::uuid, 'rejected', $4, $5, to_timestamp($6::bigint / 1000.0)
+            )
+            "#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(request_id)
+        .bind(request_row.get::<Option<String>, _>("org_id"))
+        .bind(decided_by)
+        .bind(note)
+        .bind(decided_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let requested_config_json: serde_json::Value = request_row.get("requested_config");
+        let requested_config: GitGovConfig = serde_json::from_value(requested_config_json)
+            .map_err(|e| DbError::SerializationError(e.to_string()))?;
+        Ok(PolicyChangeRequestRecord {
+            id: request_row.get("id"),
+            org_id: request_row.get("org_id"),
+            repo_id: request_row.get("repo_id"),
+            repo_name: request_row.get("repo_name"),
+            requested_by: request_row.get("requested_by"),
+            requested_checksum: request_row.get("requested_checksum"),
+            requested_config,
+            reason: request_row.get("reason"),
+            status: "rejected".to_string(),
+            decided_by: Some(decided_by.to_string()),
+            decision_note: note.map(str::to_string),
+            created_at: request_row.get("created_at_ms"),
+            decided_at: Some(decided_at_ms),
+        })
     }
 
     // ========================================================================
@@ -3991,14 +5639,7 @@ impl Database {
     /// This is idempotent - uses ingested_at cursor.
     pub async fn execute_detect_signals(&self, org_id: &str) -> Result<i64, DbError> {
         let start = std::time::Instant::now();
-
-        let result = sqlx::query("SELECT detect_noncompliance_signals($1::uuid) as count")
-            .bind(org_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| DbError::DatabaseError(e.to_string()))?;
-
-        let count: i64 = result.get("count");
+        let count = self.detect_noncompliance_signals(org_id).await?;
 
         tracing::info!(
             org_id = %org_id,
@@ -5989,6 +7630,119 @@ impl Database {
                 branch: row.get("branch"),
                 repo_name: row.get("repo_name"),
                 exit_code: row.get("exit_code"),
+                duration_ms: row.get("duration_ms"),
+                metadata: row.get("metadata"),
+                created_at: row.get("created_at_ms"),
+            })
+            .collect();
+
+        Ok((records, count))
+    }
+
+    // ========================================================================
+    // POLICY DRIFT AUDIT
+    // ========================================================================
+
+    pub async fn insert_policy_drift_event(
+        &self,
+        record: &crate::models::PolicyDriftEventRecord,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            r#"
+            INSERT INTO policy_drift_events (
+                id, org_id, user_login, action, repo_name, result,
+                before_checksum, after_checksum, duration_ms, metadata, created_at
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3, $4, $5, $6,
+                $7, $8, $9, $10::jsonb, to_timestamp($11::bigint / 1000.0)
+            )
+            "#,
+        )
+        .bind(&record.id)
+        .bind(&record.org_id)
+        .bind(&record.user_login)
+        .bind(&record.action)
+        .bind(&record.repo_name)
+        .bind(&record.result)
+        .bind(&record.before_checksum)
+        .bind(&record.after_checksum)
+        .bind(record.duration_ms)
+        .bind(&record.metadata)
+        .bind(record.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub async fn list_policy_drift_events(
+        &self,
+        org_id: Option<&str>,
+        user_login: Option<&str>,
+        repo_name: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<crate::models::PolicyDriftEventRecord>, i64), DbError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id::text,
+                org_id::text,
+                user_login,
+                action,
+                repo_name,
+                result,
+                before_checksum,
+                after_checksum,
+                duration_ms,
+                COALESCE(metadata, '{}'::jsonb) AS metadata,
+                EXTRACT(EPOCH FROM created_at)::bigint * 1000 AS created_at_ms
+            FROM policy_drift_events
+            WHERE ($1::uuid IS NULL OR org_id = $1::uuid)
+              AND ($2::text IS NULL OR user_login = $2)
+              AND ($3::text IS NULL OR repo_name = $3)
+            ORDER BY created_at DESC
+            LIMIT $4 OFFSET $5
+            "#,
+        )
+        .bind(org_id)
+        .bind(user_login)
+        .bind(repo_name)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM policy_drift_events
+            WHERE ($1::uuid IS NULL OR org_id = $1::uuid)
+              AND ($2::text IS NULL OR user_login = $2)
+              AND ($3::text IS NULL OR repo_name = $3)
+            "#,
+        )
+        .bind(org_id)
+        .bind(user_login)
+        .bind(repo_name)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::DatabaseError(e.to_string()))?;
+
+        let records: Vec<crate::models::PolicyDriftEventRecord> = rows
+            .iter()
+            .map(|row| crate::models::PolicyDriftEventRecord {
+                id: row.get("id"),
+                org_id: row.get("org_id"),
+                user_login: row.get("user_login"),
+                action: row.get("action"),
+                repo_name: row.get("repo_name"),
+                result: row.get("result"),
+                before_checksum: row.get("before_checksum"),
+                after_checksum: row.get("after_checksum"),
                 duration_ms: row.get("duration_ms"),
                 metadata: row.get("metadata"),
                 created_at: row.get("created_at_ms"),

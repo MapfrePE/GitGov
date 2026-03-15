@@ -400,7 +400,19 @@ pub async fn create_api_key(
         );
     }
 
-    let role = UserRole::from_str(&payload.role);
+    let role = match parse_user_role_strict(Some(payload.role.as_str())) {
+        Ok(role) => role,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiKeyResponse {
+                    api_key: None,
+                    client_id: payload.client_id,
+                    error: Some(msg.to_string()),
+                }),
+            );
+        }
+    };
 
     // Resolve requested org by login (if provided in payload).
     let requested_org_id = if let Some(ref org_name) = payload.org_name {
