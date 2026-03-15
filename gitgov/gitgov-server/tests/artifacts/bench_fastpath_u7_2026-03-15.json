@@ -1,0 +1,169 @@
+{
+  "generated_at": 1773550661763,
+  "config": {
+    "server_url": "http://127.0.0.1:3000",
+    "server_urls": [
+      "http://127.0.0.1:3000"
+    ],
+    "server_nodes": 1,
+    "users": 7,
+    "duration_sec": 60.0,
+    "think_ms": 120.0,
+    "timeout_sec": 12.0,
+    "api_keys_count": 1,
+    "profile": {
+      "events_ratio": 70,
+      "dashboard_ratio": 20,
+      "chat_ratio": 10
+    }
+  },
+  "total_requests": 3227,
+  "actual_duration_sec": 60.12046998902224,
+  "overall_throughput_rps": 53.6755617610647,
+  "endpoints": {
+    "GET /logs": {
+      "endpoint": "GET /logs",
+      "requests": 396,
+      "duration_sec": 60.12046998902224,
+      "throughput_rps": 6.586774855091918,
+      "http_counts": {
+        "200": 396
+      },
+      "error_counts": {},
+      "latency_ms": {
+        "min": 1.1963059660047293,
+        "avg": 4.912639368381916,
+        "p50": 3.97370255086571,
+        "p95": 9.79967339662835,
+        "p99": 42.14631218928845,
+        "max": 62.498765997588634
+      },
+      "error_rate": {
+        "401": 0.0,
+        "429": 0.0,
+        "5xx": 0.0
+      }
+    },
+    "GET /stats": {
+      "endpoint": "GET /stats",
+      "requests": 283,
+      "duration_sec": 60.12046998902224,
+      "throughput_rps": 4.707215363613669,
+      "http_counts": {
+        "200": 283
+      },
+      "error_counts": {},
+      "latency_ms": {
+        "min": 0.9235239122062922,
+        "avg": 71.5658924544013,
+        "p50": 70.85223495960236,
+        "p95": 139.88966995384538,
+        "p99": 212.72406824398792,
+        "max": 281.38700989075005
+      },
+      "error_rate": {
+        "401": 0.0,
+        "429": 0.0,
+        "5xx": 0.0
+      }
+    },
+    "POST /events": {
+      "endpoint": "POST /events",
+      "requests": 2259,
+      "duration_sec": 60.12046998902224,
+      "throughput_rps": 37.5745565597289,
+      "http_counts": {
+        "200": 2259
+      },
+      "error_counts": {},
+      "latency_ms": {
+        "min": 2.4306299164891243,
+        "avg": 3.777157035402726,
+        "p50": 3.2465760596096516,
+        "p95": 5.47861277591437,
+        "p99": 17.808925257995732,
+        "max": 57.924142107367516
+      },
+      "error_rate": {
+        "401": 0.0,
+        "429": 0.0,
+        "5xx": 0.0
+      }
+    },
+    "POST /chat/ask": {
+      "endpoint": "POST /chat/ask",
+      "requests": 289,
+      "duration_sec": 60.12046998902224,
+      "throughput_rps": 4.807014982630213,
+      "http_counts": {
+        "200": 40,
+        "429": 249
+      },
+      "error_counts": {
+        "http_error": 249
+      },
+      "latency_ms": {
+        "min": 0.9567639790475368,
+        "avg": 2.56279244645141,
+        "p50": 1.4878048095852137,
+        "p95": 8.255310216918586,
+        "p99": 12.612885618582382,
+        "max": 35.18842882476747
+      },
+      "error_rate": {
+        "401": 0.0,
+        "429": 0.8615916955017301,
+        "5xx": 0.0
+      }
+    }
+  },
+  "core_summary": {
+    "endpoint": "CORE",
+    "requests": 2938,
+    "duration_sec": 60.12046998902224,
+    "throughput_rps": 48.868546778434485,
+    "http_counts": {
+      "200": 2938
+    },
+    "error_counts": {},
+    "latency_ms": {
+      "min": 0.9235239122062922,
+      "avg": 10.4598878480087,
+      "p50": 3.310389001853764,
+      "p95": 70.57894211029634,
+      "p99": 124.10763151943691,
+      "max": 281.38700989075005
+    },
+    "error_rate": {
+      "401": 0.0,
+      "429": 0.0,
+      "5xx": 0.0
+    }
+  },
+  "chat_summary": {
+    "endpoint": "POST /chat/ask",
+    "requests": 289,
+    "duration_sec": 60.12046998902224,
+    "throughput_rps": 4.807014982630213,
+    "http_counts": {
+      "200": 40,
+      "429": 249
+    },
+    "error_counts": {
+      "http_error": 249
+    },
+    "latency_ms": {
+      "min": 0.9567639790475368,
+      "avg": 2.56279244645141,
+      "p50": 1.4878048095852137,
+      "p95": 8.255310216918586,
+      "p99": 12.612885618582382,
+      "max": 35.18842882476747
+    },
+    "error_rate": {
+      "401": 0.0,
+      "429": 0.8615916955017301,
+      "5xx": 0.0
+    }
+  }
+}

@@ -2,6 +2,1573 @@
 
 ---
 
+## Actualización (2026-03-14) — Optimización hot path `/events` (cache compartida org/repo)
+
+### Qué se optimizó
+- Se agregó cache compartida con TTL corto para lookups repetidos durante ingesta:
+  - `org_name -> org_id`
+  - `repo_full_name -> repo`
+- Objetivo: reducir round-trips a DB por request en cargas concurrentes altas.
+
+### Archivos
+- `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+  - nuevos tipos `OrgLookupCacheEntry`, `RepoLookupCacheEntry`.
+  - nuevos campos en `AppState` para TTL+mapas.
+- `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - `/events` ahora usa `resolve_org_id_with_cache(...)` y `resolve_repo_with_cache(...)`.
+  - helpers de cache con TTL y compactación por expiración.
+- `gitgov/gitgov-server/src/main.rs`
+  - nuevos envs runtime:
+    - `GITGOV_ORG_LOOKUP_CACHE_TTL_MS` (default `30000`)
+    - `GITGOV_REPO_LOOKUP_CACHE_TTL_MS` (default `30000`)
+- `gitgov/gitgov-server/src/integration_tests.rs`
+  - inicialización de nuevos campos `AppState`.
+- `gitgov/gitgov-server/.env.example` y `docs/DEPLOYMENT.md`
+  - documentación de nuevas variables.
+
+### Validación
+- `cd gitgov/gitgov-server && cargo test` -> `140 passed; 0 failed`.
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`).
+
+---
+
+## Actualización (2026-03-14) — Optimización adicional de escalado (limiter + repo upsert async)
+
+### Qué se implementó
+- `DistributedDbRateLimiter` ahora cachea localmente ventanas ya rechazadas (`429`) para no reconsultar DB en cada request durante el mismo `retry_after`.
+  - archivo: `gitgov/gitgov-server/src/main.rs`
+- En `/events`, el `upsert_repo_by_full_name(...)` se movió fuera del camino síncrono:
+  - ahora se agenda en background con debounce por `org/repo`.
+  - archivo: `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+
+### Variables nuevas
+- `GITGOV_REPO_UPSERT_MIN_INTERVAL_MS` (default `30000`).
+
+### Impacto esperado
+- Menos presión sobre PostgreSQL bajo ráfagas (`429` y repos no cacheados).
+- Menor latencia p95/p99 en ingest cuando llega alta cardinalidad de eventos por repos nuevos.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `142 passed; 0 failed`.
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`).
+- Smoke Golden Path live:
+  - `/me=200`, `/events=200 (accepted=1)`, `/stats=200`, `/logs=200`.
+- Corrida corta post-cambio (single-key, 10 usuarios, 60s):
+  - `tests/artifacts/capacity_recheck_patch_u10_limiter_cache_async_repo_2026-03-14.json`
+  - `401=0`, `5xx=0`, `429` concentrado en `/events` por cuota de una sola identidad.
+
+---
+
+## Actualización (2026-03-14) — Hardening backend de capacidad (sin UI, sin contrato)
+
+### Objetivo
+- Reducir degradación bajo carga en `core` sin tocar UI ni contratos HTTP (`/events`, `/logs`, `/stats`, `/sse`).
+
+### Cambios aplicados
+- Auth robusta (sin falsos “API key inválida” cuando falla backend):
+  - `gitgov/gitgov-server/src/auth.rs`
+  - `AuthError` ahora distingue `401 UNAUTHORIZED` vs `503 AUTH_BACKEND_UNAVAILABLE`.
+- Debounce de invalidación de caché dashboard:
+  - `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+  - Se agregó compuerta temporal para evitar `clear()` de caché en ráfagas extremas.
+- Debounce de `client_sessions` upsert:
+  - `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+  - Se evita escribir `upsert_client_session` en cada request cuando el mismo cliente ya actualizó recientemente.
+- Config runtime nueva (backend):
+  - `gitgov/gitgov-server/src/main.rs`
+  - `GITGOV_CACHE_INVALIDATION_MIN_INTERVAL_MS` (default `120`)
+  - `GITGOV_CLIENT_SESSION_UPSERT_MIN_INTERVAL_MS` (default `15000`)
+- Cobertura test harness:
+  - `gitgov/gitgov-server/src/integration_tests.rs` actualizado con nuevos campos de `AppState`.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `139 passed; 0 failed`.
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`).
+- Smoke live Golden Path (server corriendo en `127.0.0.1:3000`):
+  - `GET /health=200`, `GET /me=200`, `POST /events=200 (accepted=1)`, `GET /stats=200`, `GET /logs=200`.
+- Benchmark corto post-parche:
+  - `tests/artifacts/capacity_recheck_patch_u8_2026-03-14.json`
+  - `tests/artifacts/capacity_recheck_patch_u10_2026-03-14.json`
+  - `tests/artifacts/perf_gate1_after_patch_2026-03-14.json`
+
+### Nota operativa
+- En benchmark con **una sola API key** se observaron `429` altos en `POST /events` (esperado por rate-limit por identidad); no implica fallo de contrato.
+
+---
+
+## Actualización (2026-03-14) — Capacidad certificada (criterio único y repetible)
+
+### Criterio fijo (desde ahora)
+- Capacidad certificada = mayor concurrencia que cumpla simultáneamente en `core` (`/events`, `/logs`, `/stats`):
+  - `401 = 0`
+  - `429 < 2%`
+  - `5xx = 0`
+  - `p95 < 800ms`
+  - `p99 < 1500ms`
+- Se elimina criterio alterno de “no crash” para evitar mensajes contradictorios.
+
+### Corridas de certificación (single-node, 3 repeticiones por nivel)
+- `users=7`:
+  - run1: `p95=692.5ms`, `p99=878.3ms`, `401/429/5xx=0` (`capacity_recheck_single_u7_run1_2026-03-14.json`)
+  - run2: `p95=671.5ms`, `p99=723.9ms`, `401/429/5xx=0` (`...run2...`)
+  - run3: `p95=684.8ms`, `p99=767.7ms`, `401/429/5xx=0` (`...run3...`)
+- `users=8`:
+  - run1 rompe `p99` (`1587.5ms`) aunque `p95` pasa (`673.1ms`) (`capacity_recheck_single_u8_run1_2026-03-14.json`)
+- `users=10`:
+  - `p95` fuera de SLO en las 3 corridas (`957.6ms`, `960.9ms`, `1208.2ms`) (`capacity_recheck_single_u10_run*.json`)
+
+### Resultado certificado
+- **Capacidad certificada actual sin mejorar DB: `7 usuarios simultáneos` (single-node).**
+
+---
+
+## Actualización (2026-03-14) — Ejecución live Gate 0/1/2 (forense 250 simultáneos)
+
+### Forense/fixes aplicados durante la corrida
+- Backend:
+  - `POST /api-keys` ahora valida rol estricto y ya no degrada silenciosamente a `Developer` cuando llega un valor inválido:
+    - `gitgov/gitgov-server/src/handlers/org_users_api_keys.rs`
+  - Test de regresión agregado:
+    - `create_api_key_rejects_invalid_role_instead_of_silent_fallback`
+    - `gitgov/gitgov-server/src/integration_tests.rs`
+- Benchmark mixed profile:
+  - Se corrigió clasificación de endpoint para agregación (`POST /events`, `POST /chat/ask`) en resumen core/chat:
+    - `gitgov/gitgov-server/tests/capacity_mixed_profile.py`
+
+### Gate 0 (smoke contractual live)
+- Verificado en runtime con Bearer:
+  - `GET /health = 200`
+  - `GET /stats = 200`
+  - `POST /events` acepta evento válido (`accepted=1`, `errors=0`) usando `user_login` real de `/me`.
+  - `GET /logs` retorna eventos.
+
+### Gate 1 (single-node hardening)
+- Baseline:
+  - `python tests/perf_baseline_control_plane.py --server-url http://127.0.0.1:3000 --requests 80 --concurrency 8 --timeout-sec 15 --out-json tests/artifacts/perf_gate1_2026-03-14.json`
+  - resultado:
+    - `/events`: `200=80`, `p95=1237.0ms`
+    - `/logs`: `200=80`, `p95=484.8ms`
+    - `/stats`: `200=80`, `p95=624.6ms`
+    - `/chat/ask`: `200=80`, `p95=983.9ms`
+- Chat:
+  - `python tests/chat_capacity_test.py --server-url http://127.0.0.1:3000 --requests 120 --concurrency 12 --timeout-sec 25 --scenario mixed --out-json tests/artifacts/chat_gate1_mixed_2026-03-14.json`
+  - resultado:
+    - `200=120`, `429=0`, `5xx=0`
+    - `p95=4024.8ms`
+
+### Gate 2 (250 concurrentes, 20 min, mixed 70/20/10)
+- Comando:
+  - `python tests/capacity_mixed_profile.py --server-url http://127.0.0.1:3000 --api-keys-file <temp_admin_keys> --users 250 --duration-sec 1200 --think-ms 120 --timeout-sec 12 --events-ratio 70 --dashboard-ratio 20 --chat-ratio 10 --out-json tests/artifacts/capacity_mixed_250_gate2_validkeys_2026-03-14.json`
+- Resultado:
+  - total: `29,497` requests / `1212.1s` (`24.34 rps`)
+  - core:
+    - `401=5.91%`
+    - `5xx=3.49%`
+    - `429=0%`
+    - `p95=12032.7ms`
+    - `p99=12035.8ms`
+  - chat:
+    - `5xx=34.66%`
+    - `p95=12032.7ms`
+
+### Rerun con perfil exacto de 250 en `.env` (single-node)
+- Se aplicó en runtime local:
+  - `DB_MAX=30`, `DB_MIN=6`, `ACQUIRE_TIMEOUT=12`
+  - `RATE_LIMIT_*` del plan
+  - `GITGOV_RATE_LIMIT_DISTRIBUTED_DB=true`
+  - `GITGOV_SSE_DISTRIBUTED_ENABLED=true`
+- Resultado Gate 1 rerun:
+  - `perf_gate1_after_profile250_2026-03-14.json`
+  - `/stats` mostró `503` (`3/80`) en baseline.
+- Resultado preflight 250:
+  - `capacity_mixed_250_preflight_profile250_2026-03-14.json`
+  - core: `p95=12031.5ms`, `401=0.62%`, `5xx=8.54%`.
+- Forense de escalado horizontal local:
+  - intento de levantar nodo adicional con `GITGOV_SERVER_ADDR=127.0.0.1:3002` falló en bootstrap DB:
+    - `MaxClientsInSessionMode: max clients reached - in Session mode max clients are limited to pool_size`
+  - implicación: con el pooler actual (modo sesión), la base no admite el presupuesto de conexiones necesario para 3 nodos con ese perfil.
+- Acción de seguridad operativa:
+  - se restauró `.env` local al perfil estable previo (`DB_MAX=8`, `DISTRIBUTED_DB=false`, `SSE_DISTRIBUTED_ENABLED=false`) para no dejar el entorno degradado.
+
+### Conclusión de capacidad
+- **No cumple SLO de salida para 250 simultáneos en single-node local**.
+- Hallazgo dominante: saturación severa (timeouts de 12s + `5xx` + `401` bajo presión), no solo throttling.
+- Golden Path post-carga sigue operativo con key admin principal (`/events` acepta y `/stats`/`/logs` responden `200`).
+
+### Validación técnica de código
+- `cd gitgov/gitgov-server && cargo test` -> `139 passed; 0 failed`
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+
+---
+
+## Actualización (2026-03-14) — Implementación fase 250 simultáneos (backend + operación, sin UI)
+
+### Qué se implementó
+- Backend `gitgov-server`:
+  - Fan-out SSE distribuido multi-instancia con PostgreSQL `NOTIFY`:
+    - nuevo publish DB: `src/db.rs` (`publish_sse_notification`)
+    - nuevo envelope distribuido + fanout helper: `src/handlers/prelude_health.rs`
+    - listener resiliente con reconnect/backoff: `src/main.rs` (`spawn_distributed_sse_listener`)
+  - Invalida cache local `/stats` y `/logs` también en notificaciones remotas para evitar stale cross-node.
+  - Nuevos env runtime:
+    - `GITGOV_SSE_DISTRIBUTED_ENABLED`
+    - `GITGOV_SSE_DISTRIBUTED_CHANNEL`
+- Pruebas de capacidad:
+  - Nuevo script mixed-profile 70/20/10:
+    - `gitgov/gitgov-server/tests/capacity_mixed_profile.py`
+  - Make targets:
+    - `make capacity-mixed`
+    - `make capacity-soak`
+- Configuración operativa:
+  - `gitgov/gitgov-server/.env.example` actualizado con perfil recomendado para 250 concurrentes.
+  - `gitgov/.env.example` actualizado con coordinación de outbox desktop (`GITGOV_OUTBOX_GLOBAL_COORD_*`, lease + jitter).
+  - `docker-compose.yml` actualizado:
+    - perfil de hardening por env para server,
+    - fix de ruta de bootstrap SQL a `gitgov/gitgov-server/supabase/supabase_schema.sql`.
+- Documentación operativa:
+  - `docs/DEPLOYMENT.md`: topología 3 nodos, env recomendadas, gates de capacidad, canary/rollback.
+  - `docs/GOLDEN_PATH_CHECKLIST.md`: comandos de `capacity-mixed`, `capacity-soak` y SLO de aceptación.
+
+### Validación ejecutada
+- `cd gitgov/gitgov-server && cargo test` -> `138 passed; 0 failed`.
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`).
+
+### Estado de verificación live
+- `NO VERIFICADO: Gate 2/soak live de 250 simultáneos en clúster real de 3 nodos`.
+- Bloqueadores actuales:
+  - Falta entorno de despliegue multi-instancia activo (3 nodos detrás de balanceador).
+  - Falta archivo operativo de múltiples API keys reales para benchmark sin sesgo (`tests/api_keys.txt`).
+  - Falta ejecución de corrida de 20 min + soak 60 min con artefactos en `tests/artifacts/`.
+
+---
+
+## Actualización (2026-03-13) — Forense de conteo de archivos y normalización de Sidebar (modo estándar)
+
+### Resultado
+- Sidebar de cambios normalizado a fuente única: `cmd_get_status` (`git status` vía git2).
+- Se eliminó mezcla conceptual de fuentes en UI: la lista no se alimenta con previews de push.
+- Se removió ocultamiento local desde filas (`Quitar de GitGov`) para evitar discrepancias silenciosas.
+- El dashboard principal ya no se reemplaza por Diff al hacer click en archivos.
+
+### Forense técnico aplicado
+- Backend fuente de estado:
+  - `src-tauri/src/git/repository.rs` usa `include_untracked(true)`, `include_ignored(false)`.
+  - `src-tauri/src/commands/git_commands.rs#cmd_get_status` devuelve ese resultado sin transformación extra.
+- Frontend/store:
+  - `src/store/useRepoStore.ts#refreshStatus` persiste `fileChanges` solo desde `cmd_get_status`.
+- Frontend/sidebar:
+  - `src/components/diff/FileList.tsx` ahora muestra fuente explícita y desglose `M/A/D/R/?`.
+  - `src/components/cli/WorkspacePanel.tsx` mantiene dashboard fijo (sin salto a `DiffViewer`).
+
+### Validación ejecutada
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+- `cd gitgov && npx eslint src/components/diff/FileList.tsx src/components/cli/PipelineVisualizer.tsx src/components/cli/WorkspacePanel.tsx src/test/useRepoStore.test.ts` -> 0 errores
+- Prueba unitaria agregada:
+  - `src/test/useRepoStore.test.ts`: `refreshStatus` usa solo `cmd_get_status` y no mezcla `pendingPushPreview`.
+
+---
+
+## Actualización (2026-03-13) — Ajuste UX Dashboard (sidebar masivo + tarjetas pipeline)
+
+### Qué se ajustó
+- Frontend Dashboard:
+  - `PipelineVisualizer` ahora combina `Estado actual` y `Resumen de sesión` en una sola tarjeta con dos vistas e indicadores tipo slider.
+  - `Cambios masivos` ahora vive en tarjeta dedicada con dos vistas (`Cambios masivos` / `Limpieza avanzada`) e indicadores tipo slider.
+- Sidebar de cambios (`FileList`):
+  - Se removió el bloque avanzado de cambios masivos del sidebar para preservar visibilidad total del árbol de archivos.
+  - Se mantuvo modo robusto del listado (acciones por carpeta/render parcial) sin insertar nuevas tarjetas en esa columna.
+  - Forense aplicado: se dejó de mezclar `pendingPushPreview` en la lista de cambios locales para evitar contadores inflados/confusos.
+  - Se retiró acción de abrir diff desde filas del sidebar para mantener el dashboard estable en vista principal.
+  - Se añadió indicador explícito `Mostrando X de Y` cuando hay render parcial en lotes grandes.
+- Workspace (`WorkspacePanel`):
+  - Se desactivó el switch automático a `DiffViewer`; el dashboard permanece visible aunque exista `activeDiffFile`.
+
+### Validación ejecutada
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+- `cd gitgov && npx eslint src/components/cli/PipelineVisualizer.tsx src/components/diff/FileList.tsx` -> 0 errores
+
+---
+
+## Actualización (2026-03-13) — Evaluación de capacidad alta concurrencia (dictamen “miles de usuarios”)
+
+### Resultado ejecutivo
+- **NO VERIFICADO para “miles de usuarios”** en el estado actual.
+- Bajo carga alta, el sistema responde principalmente con `429` (rate limit), no con `5xx`, lo que protege estabilidad pero limita capacidad efectiva.
+
+### Pruebas ejecutadas
+- Control Plane baseline high-concurrency:
+  - `python tests/perf_baseline_control_plane.py --server-url http://127.0.0.1:3000 --requests 640 --concurrency 64 --timeout-sec 20 --out-json tests/artifacts/perf_capacity64_2026-03-13_165704.json`
+  - evidencia (`tests/artifacts/perf_capacity64_2026-03-13_165704.json`):
+    - `POST /events`: `200=240`, `429=400`, `p95=6404.1ms`
+    - `GET /logs`: `200=360`, `429=280`, `p95=3545.6ms`
+    - `GET /stats`: `200=360`, `429=280`, `p95=5387.1ms`
+    - `POST /chat/ask`: `200=240`, `429=396`, `network_error=4`, `p95=6054.2ms`
+- Chat stress dedicado:
+  - `python tests/chat_capacity_test.py --server-url http://127.0.0.1:3000 --requests 360 --concurrency 36 --timeout-sec 30 --scenario mixed --out-json tests/artifacts/chat_capacity36_2026-03-13_165704.json`
+  - evidencia (`tests/artifacts/chat_capacity36_2026-03-13_165704.json`):
+    - `200=0`, `429=331`, `network_error=29`
+
+### Lectura técnica
+- El comportamiento actual favorece fail-safe por rate limit (sin cascada de `5xx`) pero no sostiene throughput útil alto.
+- Para afirmar “aguanta miles” faltan:
+  - pruebas distribuidas multi-instancia (no solo nodo local),
+  - pruebas de larga duración (soak >= 60 min),
+  - definición de SLO/SLA objetivo por endpoint y p95/p99 máximos.
+- UX auth:
+  - Se corrigió `ControlPlaneAuthScreen` para mostrar el error real del store cuando falla `applyApiKey` (ej. server caído), evitando confundir “key inválida” con “no hay conexión”.
+
+---
+
+## Actualización (2026-03-13) — Forense freeze en `Settings > Reglas` (hardening de carga de policy)
+
+### Causa técnica identificada
+- El flujo de carga de policy podía disparar llamadas duplicadas y fallback innecesario al bridge Tauri.
+- Cuando el `fetch` directo fallaba por timeout/abort, el fallback `tauriInvoke` se seguía lanzando; ese comando no se cancela desde JS y quedaba ejecutándose en background hasta timeout HTTP del cliente Rust.
+- Bajo reintentos/reaperturas de la vista esto acumulaba trabajo bloqueante y degradaba la UI.
+
+### Qué se corrigió
+- Frontend (`gitgov/src/store/useControlPlaneStore.ts`):
+  - Se agregó deduplicación por repositorio para `loadPolicy` (`policyLoadInFlight`).
+  - Se agregó `shouldBridgePolicyFallback(...)` para evitar fallback Tauri cuando el error directo ya es `timeout/abort` o respuesta HTTP del server.
+  - `loadPolicyHistory` y `loadPolicyChangeRequests` ahora usan el mismo criterio de fallback selectivo.
+  - Se agregó control de concurrencia para evitar tormentas de requests por SSE:
+    - `loadStats` (`loadStatsInFlight`)
+    - `loadLogs` (`loadLogsInFlight`)
+    - `loadLogsIncremental` (`loadLogsIncrementalInFlight`)
+- Desktop bridge (`gitgov/src-tauri/src/control_plane/server.rs`):
+  - Timeout específico de 10s en llamadas frecuentes del cliente bloqueante:
+    - `get_logs`
+    - `get_stats`
+    - `get_daily_activity`
+    - `health_check`
+    - `get_me`
+  - Timeout específico de 10s en llamadas de policy:
+    - `get_policy`
+    - `get_policy_history`
+    - `list_policy_change_requests`
+
+### Validación ejecutada
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/test/useControlPlaneStore.test.ts` -> 0 errores
+- `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+- `cd gitgov && npm run test -- GovernanceRulesPanel --runInBand` -> `7 passed; 0 failed`
+- `cd gitgov && npm run test -- useControlPlaneStore --runInBand` -> `17 passed; 0 failed`
+
+### Estado
+- Hardening anti-freeze aplicado en la ruta de policy (Settings/Regras).
+- Pendiente validación visual manual de sesión larga en Desktop real para cerrar evidencia UX end-to-end.
+
+---
+
+## Actualización (2026-03-13) — Fase 2B.1: hot path de ingesta `/events` (batch insert sin transacción explícita)
+
+### Qué se implementó
+- Backend (`gitgov/gitgov-server`):
+  - `src/db.rs`
+    - `insert_client_events_batch_tx(...)` ahora ejecuta el `INSERT ... ON CONFLICT ... RETURNING` directo sobre pool, sin abrir/commit de transacción explícita para ese único statement.
+    - Se mantiene fallback legacy a inserción por fila cuando el batch falla.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/gitgov-server && cargo test` -> `138 passed; 0 failed`
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> falla preexistente en `db.rs:list_policy_change_requests` (`clippy::too_many_arguments`), no causada por este cambio.
+- Benchmark:
+  - `python tests/perf_baseline_control_plane.py ... --out-json tests/artifacts/perf_phase2e_batchinsert_control_plane_2026-03-13.json`
+  - `POST /events`: `throughput 8.90 -> 10.08 rps` respecto al perfil estable Fase 2C.
+  - `GET /stats`: `200=80`, `429=0`, `5xx=0`.
+- Outbox guard:
+  - `python tests/run_outbox_stability_window.py ... --out-jsonl tests/artifacts/outbox_stability_phase2e_batchinsert_2026-03-13.jsonl`
+  - `3/3` muestras `ROLLOUT_GUARD=PASS`.
+
+### Estado
+- Optimización `/events` aplicada y validada sin regresión contractual.
+- Queda pendiente optimización adicional de tail latency en chat mixed (todavía por encima de objetivo estricto).
+
+---
+
+## Actualización (2026-03-13) — Fase 2B de performance: optimización hot paths (`/stats` + chat tail latency)
+
+### Qué se implementó
+- Backend (`gitgov/gitgov-server`):
+  - `src/handlers/client_ingest_dashboard.rs`
+    - `load_audit_stats(...)` dejó de ejecutar consultas secuenciales.
+    - Ahora ejecuta en paralelo:
+      - `get_stats(...)`
+      - `get_pipeline_health_stats(...)`
+      - `get_desktop_pushes_today(...)`
+    - Se mantiene fallback seguro de `desktop_pushes_today` a `0` en error.
+  - `src/handlers/conversational/engine.rs`
+    - Ajuste de generación LLM para reducir cola/tail en ráfaga:
+      - `max_output_tokens: 1024 -> 512`
+    - Se mantiene contrato JSON y fallback degradado existente.
+
+### Validación ejecutada (resultados reales)
+- Calidad de build:
+  - `cd gitgov/gitgov-server && cargo test` -> `138 passed; 0 failed`
+  - `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+- Baseline control plane (rerun estable post-cambio):
+  - `python tests/perf_baseline_control_plane.py ... --out-json tests/artifacts/perf_phase2d_hotpath_control_plane_rerun_2026-03-13.json`
+  - resultado:
+    - `GET /stats`: `200=80`, `429=0`, `5xx=0`, `p95=622.4ms`
+    - `POST /chat/ask`: `200=80`, `429=0`, `5xx=0`, `p95=637.5ms`
+- Chat mixed (post-cooldown, sin sesgo de ventana):
+  - `python tests/chat_capacity_test.py ... --scenario mixed --out-json tests/artifacts/chat_capacity_phase2d_hotpath_mixed_after_cooldown_2026-03-13.json`
+  - resultado:
+    - `http 200=120`, `429=0`, `5xx=0`
+    - `p95=3328.9ms`, `p99=3635.5ms`
+- Outbox guard:
+  - `python tests/run_outbox_stability_window.py ... --out-jsonl tests/artifacts/outbox_stability_phase2d_hotpath_2026-03-13.jsonl`
+  - resultado:
+    - `3/3` muestras `ROLLOUT_GUARD=PASS`
+
+### Impacto observado
+- Se mantuvo estabilidad contractual (`/events`, `/logs`, `/stats`) sin `401/429/5xx` en baseline rerun.
+- Mejora de tail en chat mixed frente al baseline Fase 2C:
+  - `p95` bajó de `5916.6ms` a `3328.9ms`.
+  - `p99` bajó de `6952.0ms` a `3635.5ms`.
+
+### Estado
+- Fase 2B (hot paths iniciales): **completada**.
+- Pendiente para capacidad “miles de usuarios”:
+  - soak test prolongado (>=60 min),
+  - benchmark distribuido multi-instancia,
+  - optimización SQL adicional con `EXPLAIN (ANALYZE, BUFFERS)` en tablas de mayor cardinalidad.
+
+---
+
+## Actualización (2026-03-13) — Fase 2A de performance: tuning de límites + forense DB pool + perfil estable
+
+### Objetivo
+- Reducir `429` observados en Fase 1 sin introducir `5xx`.
+- Mantener Golden Path estable bajo stress corto (`/events`, `/logs`, `/stats`, `/chat/ask`, outbox guard).
+
+### Forense ejecutado
+- Intento A (`rate-limit distributed DB = true`) eliminó `429` pero introdujo `503` en `/stats`:
+  - evidencia benchmark: `GET /stats` con `200=75` y `503=5`.
+  - evidencia runtime: errores `MaxClientsInSessionMode` en checks del limiter distribuido.
+- Intento B (`distributed=false`, pool DB alto) quitó `503` HTTP pero aún mostró warnings de saturación DB (`MaxClientsInSessionMode`) en logs.
+- Resolución aplicada:
+  - mantener limiter en memoria para este entorno (`GITGOV_RATE_LIMIT_DISTRIBUTED_DB=false`),
+  - reducir pool DB a perfil seguro para Supabase session mode (`max=8`, `min=2`, `acquire_timeout=8s`),
+  - conservar límites explícitos por endpoint para evitar defaults conservadores.
+
+### Configuración activa (perfil estable)
+- `GITGOV_RATE_LIMIT_ADMIN_PER_MIN=180`
+- `GITGOV_RATE_LIMIT_LOGS_PER_MIN=360`
+- `GITGOV_RATE_LIMIT_STATS_PER_MIN=360`
+- `GITGOV_RATE_LIMIT_CHAT_PER_MIN=240`
+- `GITGOV_RATE_LIMIT_DISTRIBUTED_DB=false`
+- `GITGOV_CHAT_LLM_MAX_CONCURRENCY=12`
+- `GITGOV_CHAT_LLM_QUEUE_TIMEOUT_MS=2500`
+- `GITGOV_CHAT_LLM_TIMEOUT_MS=12000`
+- `GITGOV_STATS_CACHE_TTL_MS=5000`
+- `GITGOV_LOGS_CACHE_TTL_MS=1200`
+- `GITGOV_LOGS_CACHE_STALE_ON_ERROR_MS=8000`
+- `GITGOV_DB_MAX_CONNECTIONS=8`
+- `GITGOV_DB_MIN_CONNECTIONS=2`
+- `GITGOV_DB_ACQUIRE_TIMEOUT_SECS=8`
+
+### Validación live (perfil final)
+- Baseline control plane:
+  - `python tests/perf_baseline_control_plane.py --server-url http://127.0.0.1:3000 --requests 80 --concurrency 8 --timeout-sec 15 --out-json tests/artifacts/perf_phase2c_pool8_control_plane_2026-03-13.json`
+  - resultado:
+    - `POST /events`: `200=80`, `p95=1500.7ms`
+    - `GET /logs`: `200=80`, `429=0`, `5xx=0`
+    - `GET /stats`: `200=80`, `429=0`, `5xx=0`
+    - `POST /chat/ask`: `200=80`, `429=0`, `5xx=0`
+- Chat mixed stress:
+  - `python tests/chat_capacity_test.py --server-url http://127.0.0.1:3000 --requests 120 --concurrency 12 --timeout-sec 25 --scenario mixed --out-json tests/artifacts/chat_capacity_phase2c_pool8_mixed_2026-03-13.json`
+  - resultado:
+    - `http 200=120`, `429=0`, `5xx=0`
+    - `p95=5916.6ms`, `p99=6952.0ms`
+- Chat deterministic post-cooldown:
+  - `python tests/chat_capacity_test.py --server-url http://127.0.0.1:3000 --requests 60 --concurrency 4 --timeout-sec 25 --scenario deterministic --out-json tests/artifacts/chat_capacity_phase2c_pool8_deterministic_after_cooldown_2026-03-13.json`
+  - resultado:
+    - `http 200=60`, `429=0`, `5xx=0`
+    - `p95=1309.3ms`
+- Outbox rollout guard:
+  - `python tests/run_outbox_stability_window.py --server-url http://127.0.0.1:3000 --phase 100 --duration-hours 0.005 --interval-secs 6 --out-jsonl tests/artifacts/outbox_stability_phase2c_pool8_2026-03-13.jsonl`
+  - resultado:
+    - `3/3` muestras `ROLLOUT_GUARD=PASS`
+
+### Estado
+- Fase 2A (tuning + forense + estabilización local): **completada**.
+- Siguiente fase recomendada: perf SQL hot paths (`EXPLAIN ANALYZE`) y prueba soak prolongada multi-escenario.
+
+---
+
+## Actualización (2026-03-13) — Baseline de capacidad Fase 1 + plan de hardening hacia producción
+
+### Benchmarks live ejecutados
+- Control Plane baseline:
+  - comando:
+    - `cd gitgov/gitgov-server && python tests/perf_baseline_control_plane.py --server-url http://127.0.0.1:3000 --requests 80 --concurrency 8 --timeout-sec 15 --out-json tests/artifacts/perf_phase1_control_plane_2026-03-13.json`
+  - resultados:
+    - `POST /events`: `200=80`, `p95=1287.4ms`, `p99=1605.6ms`, `11.59 rps`
+    - `GET /logs`: `200=60`, `429=20`, `p95=678.7ms`, `p99=865.1ms`, `92.18 rps`
+    - `GET /stats`: `200=60`, `429=20`, `p95=901.9ms`, `p99=1261.7ms`, `63.26 rps`
+    - `POST /chat/ask`: `200=80`, `p95=834.5ms`, `p99=992.8ms`, `22.61 rps`
+- Chat mixed stress:
+  - comando:
+    - `cd gitgov/gitgov-server && python tests/chat_capacity_test.py --server-url http://127.0.0.1:3000 --api-key <env> --requests 120 --concurrency 12 --timeout-sec 25 --scenario mixed --out-json tests/artifacts/chat_capacity_phase1_mixed_2026-03-13.json`
+  - resultados:
+    - `200=40`, `429=80`, `17.26 rps`
+    - `ok_p95=3527.0ms`, `ok_p99=5301.2ms`
+- Chat deterministic (post-cooldown):
+  - comando:
+    - `cd gitgov/gitgov-server && python tests/chat_capacity_test.py --server-url http://127.0.0.1:3000 --api-key <env> --requests 60 --concurrency 4 --timeout-sec 25 --scenario deterministic --out-json tests/artifacts/chat_capacity_phase1_deterministic_2026-03-13.json`
+  - resultados:
+    - `200=60`, `429=0`, `11.91 rps`
+    - `p95=1101.6ms`, `p99=1191.0ms`
+- Outbox rollout guard:
+  - comando:
+    - `cd gitgov/gitgov-server && python tests/run_outbox_stability_window.py --server-url http://127.0.0.1:3000 --phase 100 --duration-hours 0.005 --interval-secs 6 --out-jsonl tests/artifacts/outbox_stability_phase1_2026-03-13.jsonl`
+  - resultado:
+    - `3/3` muestras en `ROLLOUT_GUARD=PASS`
+
+### Diagnóstico (Fase 1)
+- Cuello principal observado en esta corrida: throttling por rate-limit en `/logs`, `/stats` y `chat` bajo ráfaga (no 5xx).
+- Golden Path contractual se mantuvo estable en la ventana de prueba (`/events`, `/stats`, `/logs` con auth y outbox guard PASS).
+
+### Siguiente fase (hardening inmediato)
+1. Ajustar límites por endpoint en entorno productivo (logs/stats/chat/admin) con valores explícitos en `.env` para evitar defaults conservadores.
+2. Activar `GITGOV_RATE_LIMIT_DISTRIBUTED_DB=true` para consistencia de cuotas en despliegue multi-instancia.
+3. Ejecutar rerun de baseline + chat capacity y exigir:
+   - `0` errores `401/5xx`,
+   - `429 < 2%` en `logs/stats` bajo perfil objetivo,
+   - `chat ok_p95 < 2.5s` en escenario mixed objetivo.
+4. Con baseline aprobado, abrir Fase 2-B de optimización de hot paths SQL (`/events`, `/stats`, `/logs`) con `EXPLAIN (ANALYZE, BUFFERS)` y ajuste de índices.
+
+### Evidencia
+- `gitgov/gitgov-server/tests/artifacts/perf_phase1_control_plane_2026-03-13.json`
+- `gitgov/gitgov-server/tests/artifacts/chat_capacity_phase1_mixed_2026-03-13.json`
+- `gitgov/gitgov-server/tests/artifacts/chat_capacity_phase1_deterministic_2026-03-13.json`
+- `gitgov/gitgov-server/tests/artifacts/outbox_stability_phase1_2026-03-13.jsonl`
+
+---
+
+## Actualización (2026-03-13) — `POST /policy/check` con bloqueo opcional por org/rama (scope transport-level)
+
+### Qué se implementó
+- Backend (`gitgov/gitgov-server`):
+  - `src/handlers/prelude_health.rs`
+    - Nuevo `PolicyCheckBlockingScope` (`org_pattern`, `branch_pattern`) y método `matches(...)`.
+    - `AppState` ahora incluye `policy_check_block_scopes`.
+  - `src/main.rs`
+    - Nuevo parser de env `GITGOV_POLICY_CHECK_BLOCK_SCOPES` (CSV `org:branch_glob`).
+    - Inyección de scopes en `AppState`.
+    - Log de bootstrap indicando modo advisory-only vs modo bloqueante por scope.
+    - Actualización de catálogo de rutas (`/policy/check` con bloqueo opcional por scope).
+  - `src/handlers/client_ingest_dashboard.rs`
+    - `policy_check` mantiene respuesta JSON contractual, pero ahora devuelve `409 Conflict` cuando:
+      - `allowed=false`, y
+      - el scope de request (`org` derivado de `repo`, `branch`) coincide con `GITGOV_POLICY_CHECK_BLOCK_SCOPES`.
+    - Si no coincide scope (o variable ausente), mantiene comportamiento advisory (`200`).
+    - Métrica nueva: `gitgov_policy_checks_transport_blocked_total`.
+- Desktop (`gitgov/src-tauri`):
+  - `src/control_plane/server.rs`
+    - `policy_check(...)` ahora trata `409` como respuesta esperada y parsea JSON (evita fail-open accidental por tratarlo como error de transporte).
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/gitgov-server && cargo test` -> `138 passed; 0 failed`
+- `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+- `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> **falla preexistente** en `src/db.rs` (`clippy::too_many_arguments` en `list_policy_change_requests`, no causada por este cambio)
+- `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+
+### Estado
+- Pendiente V1.2-C "`policy/check` bloqueante opcional por org/branch": **cerrado**.
+
+---
+
+## Actualización (2026-03-13) — Hotfix crítico runtime: crash en `/compliance/{org}` por JSON legacy con `null`
+
+### Síntoma observado en smoke live
+- `GET /compliance/acme` terminaba conexión de forma inesperada.
+- En runtime log (`gitgov-server/.tmp/server_run.err.log`) se observó panic:
+  - `called Result::unwrap() on an Err value: ColumnDecode ... invalid type: null, expected a map`
+  - punto de falla: deserialización de columna `dashboard` en `get_compliance_dashboard(...)`.
+
+### Causa raíz
+- El payload JSON de `get_compliance_dashboard(...)` en DB activa puede devolver campos `null` en objetos legacy (ej. `signals.by_type = null`).
+- El backend hacía decode directo con `row.get::<Json<ComplianceDashboard>>("dashboard")`, que panicaba ante `null` donde se esperaba `map`.
+
+### Corrección aplicada
+- `gitgov/gitgov-server/src/db.rs`
+  - `get_compliance_dashboard(...)` ahora usa lectura defensiva:
+    - `row.try_get::<Json<serde_json::Value>>("dashboard")` (sin panic),
+    - sanea `null` legacy (`signals/correlation/policy/exports`, `timeline`, `signals.by_type`),
+    - deserializa con fallback a `ComplianceDashboard::default()` si el payload sigue inválido.
+  - Se eliminó el punto de `unwrap` implícito que causaba crash del worker/runtime.
+
+### Smoke live (post-fix) — resultados reales
+- `GET /health` -> `200`
+- `GET /me` -> `200` (`role=Admin`, `client=bootstrap-admin`)
+- `POST /events` -> `200` (`accepted=1`, `duplicates=0`, `errors=0`)
+- `GET /stats` -> `200`
+- `GET /logs?limit=5&offset=0` -> `200`
+- `POST /signals/detect/acme` -> `200` (`signals_created=0`)
+- `GET /compliance/acme` -> `200`
+  - `timeline_points=6`
+  - `timeline_last_month=2026-03`
+
+### Estado
+- Crash runtime de compliance dashboard: **cerrado**.
+- Smokes live de Fase 4: **ok**.
+
+---
+
+## Actualización (2026-03-13) — V1.2-C Fase 4: timeline mensual en dashboard + hardening de performance
+
+### Qué se implementó
+- Backend (`gitgov/gitgov-server`):
+  - `src/models.rs`
+    - `ComplianceDashboard` ahora incluye `timeline` mensual.
+    - Nuevo contrato `ComplianceTimelinePoint`.
+    - Hardening de deserialización con `#[serde(default)]` para compatibilidad hacia atrás.
+  - `src/db.rs`
+    - Nuevo cálculo server-side `get_compliance_timeline_monthly(...)` (ventana de 6 meses) con métricas por mes:
+      - señales detectadas,
+      - violaciones confirmadas,
+      - commits totales / con ticket,
+      - ticket coverage %,
+      - pipelines totales / success %.
+    - `get_compliance_dashboard(...)` ahora enriquece la respuesta con timeline mensual (no bloqueante si el cálculo secundario falla).
+  - `src/integration_tests.rs`
+    - Se agregó ruta `/compliance/{org_name}` al router de integración.
+    - Nuevo test de integración:
+      - `compliance_dashboard_includes_monthly_timeline_points`
+      - valida `200 OK`, shape de `timeline` y presencia de métricas agregadas.
+    - Ajuste del harness DDL para alinear columnas de timeline:
+      - `pipeline_events.ingested_at`
+      - `commit_ticket_correlations.org_id`
+- Frontend (`gitgov`):
+  - `src/store/useControlPlaneStore.ts`
+    - Nuevo estado: `complianceDashboard`, `isComplianceLoading`.
+    - Nueva acción: `loadComplianceDashboard(orgName?)`.
+    - Carga no-bloqueante por HTTP directo (`/compliance/{org}`) con timeout defensivo.
+    - Integración en `refreshDashboardData` dentro del ciclo heavy refresh (cada 5 min o forzado).
+    - Al cambiar `selectedOrgName`, se refresca timeline automáticamente para admin conectado.
+  - `src/components/control_plane/ComplianceTimelineWidget.tsx` (nuevo)
+    - Widget mensual con resumen + visual comparativa:
+      - cobertura de tickets,
+      - éxito de pipelines,
+      - señales/violaciones del último mes.
+  - `src/components/control_plane/ServerDashboard.tsx`
+    - Integración del nuevo widget en el dashboard admin.
+  - `src/test/components/ComplianceTimelineWidget.test.tsx` (nuevo)
+    - cobertura de estado loading y render con datos mensuales.
+- Base de datos:
+  - `gitgov/gitgov-server/supabase/supabase_schema_v17.sql` (nuevo)
+    - índices compuestos para performance de agregaciones mensuales:
+      - `idx_client_events_org_type_created`
+      - `idx_signals_org_created`
+      - `idx_violations_org_created`
+      - `idx_pipeline_events_org_status_ingested`
+  - `gitgov/gitgov-server/supabase_schema.sql`
+    - se reflejan índices equivalentes en schema base.
+- Documentación:
+  - `docs/ROADMAP.md`: Fase 4 marcada como completada.
+  - `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT.md`, `docs/QUICKSTART.md`, `docs/TROUBLESHOOTING.md`:
+    - versión de migraciones actualizada a `v17`.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/gitgov-server && cargo test` -> `136 passed; 0 failed`
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+- `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/ServerDashboard.tsx src/components/control_plane/ComplianceTimelineWidget.tsx src/test/components/ComplianceTimelineWidget.test.tsx` -> OK
+- `cd gitgov && npx vitest run src/test/components/ComplianceTimelineWidget.test.tsx` -> `2 passed; 0 failed`
+
+### Estado
+- V1.2-C Fase 4: **completada**.
+- V1.2-C restante en ese corte: `policy/check` bloqueante opcional por org/branch (cerrado en actualización posterior del 2026-03-13).
+
+---
+
+## Actualización (2026-03-13) — V1.2-C Fase 3: señales V2 avanzadas en detector server-side
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/db.rs`
+  - Nuevos detectores avanzados append-only:
+    - `detect_v2_pipeline_failure_streak_signals(...)`
+    - `detect_v2_stale_in_progress_signals(...)`
+    - `detect_v2_done_not_deployed_signals(...)`
+  - Integración de las tres detecciones en `detect_noncompliance_signals(...)` con manejo resiliente por bloque (`warn` + continuar).
+  - Cobertura de reglas:
+    - `pipeline_failure_streak`: 3 pipelines consecutivos `failure/aborted/unstable` por repo+branch.
+    - `stale_in_progress`: ticket activo sin commits recientes (>=3 días).
+    - `done_not_deployed`: ticket `done/closed/resolved` con commits correlacionados pero sin pipeline de deploy exitoso.
+- `gitgov/gitgov-server/src/models.rs`
+  - Se extendió `SignalType` con:
+    - `pipeline_failure_streak`
+    - `stale_in_progress`
+    - `done_not_deployed`
+  - Se actualizó roundtrip test de `SignalType`.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/gitgov-server && cargo test` -> `134 passed; 0 failed`
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+- Runtime live:
+  - `POST /signals/detect/acme` -> `200 OK` con `{"signals_created":0}`
+
+### Estado
+- V1.2-C Fase 3 (backend detector): **completada**.
+- Pendiente V1.2-C Fase 4: timeline mensual + endurecimiento de performance/dashboard.
+
+---
+
+## Actualización (2026-03-13) — Test de regresión `/signals/detect` + hardening del harness de integración
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/integration_tests.rs`
+  - Se expuso la ruta `POST /signals/detect/{org_name}` en el router de integración autenticado.
+  - Nuevo test:
+    - `trigger_detection_falls_back_when_legacy_sql_detector_errors`
+    - fuerza fallo de la función SQL legacy `detect_noncompliance_signals(...)`
+    - valida que el endpoint responde `200` (sin `500`) y retorna `signals_created`.
+  - Se ajustó la DDL del harness para usar `gen_random_uuid()` en defaults de PK (en lugar de `uuid_generate_v4()`), evitando fallos por `search_path` en esquemas aislados.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/gitgov-server && $env:TEST_DATABASE_URL=<from .env>; cargo test trigger_detection_falls_back_when_legacy_sql_detector_errors -- --nocapture`
+  - `1 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo test`
+  - `134 passed; 0 failed`
+- `cd gitgov && npm run typecheck`
+  - OK (`tsc -b`)
+
+### Estado
+- Regresión de `/signals/detect` cubierta por test de integración: **cerrado**.
+
+---
+
+## Actualización (2026-03-13) — Forense y fix de `/signals/detect/{org}` (500 interno)
+
+### Síntoma observado
+- `POST /signals/detect/acme` devolvía `500` con body:
+  - `{"error":"Internal database error"}`
+
+### Forense (evidencia runtime)
+- Log real en `gitgov/gitgov-server/.tmp/server_run.log`:
+  - `Failed to detect signals: Database error: error returned from database: column reference "last_ingested_at" is ambiguous`
+- Causa raíz:
+  - La función SQL legacy `detect_noncompliance_signals(...)` en la base activa falla por ambigüedad (`last_ingested_at`) y hacía caer el endpoint completo.
+
+### Corrección aplicada
+- `gitgov/gitgov-server/src/db.rs`
+  - `detect_noncompliance_signals(...)` ahora:
+    - trata la función SQL legacy como paso opcional (best effort),
+    - si falla, registra warning y continúa con detección V2 server-side (sin propagar `Err`).
+  - `execute_detect_signals(...)` (job worker) ahora delega en `detect_noncompliance_signals(...)` para compartir el mismo fallback resiliente.
+  - Se normalizó el tipo de retorno SQL legacy para evitar panic por decode:
+    - `SELECT detect_noncompliance_signals(...)::bigint as count`.
+  - Se mantiene append-only y deduplicación de señales V2.
+- `gitgov/gitgov-server/supabase/supabase_schema_v16.sql`
+  - Migración nueva que reemplaza `detect_noncompliance_signals(...)`:
+    - elimina shadowing de `last_ingested_at`,
+    - califica columnas con alias (`ops.last_ingested_at`),
+    - usa variable local `v_last_ingested_at` para cursor de avance.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/gitgov-server && cargo test` -> `133 passed; 0 failed`
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+- `psql -f gitgov/gitgov-server/supabase/supabase_schema_v16.sql <DATABASE_URL_sin_query_params>` -> `CREATE FUNCTION`, `COMMENT`
+- Runtime live (instancia principal reiniciada en `127.0.0.1:3000`):
+  - `POST /signals/detect/acme` -> `200 OK` con `{"signals_created":0}`
+  - Log nuevo sin error/panic para esa llamada.
+
+### Estado
+- Incidente de `500` en detección manual de señales: **cerrado**.
+- Fix de fondo de función SQL legacy (`last_ingested_at`) aplicado en base activa mediante `v16`.
+
+---
+
+## Actualización (2026-03-13) — V1.2-C Fase 2 mínima: señales `commit_no_ticket` + `ticket_no_coverage`
+
+### Qué se implementó
+- Backend server:
+  - Se extendió `SignalType` para soportar:
+    - `commit_no_ticket`
+    - `ticket_no_coverage`
+  - `detect_noncompliance_signals(...)` ahora mantiene el flujo existente y agrega detección V2 mínima en append-only:
+    - commits recientes en ramas protegidas sin correlación con ticket (`commit_no_ticket`);
+    - tickets `done/closed/resolved` sin commits correlacionados (`ticket_no_coverage`).
+  - Se agregó deduplicación por evidencia para evitar duplicados al rerun de detección.
+
+### Archivos modificados
+- `gitgov/gitgov-server/src/models.rs`
+  - Nuevos variants de `SignalType` + roundtrip test actualizado.
+- `gitgov/gitgov-server/src/db.rs`
+  - Nuevos helpers:
+    - `detect_v2_commit_no_ticket_signals(...)`
+    - `detect_v2_ticket_no_coverage_signals(...)`
+  - Integración en `detect_noncompliance_signals(...)` para sumar resultados V2 a la cuenta total.
+  - Hotfix de tipos timestamp en tickets:
+    - `COALESCE(pt.updated_at, pt.ingested_at)` (sin cast numérico de `ingested_at`).
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/gitgov-server && cargo test` -> `133 passed; 0 failed`
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b` sin errores)
+
+### Estado
+- V1.2-C queda en progreso:
+  - Fase 1: completada.
+  - Fase 2 mínima (`commit_no_ticket`, `ticket_no_coverage`): completada.
+  - Fase 3 (señales avanzadas): completada.
+  - Fase 4 (timeline y performance): pendiente.
+
+### Estado de verificación
+- Verificación live completada en `127.0.0.1:3000`:
+  - `POST /signals/detect/acme` responde `200` y no dispara `500`.
+
+---
+
+## Actualización (2026-03-13) — Arranque V1.2-C Fase 1: endpoint unificado de correlación
+
+### Qué se implementó
+- Backend server:
+  - Nuevo endpoint admin-only:
+    - `GET /integrations/correlations/v2`
+  - Read-model unificado para responder en una vista:
+    - `ticket_id -> commit_sha -> pipeline_run`
+  - Filtros soportados por query:
+    - `org_name`, `repo_full_name`, `ticket_id`, `hours`, `limit`, `offset`
+
+### Archivos modificados
+- `gitgov/gitgov-server/src/models.rs`
+  - Nuevos contratos:
+    - `CorrelationV2Query`
+    - `TicketFlowCorrelation`
+    - `CorrelationV2Response`
+- `gitgov/gitgov-server/src/db.rs`
+  - Nueva query principal:
+    - `get_ticket_flow_correlations_v2(...)`
+  - Une `commit_ticket_correlations` + `project_tickets` + último `client_events(commit)` + último `pipeline_events` por commit.
+- `gitgov/gitgov-server/src/handlers/integrations.rs`
+  - Nuevo handler:
+    - `get_correlation_v2`
+- `gitgov/gitgov-server/src/main.rs`
+  - Registro de ruta:
+    - `/integrations/correlations/v2`
+  - Logging de endpoint en boot.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/gitgov-server && cargo test` -> `133 passed; 0 failed`
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b` sin errores)
+- `GET /integrations/correlations/v2?limit=3&offset=0&hours=168` (Bearer admin) -> `200 OK` (`total=0`, `items=0` en entorno local limpio)
+
+### Estado
+- V1.2-C **NO** está completo aún.
+- Queda pendiente Fase 2+ (nuevas señales de compliance y timeline).
+
+---
+
+## Actualización (2026-03-13) — Fix smoke Governance V2: `POLICY_REPO` sin encode manual
+
+### Problema
+- `tests/policy_requests_multisession_smoke.sh` construía rutas con `"/policy/$POLICY_REPO/..."`.
+- Con valor normal `owner/repo`, Axum interpreta `/` como separador de path y devolvía `404` en endpoints de policy.
+
+### Corrección aplicada
+- `gitgov/gitgov-server/tests/policy_requests_multisession_smoke.sh`
+  - Se añadió normalización automática:
+    - `POLICY_REPO_PATH="${POLICY_REPO//\//%2F}"`
+  - Se reemplazó el uso de `POLICY_REPO` por `POLICY_REPO_PATH` en todas las llamadas:
+    - `POST /policy/{repo}/requests`
+    - `GET /policy/{repo}/requests?...`
+  - Se añadió salida informativa `Repo path (encoded): ...` cuando aplica.
+
+### Validación ejecutada (resultado real)
+- Smoke multi-sesión con repo sin encode manual:
+  - `powershell -File gitgov/gitgov-server/tests/policy_requests_multisession_smoke.ps1 ... -PolicyRepo acme/repo`
+  - Resultado: `11 passed, 0 failed` (`smoke_plain_repo_exit=0`)
+- Post-validación seguridad:
+  - revocadas keys temporales emitidas para la corrida (`revoked_validation_keys=2`).
+
+---
+
+## Actualización (2026-03-13) — Auditoría por fases backend/frontend/BD/desktop + reconciliación documental
+
+### Qué se verificó (forense por fases)
+- Backend: rutas y auth reales (`main.rs` + handlers) para governance/drift/policy requests, scoping y admin gates.
+- Frontend: flujo `Settings?admin=governance`, carga parcial por sección, carga manual de solicitudes e interacción del panel de drift.
+- Base de datos: tablas append-only de drift/requests/decisions, índices y queries de export/listado con scoping.
+- Desktop/Tauri: normalización loopback `localhost -> 127.0.0.1`, timeouts HTTP, fallback de policy load y control SSE por generación.
+
+### Corrección aplicada
+- `docker-compose.yml`
+  - Se corrigieron mounts de migraciones Docker `v4..v6` a rutas reales:
+    - `gitgov/gitgov-server/supabase/supabase_schema_v4.sql`
+    - `gitgov/gitgov-server/supabase/supabase_schema_v5.sql`
+    - `gitgov/gitgov-server/supabase/supabase_schema_v6.sql`
+
+### Documentación actualizada
+- `docs/DEPLOYMENT.md`:
+  - Se alineó el bloque “Qué inicializa automáticamente” con rutas reales de migraciones montadas por Docker.
+- `docs/ARCHITECTURE.md`:
+  - Se agregó hardening Desktop documentado: loopback guard, SSE generation guard, timeout de policy load y ventana de heavy refresh.
+- `docs/TROUBLESHOOTING.md`:
+  - Se amplió diagnóstico de `Settings > Reglas` con check del endpoint de requests liviano (`include_config=false`) y comportamiento esperado ante timeout (~12s).
+- `docs/ROADMAP.md`:
+  - Se marcó como implementado el `Widget Ticket Coverage en Dashboard` dentro del bloque Jira preview.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/gitgov-server && cargo test` -> `133 passed; 0 failed`
+- `cd gitgov && npm run typecheck` -> OK (`tsc -b` sin errores)
+- `cd gitgov && npx eslint src/pages/SettingsPage.tsx src/components/control_plane/GovernanceRulesPanel.tsx src/store/useControlPlaneStore.ts src/components/cli/DriftDetectionCard.tsx src/components/cli/PipelineVisualizer.tsx` -> OK
+
+---
+
+## Actualización (2026-03-13) — Cierre oficial de freeze en Settings > Reglas + limpieza de pendientes desactualizados
+
+### Cierre confirmado
+- Se marca como **cerrado** el incidente de `GitGov (No responde)` al abrir `Settings > Reglas`.
+- Confirmación manual de usuario en Desktop real reportada el `2026-03-12`.
+
+### Documentación alineada
+- Se cerraron entradas `NO VERIFICADO` específicas del freeze de Settings.
+- Se actualizaron secciones de backlog donde `Drift Detection` aparecía como “por implementar”, para reflejar estado real:
+  - drift detection v2 ya implementado (sync/push local policy, auditoría y métricas);
+  - queda pendiente solo hardening/expansión de cobertura.
+- Se unificó documentación de entorno local a la URL canónica `http://127.0.0.1:3000` en guías operativas.
+- Se actualizó la referencia de migraciones de schema a la versión vigente (`v15`).
+- Se actualizó lista de próximos pasos para enfocarla en pendientes reales (QA live, correlación avanzada, release ops).
+- Se alineó `docs/DEPLOYMENT.md` con estado vigente:
+  - fecha de actualización 2026-03-13,
+  - URL Docker canónica `127.0.0.1:3001`,
+  - guía explícita para aplicar migraciones `v7..v15` en entorno Docker.
+- Se actualizó `docs/RELEASE_CHECKLIST.md` para incluir `make governance-smoke` en verificación post-deploy de Governance V2.
+- Se actualizó `docs/ARCHITECTURE.md` para reflejar schema versionado vigente (`v2..v15`) y catálogo de migraciones `v7..v15`.
+- Se actualizó `docs/TROUBLESHOOTING.md` en la sección de DB para indicar aplicación de migraciones pendientes `v5+` (incluyendo `v7..v15` para governance/drift v2).
+- Se actualizó `docs/QUICKSTART.md` para reflejar rutas reales de migraciones (`gitgov-server/supabase/supabase_schema_v*.sql`) y secuencia de instalación limpia hasta `v15`.
+- Se normalizaron fechas de cabecera/consolidación en `docs/ROADMAP.md`, `docs/DEPLOYMENT.md` y `AGENTS.md` a 2026-03-13.
+
+### Estado operativo
+- Este update es documental (sin cambios de código runtime).
+
+---
+
+## Actualización (2026-03-11) — Hotfix Terminal CLI: evitar "conectando..." colgado y input silencioso
+
+### Problema atendido
+- En UI se observó estado `conectando...` sostenido en la terminal embebida, con input ignorado (el usuario escribe y no pasa nada).
+- El comportamiento era consistente con sesión PTY no establecida (`sessionId` nulo): el callback de teclado descartaba bytes sin feedback.
+
+### Qué se implementó
+- `gitgov/src/components/cli/TerminalPanel.tsx`
+  - Se agregó timeout defensivo de conexión (`CONNECT_TIMEOUT_MS`) para evitar spinner infinito de `conectando...`.
+  - Si el start de PTY se estanca, la UI vuelve a estado no-conectando y muestra aviso accionable:
+    - `Tiempo de espera agotado... Pulsa Iniciar terminal`.
+  - Se agregó feedback explícito cuando el usuario teclea sin sesión activa:
+    - `Sin terminal activa. Pulsa Iniciar terminal.`
+  - Se aplicó cooldown para no spamear el aviso en cada tecla.
+  - Se limpia timeout al desmontar/reiniciar para evitar residuos de estado.
+  - Se cambió copy/estado visible para evitar semántica de "desconexión de sesión":
+    - botón: `Iniciar` / `Reiniciar` terminal (en lugar de `Reconectar`)
+    - chip: `Activa: <shell>` / `Iniciando...` / `Sin terminal`
+  - Se corrigió estado engañoso: cuando no había sesión y tampoco conexión en curso, ya no muestra `conectando...`.
+
+### Evidencia de cambios previos en terminal (otras sesiones)
+- `Actualización (2026-03-09) — Terminal nativa completa (PTY + xterm.js)` — introducción de terminal nativa PTY.
+- `2026-03-11 - Forense v3: fugas de listeners/sesiones al navegar Dashboard -> Settings` — hardening por race en `TerminalPanel`.
+- `2026-03-11 - Forense v4: raíz de freeze en stop de terminal PTY (mutex contendido)` — fix de bloqueo en cierre de sesión PTY.
+- `Actualización (2026-03-11) — Localización al español de la UI CLI` — cambios recientes de copy en `TerminalPanel`.
+
+### Impacto Golden Path
+- No cambia auth Bearer, outbox, `/events`, `/stats`, `/logs` ni contratos compartidos.
+- Ajuste acotado al comportamiento del frontend de terminal embebida.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/components/cli/TerminalPanel.tsx src/components/cli/PipelineVisualizer.tsx src/components/cli/AuditTrailPanel.tsx src/components/cli/DriftDetectionCard.tsx` -> OK
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+### Estado de verificación
+- `NO VERIFICADO: falta validación manual en Desktop/Tauri real para confirmar recuperación inmediata desde "conectando..." colgado usando el botón Reconectar y escritura interactiva posterior.`
+
+---
+
+## Actualización (2026-03-11) — Localización al español de la UI CLI
+
+### Qué se implementó
+- `gitgov/src/components/cli/PipelineVisualizer.tsx`
+  - Se tradujeron al español los labels visibles del panel superior:
+    - `Flujo del pipeline`
+    - `Estado actual`
+    - `Siguiente accion`
+    - `Resumen de sesion`
+    - `Resumen del ultimo commit`
+    - `Validaciones / Bloqueos`
+    - `Esperando actividad local...`
+  - Se tradujeron los labels y detalles operativos de steps, snapshot y gates:
+    - `Rama`, `Preparacion`, `Trazabilidad`, `Revision`, `CI`, `Siguiente accion`.
+  - Se localizo tambien el badge de estado (`Listo`, `En curso`, `Alerta`, `Error`, `Pendiente`) y varios mensajes de feedback del feed en vivo.
+  - Se mantuvo intacta la logica del panel; el cambio es de copy/localizacion.
+- `gitgov/src/components/cli/TerminalPanel.tsx`
+  - Se tradujeron los mensajes y acciones visibles de la terminal nativa:
+    - `Reconectar`, `conectando...`, mensajes de conexion/error/salida.
+- `gitgov/src/components/cli/AuditTrailPanel.tsx`
+  - Se tradujeron labels y estados visibles:
+    - `Rastro de auditoria`, `Sesion`, `Historial`, `No hay actividad de sesion`, `No hay datos historicos`.
+  - Se localizo tambien el texto de estados (`En curso`, `Listo`, `Error`, `Pendiente`) y el origen (`Boton`, `Manual`).
+
+### Impacto Golden Path
+- No cambia auth Bearer, outbox, handlers, `/events`, `/stats`, `/logs` ni contratos compartidos.
+- Ajuste solo de UI/copy en frontend.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/components/cli/PipelineVisualizer.tsx src/components/cli/TerminalPanel.tsx src/components/cli/AuditTrailPanel.tsx src/components/cli/DriftDetectionCard.tsx` -> OK
+- `cd gitgov && npx vitest run src/test/components/DriftDetectionCard.test.tsx` -> `7 passed; 0 failed`
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+### Estado de verificación
+- `NO VERIFICADO: faltó validación visual manual en Desktop/Tauri real para confirmar que ya no quedan textos visibles en ingles dentro de la UI CLI mostrada en pantalla.`
+
+---
+
+## Actualización (2026-03-11) — Gates / Blockers con scroll y restauración de Traceability
+
+### Qué se implementó
+- `gitgov/src/components/cli/PipelineVisualizer.tsx`
+  - Se restauraron `Traceability`, `Review Gate`, `CI Gate` y `Next Action` cuando falta `gitgov.toml`.
+  - El panel `Gates / Blockers` mantiene scroll vertical interno y ahora organiza el contenido en dos tramos:
+    - primer tramo: `DriftDetectionCard` visible al inicio,
+    - tramo inferior: `gateItems` accesibles al bajar en la barra de desplazamiento.
+  - En el estado `missing-gitgov-toml`, el bloque principal queda centrado dentro del viewport del panel y el resto aparece al hacer scroll.
+- `docs/PROGRESS.md`
+  - Se registró esta corrección para dejar explícito que la información secundaria no debe ocultarse de forma permanente.
+
+### Impacto Golden Path
+- No cambia auth Bearer, outbox, endpoints ni contratos compartidos.
+- Ajuste puramente visual de layout/scroll en frontend.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/components/cli/DriftDetectionCard.tsx src/components/cli/PipelineVisualizer.tsx src/test/components/DriftDetectionCard.test.tsx` -> OK
+- `cd gitgov && npx vitest run src/test/components/DriftDetectionCard.test.tsx` -> `7 passed; 0 failed`
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+### Estado de verificación
+- `NO VERIFICADO: falta validación visual manual en Desktop/Tauri real para confirmar que el primer bloque queda centrado y que los gateItems reaparecen al hacer scroll dentro del panel.`
+
+---
+
+## Actualización (2026-03-11) — Corrección UI del fix anterior en Gates / Blockers
+
+### Qué se implementó
+- `gitgov/src/components/cli/DriftDetectionCard.tsx`
+  - Se restauró la visibilidad explícita del texto del blocker `Falta archivo local de reglas` dentro del bloque `Configuración rápida (1 minuto)`.
+  - Se mantuvo la eliminación de duplicado visual: el mismo blocker ya no se renderiza otra vez como tarjeta separada debajo.
+- `gitgov/src/components/cli/PipelineVisualizer.tsx`
+  - Cuando el bloqueo activo es `missing-gitgov-toml`, el panel oculta temporalmente los `gateItems` secundarios (`Traceability`, `Review Gate`, `CI Gate`, `Next Action`) para que el blocker principal sí entre completo en el área visible.
+- `gitgov/src/test/components/DriftDetectionCard.test.tsx`
+  - Los tests ahora validan que el título del blocker sigue visible una sola vez dentro del quick setup.
+
+### Impacto Golden Path
+- No cambia auth Bearer, outbox, endpoints ni contratos compartidos.
+- Ajuste exclusivamente visual/de priorización de contenido en frontend.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/components/cli/DriftDetectionCard.tsx src/components/cli/PipelineVisualizer.tsx src/test/components/DriftDetectionCard.test.tsx` -> OK
+- `cd gitgov && npx vitest run src/test/components/DriftDetectionCard.test.tsx` -> `7 passed; 0 failed`
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+### Estado de verificación
+- `NO VERIFICADO: validación visual manual del nuevo layout en Desktop/Tauri real aún pendiente en esta sesión; faltó volver a abrir la pantalla y confirmar que el blocker ya entra completo sin esconder su título.`
+
+---
+
+## Actualización (2026-03-11) — Fix UI en Gates / Blockers para policy missing
+
+### Qué se implementó
+- `gitgov/src/components/cli/DriftDetectionCard.tsx`
+  - Se eliminó la duplicación visual del alerta `missing-gitgov-toml`.
+  - Cuando falta `gitgov.toml`, la tarjeta ahora muestra solo el bloque guiado `Configuración rápida (1 minuto)` y omite la alerta redundante debajo.
+- `gitgov/src/components/cli/PipelineVisualizer.tsx`
+  - La columna `Gates / Blockers` pasó a layout `flex` con scroll vertical interno.
+  - Resultado esperado: cuando hay quick setup + gates adicionales, el contenido ya no queda cortado dentro del alto fijo del workspace.
+- `gitgov/src/test/components/DriftDetectionCard.test.tsx`
+  - Se actualizó la expectativa del caso `missing-gitgov.toml` al nuevo contrato visual.
+  - Se agregó cobertura para asegurar que la alerta redundante no vuelva a renderizarse cuando aparece el quick setup.
+
+### Impacto Golden Path
+- No modifica auth Bearer, outbox, `/events`, `/stats`, `/logs` ni contratos compartidos.
+- Cambio limitado a layout/comportamiento visual del panel de drift en frontend.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/components/cli/DriftDetectionCard.tsx src/components/cli/PipelineVisualizer.tsx src/test/components/DriftDetectionCard.test.tsx` -> OK
+- `cd gitgov && npx vitest run src/test/components/DriftDetectionCard.test.tsx` -> `7 passed; 0 failed`
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+### Estado de verificación
+- `NO VERIFICADO: validación visual manual del scroll interno en Desktop/Tauri real no se ejecutó en esta sesión; faltó abrir la UI y reproducir el panel con el estado "missing gitgov.toml".`
+
+---
+
+## Actualización (2026-03-11) — Forense Settings freeze: hardening UI + carga admin controlada
+
+### Qué se implementó
+- `gitgov/src/pages/SettingsPage.tsx`
+  - Se agregó soporte de entrada directa a sub-sección admin por query param (`/settings?admin=governance`).
+  - Se endureció el bloque de configuración JSON para evitar congelamientos:
+    - JSON ahora se renderiza de forma diferida (`Mostrar/Ocultar JSON`).
+    - Se memoizó el resaltado por línea para evitar recalcular/mapeos costosos en re-renders no relacionados.
+- `gitgov/src/components/control_plane/AdminOnboardingPanel.tsx`
+  - Se eliminó la auto-carga inicial de usuarios/invitaciones cuando no existe `org` activa.
+  - Se añadió acción explícita `Cargar datos org` con estado de carga.
+  - Resultado: al abrir Settings ya no dispara consultas admin vacías que agregaban ruido/latencia.
+- `gitgov/src/components/cli/PipelineVisualizer.tsx`
+  - CTA `Configurar reglas ahora` abre directamente `Settings` en la sección `Reglas` (`/settings?admin=governance`) para evitar pasos intermedios.
+
+### Impacto Golden Path
+- No cambia auth Bearer ni contratos de `/events`, `/stats`, `/logs`.
+- Cambio enfocado en resiliencia/performance de frontend (Settings + navegación governance).
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/pages/SettingsPage.tsx src/components/control_plane/AdminOnboardingPanel.tsx src/components/cli/PipelineVisualizer.tsx` -> OK
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+### Estado de verificación
+- `CIERRE (2026-03-12): validación manual en Desktop real confirmada por usuario; freeze en Settings > Reglas cerrado.`
+
+---
+
+## Actualización (2026-03-11) — Hardening anti-freeze en Settings (carga por sección)
+
+### Qué se implementó
+- `gitgov/src/pages/SettingsPage.tsx`
+  - Se redujo la carga inicial concurrente en `Settings`:
+    - antes: montaba simultáneamente `AdminOnboardingPanel`, `TeamManagementPanel`, `ApiKeyManagerWidget` y `GovernanceRulesPanel`.
+    - ahora: se monta **una sola sección admin a la vez** con tabs (`Onboarding`, `Equipo`, `API Keys`, `Reglas`).
+  - Se agregó fallback seguro para tab `Reglas` cuando no existe `repoFullName` resoluble.
+  - Se memoizó el render de JSON de configuración (`configJsonLines`) para evitar recomputación pesada en cada re-render.
+  - Objetivo operativo: evitar bloqueos de UI por ráfaga de requests y renders costosos al abrir Settings.
+
+### Impacto Golden Path
+- No se modificaron auth/token/API key runtime ni flujo commit/push/outbox.
+- Cambio focalizado en performance y resiliencia del frontend de Settings.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/pages/SettingsPage.tsx` -> OK
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+### Estado de verificación
+- `CIERRE (2026-03-12): incidente cerrado con forense consolidado (v3/v4) + validación manual de usuario en Desktop real.`
+
+---
+
+## Actualización (2026-03-11) — UX de Drift Detection para usuarios no técnicos
+
+### Qué se implementó
+- `gitgov/src/components/cli/DriftDetectionCard.tsx`
+  - Copys y CTAs simplificados para lenguaje no técnico:
+    - `Estado de reglas`, `Verificar local`, `Verificar servidor`,
+    - `Aplicar reglas en este repo`, `Publicar reglas para el equipo`.
+  - Nuevo bloque guiado `Configuración rápida (1 minuto)` cuando falta `gitgov.toml`.
+  - Nuevo CTA `Configurar reglas ahora` para abrir Settings desde el panel de blockers.
+  - Etiquetas de diff y mensajes de estado ajustados a español claro.
+- `gitgov/src/components/cli/PipelineVisualizer.tsx`
+  - Drift alerts reescritas en español no técnico.
+  - Integración de navegación directa a `/settings` desde `DriftDetectionCard`.
+- `gitgov/src/test/components/DriftDetectionCard.test.tsx`
+  - Tests actualizados a nuevos labels/copy.
+  - Cobertura nueva del CTA `Configurar reglas ahora`.
+
+### Impacto Golden Path
+- No modifica runtime de auth, outbox ni endpoints críticos (`/events`, `/stats`, `/logs`).
+- Cambio focalizado en UX/copy del panel visual de bloqueo y en tests frontend.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx vitest run src/test/components/DriftDetectionCard.test.tsx src/test/components/GovernanceRulesPanel.test.tsx` -> `14 passed; 0 failed`
+- `cd gitgov && npx eslint src/components/cli/DriftDetectionCard.tsx src/components/cli/PipelineVisualizer.tsx src/test/components/DriftDetectionCard.test.tsx` -> OK
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+### Estado de verificación
+- `NO VERIFICADO: validación visual manual end-to-end del flujo “falta gitgov.toml -> ir a Settings -> aplicar reglas -> volver y revalidar” en Desktop real no ejecutada en esta actualización.`
+
+---
+
+## Actualización (2026-03-11) — Smoke ejecutable para Governance v2 multi-sesión
+
+### Qué se implementó
+- `gitgov/gitgov-server/tests/policy_requests_multisession_smoke.sh` (nuevo)
+  - Smoke API-level para flujo governance multi-sesión con llaves separadas:
+    - create request por developer A/B,
+    - visibilidad scoping developer/admin en listados,
+    - approve por admin,
+    - validación de filtro `approved`,
+    - export `events_csv` con `policy_change_request`.
+- `gitgov/gitgov-server/tests/policy_requests_multisession_smoke.ps1` (nuevo)
+  - Wrapper PowerShell para Windows:
+    - ejecuta el smoke `.sh` vía `Git Bash`,
+    - valida prerequisitos (`bash.exe`, script path),
+    - soporta `-ValidateOnly` para verificación rápida de entorno.
+- `gitgov/gitgov-server/Makefile`
+  - Nuevo target `governance-smoke` para ejecutar el smoke de forma estandarizada.
+  - Variables requeridas:
+    - `ADMIN_API_KEY`
+    - `DEV_API_KEY_A`
+    - `DEV_API_KEY_B`
+    - opcional `POLICY_REPO` (default `acme/repo`).
+- `docs/GOLDEN_PATH_CHECKLIST.md`
+  - Se añadió comando operativo para correr `make governance-smoke`.
+
+### Impacto Golden Path
+- Sin cambios en runtime de endpoints; agrega validación operativa reproducible.
+- Mejora cierre de evidencia para el pendiente de QA multi-sesión.
+
+### Validación ejecutada (resultados reales)
+- `C:\Program Files\Git\bin\bash.exe -lc "bash -n /c/Users/PC/Desktop/GitGov/gitgov/gitgov-server/tests/policy_requests_multisession_smoke.sh"` -> OK (sintaxis)
+- `powershell -ExecutionPolicy Bypass -File gitgov/gitgov-server/tests/policy_requests_multisession_smoke.ps1 -AdminApiKey dummy-admin -DeveloperApiKeyA dummy-dev-a -DeveloperApiKeyB dummy-dev-b -ValidateOnly` -> `Validation OK`
+- `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+
+### Estado de verificación
+- Se deja una ruta reproducible para validar multi-sesión sin depender solo de clics manuales.
+- `NO VERIFICADO: ejecución live de governance-smoke contra server levantado y repo existente aún pendiente en esta sesión (faltó entorno runtime activo con API keys reales).`
+
+---
+
+## Actualización (2026-03-10) — Multi-sesión policy requests: scope server + checklist visual operativo
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/integration_tests.rs`
+  - Nuevo test de integración:
+    - `policy_change_request_scope_is_enforced_for_multisession_listing`
+  - Cobertura agregada:
+    - developer A solo ve sus solicitudes,
+    - developer B solo ve sus solicitudes,
+    - admin ve todas las solicitudes pendientes,
+    - tras aprobar solicitud de A, developer B no la ve en filtro `approved`,
+    - admin sí la ve en filtro `approved`.
+- `docs/GOLDEN_PATH_CHECKLIST.md`
+  - Nuevo bloque `Governance v2 (policy requests, multi-sesión visual)` con pasos manuales concretos para:
+    - sesión developer/admin,
+    - create request,
+    - approve/reject vía modal,
+    - validación de refresco y ausencia de `401`.
+  - Nuevo bloque `Export compliance v2 (post-decision)` para verificación rápida de `events_csv`.
+
+### Impacto Golden Path
+- Sí, toca validación contractual de workflow governance en server (tests) y checklist operativo.
+- No modifica runtime de auth Bearer ni flujo commit/push/outbox.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/gitgov-server && $env:TEST_DATABASE_URL='postgresql://gitgov:gitgov_dev_password@127.0.0.1:5433/gitgov'; cargo test policy_change_request_scope_is_enforced_for_multisession_listing -- --nocapture` -> `1 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+
+### Estado de verificación
+- Se cierra la brecha de scope backend para el escenario multi-sesión de policy requests.
+- `NO VERIFICADO: ejecución visual manual en Desktop con dos sesiones reales (developer/admin) aún pendiente; el checklist quedó listo para ejecución guiada.`
+
+---
+
+## Actualización (2026-03-10) — Tests UI: silenciado warning `getAnimations` en Headless UI
+
+### Qué se implementó
+- `gitgov/src/test/setup.ts`
+  - Se agregó polyfill mínimo para `Element.prototype.getAnimations` en entorno de tests (jsdom).
+  - Objetivo: evitar warnings repetitivos de Headless UI al abrir/cerrar `Modal` con `Transition`.
+
+### Impacto Golden Path
+- Sin cambios de runtime de producto (solo setup de test).
+- No se modificaron auth, `/events`, `/stats`, `/logs`, outbox ni flujo commit/push.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx vitest run src/test/components/GovernanceRulesPanel.test.tsx` -> `7 passed; 0 failed` (sin warning de `getAnimations`)
+- `cd gitgov && npx eslint src/test/setup.ts src/test/components/GovernanceRulesPanel.test.tsx` -> OK
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `130 passed; 0 failed`
+
+---
+
+## Actualización (2026-03-10) — Cobertura UI para Governance Rules (modal + filtros + request flow)
+
+### Qué se implementó
+- `gitgov/src/test/components/GovernanceRulesPanel.test.tsx` (nuevo)
+  - Se agregaron tests de UI para cerrar la brecha de QA manual en `GovernanceRulesPanel`:
+    - carga inicial de policy/history/requests al montar,
+    - refresco de solicitudes al cambiar filtros `pending/approved/rejected`,
+    - flujo admin de aprobación desde modal con nota y recargas posteriores,
+    - flujo admin de rechazo desde modal sin recargar policy remota,
+    - flujo non-admin de `Solicitar cambio` con forzado de filtro `pending`.
+    - guardrail UI: no mostrar aprobar/rechazar cuando la solicitud pendiente es del mismo admin.
+    - estado vacío del listado cuando no hay solicitudes para el filtro activo.
+  - Los tests mockean `useControlPlaneStore` para validar comportamiento del componente sin depender de backend live.
+
+### Impacto Golden Path
+- Sin cambios de runtime (solo tests frontend).
+- No se modificaron auth, `/events`, `/stats`, `/logs`, outbox ni flujo commit/push.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx vitest run src/test/components/GovernanceRulesPanel.test.tsx` -> `7 passed; 0 failed`
+- `cd gitgov && npx eslint src/test/components/GovernanceRulesPanel.test.tsx` -> OK
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `130 passed; 0 failed`
+
+### Estado de verificación
+- Se agregó cobertura automatizada para la parte más sensible de UX de policy requests (modal + filtros + decisión).
+- `NO VERIFICADO: QA visual manual multi-sesión (developer/admin simultáneos en desktop real) no ejecutado en esta actualización; faltan dos sesiones interactivas para evidencia en pantalla.`
+
+---
+
+## Actualización (2026-03-10) — Verificación empírica de dispatch webhook para drift crítico
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/integration_tests.rs`
+  - Nuevo test de integración `critical_drift_alert_is_dispatched_to_dedicated_webhook`:
+    - levanta un receptor HTTP local efímero (loopback),
+    - envía `POST /policy/drift-events` con `drift_snapshot` crítico,
+    - verifica recepción real del POST webhook con payload JSON (`text`) y datos de alerta.
+  - Nuevo test de integración `critical_drift_alert_falls_back_to_generic_webhook`:
+    - valida fallback a `GITGOV_ALERT_WEBHOOK_URL` cuando no hay targets dedicados.
+  - Se añadió helper `build_test_app_with_alerts(...)` para inyectar targets de webhook en `AppState` dentro del harness de tests.
+
+### Validación ejecutada (resultados reales)
+- `TEST_DATABASE_URL=postgresql://gitgov:gitgov_dev_password@127.0.0.1:5433/gitgov cargo test critical_drift_alert_is_dispatched_to_dedicated_webhook -- --nocapture` -> `1 passed; 0 failed`
+- `TEST_DATABASE_URL=postgresql://gitgov:gitgov_dev_password@127.0.0.1:5433/gitgov cargo test critical_drift_alert_falls_back_to_generic_webhook -- --nocapture` -> `1 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo test` -> `130 passed; 0 failed`
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+
+### Estado de verificación
+- Se cierra la brecha de “dispatch HTTP” del servidor hacia webhook dedicado (prueba empírica local reproducible).
+- `NO VERIFICADO: entrega en proveedor externo específico (Slack/Teams/Email gateway real) aún pendiente por falta de credenciales/endpoint real en esta sesión.`
+
+---
+
+## Actualización (2026-03-10) — Cierre release: runbook + checklist post-deploy
+
+### Qué se implementó
+- `docs/DEPLOYMENT.md`
+  - Nuevo bloque `Runbook post-deploy (governance v2)` con pasos verificables para:
+    - health/stats,
+    - workflow de policy requests (create + approve/reject),
+    - ingesta de drift snapshot crítico,
+    - export compliance v2 (`events_csv`).
+  - Se documentó resultado esperado por paso para validación rápida.
+- `docs/RELEASE_CHECKLIST.md`
+  - Nueva sección `Control Plane Post-Deploy (Governance V2)` con checklist operativo.
+  - Incluye verificación explícita de:
+    - `policy/drift-events`,
+    - `policy change requests`,
+    - export CSV con `policy_drift` + `policy_change_request`.
+
+### Impacto Golden Path
+- Sin cambios de código runtime; solo documentación operacional.
+
+### Estado de verificación
+- `NO VERIFICADO: ejecución manual del runbook completo en entorno de deploy real no realizada en esta sesión (se dejó procedimiento y criterios de aceptación listos).`
+
+---
+
+## Actualización (2026-03-10) — Export compliance v2: incluir policy change requests
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/db.rs`
+  - Nuevo helper de export:
+    - `get_policy_change_requests_for_export(...)`
+  - Aplica scoping por org/user/repo/rango de fechas para `policy_change_requests` + decisión asociada.
+- `gitgov/gitgov-server/src/handlers/violations_policy_export.rs`
+  - `/export` ahora agrega `policy_change_requests` al payload JSON (`events/events_json`).
+  - `/export` ahora agrega registros `policy_change_request` al CSV (`events_csv/csv`).
+  - `summary` de export JSON incluye contador `policy_change_requests`.
+  - `record_count` total ahora incluye:
+    - eventos combinados
+    - eventos de drift
+    - policy change requests
+- `gitgov/gitgov-server/src/integration_tests.rs`
+  - Test de integración actualizado:
+    - `export_includes_policy_drift_and_policy_requests_in_json_and_csv`
+  - Valida que export JSON/CSV incluye `policy_change_requests`.
+
+### Impacto Golden Path
+- Sin cambios en auth Bearer ni en flujo commit/push/outbox/dashboard core.
+- Cambio acotado a export de compliance (`POST /export`).
+
+### Validación ejecutada (resultados reales)
+- `TEST_DATABASE_URL=postgresql://gitgov:gitgov_dev_password@127.0.0.1:5433/gitgov cargo test export_includes_policy_drift_and_policy_requests_in_json_and_csv -- --nocapture` -> `1 passed; 0 failed`
+- `cd gitgov/gitgov-server && cargo test` -> `128 passed; 0 failed`
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+
+### Estado de verificación
+- `NO VERIFICADO: validación manual con consumidor externo de CSV/JSON (SIEM/BI/auditoría) no ejecutada en esta sesión; se validó contrato por tests de integración y shape de salida.`
+
+---
+
+## Actualización (2026-03-10) — Alertas proactivas v2 para drift crítico (canales webhook dedicados)
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+  - `AppState` ahora expone `drift_alert_webhook_urls: Vec<String>`.
+- `gitgov/gitgov-server/src/main.rs`
+  - Nuevo parseo de configuración de destinos dedicados para drift:
+    - `GITGOV_DRIFT_ALERT_WEBHOOK_URLS` (CSV de webhooks).
+    - alias legacy opcional: `GITGOV_DRIFT_ALERT_WEBHOOK_URL` (single target).
+  - Se mantiene compatibilidad con `GITGOV_ALERT_WEBHOOK_URL` (fallback).
+  - Startup logs ahora reportan:
+    - si hay webhook genérico configurado,
+    - cantidad de targets dedicados de drift.
+- `gitgov/gitgov-server/src/handlers/policy_drift_audit.rs`
+  - Nuevo resolver de destinos:
+    - usa targets dedicados si existen,
+    - si no existen, usa webhook genérico.
+  - Dedupe de URLs en memoria antes del dispatch.
+  - Dispatch fan-out: una alerta de drift crítico se envía a todos los targets resueltos.
+  - Tests unitarios nuevos:
+    - `resolve_drift_targets_prefers_dedicated_webhooks_and_deduplicates`
+    - `resolve_drift_targets_falls_back_to_generic_webhook`
+- `gitgov/gitgov-server/.env.example`
+  - Documentación de nuevas variables:
+    - `GITGOV_DRIFT_ALERT_WEBHOOK_URLS`
+    - `GITGOV_DRIFT_ALERT_WEBHOOK_URL` (alias legacy)
+- `docs/QUICKSTART.md` y `docs/DEPLOYMENT.md`
+  - Se agregaron variables de alerting webhook en la guía operativa.
+
+### Impacto Golden Path
+- Sin cambios en auth Bearer, `/events`, `/stats`, `/logs`, outbox ni flujo commit/push.
+- Cambios acotados al canal de notificaciones de drift crítico.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov/gitgov-server && cargo test` -> `128 passed; 0 failed`
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+
+### Estado de verificación
+- `NO VERIFICADO: entrega real a Slack/Teams/Email gateway webhook en entorno externo no validada en esta sesión (faltó endpoint receptor controlado para confirmar entrega HTTP end-to-end).`
+
+---
+
+## Actualización (2026-03-10) — QA funcional de policy requests + cobertura de rechazo admin
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/integration_tests.rs`
+  - Nuevo test de integración `policy_change_request_can_be_rejected_by_admin`:
+    - crea solicitud como developer,
+    - rechaza como admin con nota,
+    - valida estado `rejected` y `decision_note`,
+    - valida listado con filtro `status=rejected`,
+    - valida bloqueo de doble decisión (approve posterior devuelve `409`).
+
+### Validación ejecutada (resultados reales)
+- `TEST_DATABASE_URL=postgresql://gitgov:gitgov_dev_password@127.0.0.1:5433/gitgov cargo test policy_change_request -- --nocapture` -> `3 passed; 0 failed`
+  - `policy_change_request_can_be_created_and_approved_by_admin` -> OK
+  - `policy_change_request_rejects_self_approval` -> OK
+  - `policy_change_request_can_be_rejected_by_admin` -> OK
+- `cd gitgov/gitgov-server && cargo test --quiet` -> `126 passed; 0 failed`
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+
+### Evidencia de refresco de UI (código)
+- `gitgov/src/components/control_plane/GovernanceRulesPanel.tsx`
+  - Tras decisión, recarga listado de solicitudes:
+    - `loadPolicyRequestsForFilter()` (línea de implementación de `handleDecision`)
+  - Tras `approve`, recarga policy + history y resetea draft:
+    - `loadPolicy(...)`
+    - `loadPolicyHistory(...)`
+    - `resetDraftFromPolicy()`
+
+### Estado de verificación
+- `NO VERIFICADO: QA manual visual de Desktop UI (click real developer/admin en dashboard) no ejecutado en esta sesión; falta entorno interactivo con dos sesiones autenticadas para evidencia de punta a punta en pantalla.`
+
+### Impacto Golden Path
+- Sin cambios en auth, Bearer, outbox, `/events`, `/stats`, `/logs` ni flujo commit/push.
+- Cambios acotados a pruebas de integración del workflow de policy requests.
+
+---
+
+## Actualización (2026-03-10) — Hardening UX de solicitudes de policy (modal + filtros)
+
+### Qué se implementó
+- `gitgov/src/components/control_plane/GovernanceRulesPanel.tsx`
+  - Se reemplazó `window.prompt` por un modal dedicado para decisiones admin:
+    - `Aprobar solicitud`
+    - `Rechazar solicitud`
+  - El modal ahora captura nota opcional de decisión con CTA explícita y estados de carga.
+  - Se agregó filtro de solicitudes por estado en el panel:
+    - `Todas`
+    - `Pendientes`
+    - `Aprobadas`
+    - `Rechazadas`
+  - La carga/listado de solicitudes quedó unificada por filtro activo (`status`) y se agregó estado vacío:
+    - `No hay solicitudes para este filtro.`
+  - Tras aprobar/rechazar, el panel refresca listado con el filtro actual.
+  - Tras aprobar, se mantiene recarga de policy + history para preservar coherencia del draft local.
+
+### Impacto Golden Path
+- Sin cambios en auth, tokens, API key, `/events`, `/stats`, `/logs`, outbox o flujo commit/push.
+- Cambio acotado a UX de governance en dashboard/control plane.
+
+### Validación ejecutada (resultados reales)
+- `cd gitgov && npx eslint src/components/control_plane/GovernanceRulesPanel.tsx` -> OK
+- `cd gitgov && npx tsc -b --pretty false` -> OK
+- `cd gitgov/gitgov-server && cargo test` -> `125 passed; 0 failed`
+
+---
+
+## Actualización (2026-03-10) — Export compliance + alertas proactivas de drift crítico
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/handlers/violations_policy_export.rs`
+  - `/export` ahora soporta formatos:
+    - `events` / `events_json` (JSON enriquecido)
+    - `events_csv` / `csv` (CSV unificado)
+  - El export incluye dos fuentes:
+    - eventos de auditoría (`events`)
+    - auditoría de drift (`policy_drift_events`)
+  - Se añadió validación de `export_type` con `400` para formatos no soportados.
+  - En CSV se exportan ambos tipos de registro en un layout común (`record_kind`).
+- `gitgov/gitgov-server/src/db.rs`
+  - Nuevo método `get_policy_drift_events_for_export(...)` con filtros por org/user/repo/rango de fechas.
+- `gitgov/gitgov-server/src/handlers/policy_drift_audit.rs`
+  - Al ingerir `drift_snapshot` con `critical_count > 0`, se dispara alerta proactiva por webhook.
+  - Se añadió deduplicación temporal en memoria para evitar spam repetitivo.
+  - Helpers y tests unitarios para detección de drift crítico desde metadata.
+- `gitgov/gitgov-server/src/notifications.rs`
+  - Nuevo formatter `format_critical_policy_drift_alert(...)`.
+- `gitgov/gitgov-server/src/integration_tests.rs`
+  - Router de test incluye `POST /export`.
+  - Nuevo test: `export_includes_policy_drift_in_json_and_csv`.
+- `gitgov/src/components/control_plane/ExportPanel.tsx`
+  - Nuevo botón `Exportar CSV` (además de JSON) usando `export_type=events_csv`.
+
+### Impacto Golden Path
+- Sin cambios en auth Bearer ni en el flujo commit/push/outbox.
+- Cambios concentrados en export de compliance y alerting de drift.
+
+---
+
+## Actualización (2026-03-10) — Paso 3: Tests de integración para `/policy/drift-events`
+
+### Qué se implementó
+- `gitgov/gitgov-server/src/integration_tests.rs`
+  - Se agregó `policy_drift_events` al DDL del schema aislado de tests.
+  - El router de integración ahora incluye la ruta autenticada:
+    - `POST /policy/drift-events`
+    - `GET /policy/drift-events`
+  - Nuevos tests de integración:
+    - `policy_drift_events_require_auth`
+    - `policy_drift_ingest_and_list_for_admin`
+    - `policy_drift_rejects_invalid_payload`
+    - `policy_drift_scope_is_enforced_for_developer`
+
+### Cobertura de comportamiento validada
+- Auth obligatoria (`Authorization: Bearer`) para POST/GET.
+- Ingesta exitosa y listado de eventos para admin.
+- Rechazo de payload inválido (`400`).
+- Scope por rol:
+  - developer solo ve sus propios eventos aunque intente filtrar por otro usuario.
+  - admin puede filtrar por `user_login`.
+
+### Impacto Golden Path
+- Sin cambios en flujo crítico de commit/push/events/dashboard.
+- Cambios acotados a harness de pruebas de integración.
+
+---
+
 ## Actualización (2026-03-10) — Cierre de entrega (Pasos 1, 2 y 3)
 
 ### Estado de pasos
@@ -3093,7 +4660,7 @@ Audit trail con horas incorrectas es inválido legalmente. Los timestamps UTC al
 
 ### Qué se implementó
 - **Backend onboarding de organizaciones e invitaciones:**
-  - Nuevo schema `gitgov/gitgov-server/supabase_schema_v10.sql` con tabla `org_invitations` (token hasheado, expiración, estados `pending/accepted/revoked`, auditoría de aceptación/revocación).
+  - Nuevo schema `gitgov/gitgov-server/supabase/supabase_schema_v10.sql` con tabla `org_invitations` (token hasheado, expiración, estados `pending/accepted/revoked`, auditoría de aceptación/revocación).
   - Nuevos endpoints admin:
     - `POST/GET /org-invitations`
     - `POST /org-invitations/{id}/resend`
@@ -3126,7 +4693,7 @@ Audit trail con horas incorrectas es inválido legalmente. Los timestamps UTC al
   - `useControlPlaneStore` ampliado con estado/acciones de onboarding (orgs, users, invitations, accept/preview, refresh por rol).
 
 ### Archivos clave
-- `gitgov/gitgov-server/supabase_schema_v10.sql` (nuevo)
+- `gitgov/gitgov-server/supabase/supabase_schema_v10.sql` (nuevo)
 - `gitgov/gitgov-server/src/models.rs`
 - `gitgov/gitgov-server/src/db.rs`
 - `gitgov/gitgov-server/src/handlers.rs`
@@ -3347,7 +4914,7 @@ Prevención de mismatch de identidad git en tres capas para evitar errores de au
 ## Actualización Reciente (2026-02-28) — Provisioning de usuarios por organización (admin)
 
 ### Qué se implementó
-- Se agregó migración `gitgov/gitgov-server/supabase_schema_v9.sql` para tabla `org_users`:
+- Se agregó migración `gitgov/gitgov-server/supabase/supabase_schema_v9.sql` para tabla `org_users`:
   - Campos de negocio: `org_id`, `login`, `display_name`, `email`, `role`, `status`.
   - Restricciones: `role` en (`Admin|Architect|Developer|PM`), `status` en (`active|disabled`), `UNIQUE (org_id, login)`.
   - Auditoría de cambios por timestamps (`created_at`, `updated_at`) y trigger de actualización.
@@ -4068,8 +5635,8 @@ Documentos de soporte:
 - `/stats` incluye `pipeline`
 - Widget `Pipeline Health (7 días)` en dashboard
 
-**Policy advisory**
-- `POST /policy/check` implementado en modo advisory (no bloqueante)
+**Policy advisory (evolucionado)**
+- `POST /policy/check` implementado inicialmente en modo advisory (no bloqueante); evolucionado luego a modo bloqueante opcional por scope (`org:branch`).
 
 **Pruebas / Demo**
 - `gitgov/gitgov-server/tests/jenkins_integration_test.sh`
@@ -4126,13 +5693,14 @@ Estado V1.2-B: **preview funcional (backend + UI + scripts), listo para iterar**
 ## Pendientes Relevantes (actualizados)
 
 ### Alta prioridad (siguiente tramo)
+- ✅ Ejecutado smoke governance multi-sesión **live** con API keys reales y evidencia operativa (2026-03-13)
 - Endurecer pruebas reales / corrida integral de demo Jenkins + Jira en entorno local completo
 - Pulir correlación de `related_prs` (aún no se puebla automáticamente)
-- Mejorar cobertura de tests automatizados backend (integración Jira/Jenkins)
 
 ### Media prioridad
+- Mejorar cobertura de tests automatizados backend (integración Jira/Jenkins real)
 - Correlation Engine avanzado (GitHub webhooks + desktop + Jira + Jenkins en una sola vista)
-- Drift detection más completo
+- Drift detection v2: ampliar cobertura de reglas/diff y QA multi-repo
 - Optimización de queries para datasets grandes
 
 ---
@@ -4162,7 +5730,7 @@ La versión actual de GitGov tiene todas las funcionalidades básicas operativas
 - Envía eventos al servidor cuando hay conexión
 
 **Control Plane Server**
-- Corre en localhost:3000
+- Corre en 127.0.0.1:3000
 - Recibe y almacena eventos de las desktop apps
 - Autentica requests con API keys
 - Proporciona endpoints para dashboards y estadísticas
@@ -4179,7 +5747,7 @@ El dashboard muestra:
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │  Conectado al Control Plane                                        │
-│  URL del servidor: http://localhost:3000                           │
+│  URL del servidor: http://127.0.0.1:3000                           │
 ├────────────────────────────────────────────────────────────────────┤
 │                                                                    │
 │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌───────────┐ │
@@ -4404,7 +5972,7 @@ Esto crea un historial completo de cada violación.
 | Tests automatizados backend | Cobertura de integraciones Jira/Jenkins (parcial: 36 unit tests + smoke_contract.sh; falta integración real con DB mock) |
 | Desktop Updater | Servidor de releases S3/CloudFront para tauri-plugin-updater |
 | Correlation Engine V2 | GitHub webhooks + desktop + Jira + Jenkins en una sola vista (V1.2-C) |
-| Drift Detection | Detectar cuando configuración difiere de política |
+| Drift Detection V2 | Base implementada (detección/sync/push/auditoría); falta expansión de cobertura de reglas + QA visual multi-repo |
 | gitgov-web: installer | Subir `GitGov_0.1.0_x64-setup.exe` a `public/downloads/` |
 | Performance | Optimizar queries para datasets grandes |
 
@@ -4435,7 +6003,7 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
 | `gitgov/gitgov-server/src/auth.rs` | Middleware SHA256 + roles |
 | `gitgov/gitgov-server/src/models.rs` | Estructuras de datos (serde + defaults) |
 | `gitgov/gitgov-server/src/db.rs` | Queries PostgreSQL (COALESCE siempre) |
-| `gitgov/gitgov-server/supabase_schema*.sql` | Schema versionado (v1 a v6) |
+| `gitgov/gitgov-server/supabase_schema*.sql` | Schema versionado (v1 a v15) |
 | `gitgov-web/lib/config/site.ts` | Config del sitio público (URL, versión, nav) |
 | `gitgov-web/lib/i18n/translations.ts` | Traducciones EN/ES del sitio |
 
@@ -4445,9 +6013,9 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
 
 1. **Configurar webhooks de GitHub** en los repositorios
 2. **Implementar correlation engine** para detectar bypasses
-3. **Agregar drift detection** para validación de políticas
-4. **Expandir tests** para mayor cobertura
-5. **Deploy a producción** cuando esté listo
+3. **Ejecutar QA live multi-sesión** (governance/drift) con evidencia en Desktop real
+4. **Expandir tests** para mayor cobertura (Jenkins/Jira + escenarios de carga)
+5. **Deploy a producción** cuando esté listo (release checklist completo)
 
 ---
 
@@ -5476,3 +7044,545 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
   - `cd gitgov && npx eslint src/components/diff/FileList.tsx` -> OK
   - `cd gitgov && npx tsc -b --pretty false` -> errores preexistentes en `src/test/*` (globals de runner y tipados), no relacionados al cambio
   - `cd gitgov/gitgov-server && cargo test` -> `116 passed; 0 failed`
+
+## 2026-03-10 - Drift Detection en Pipeline Flow (local gitgov.toml vs policy remota)
+
+- Problema atendido:
+  - Faltaba una vista operativa que detecte desalineaciones entre la política local del repositorio (`gitgov.toml`) y la política activa del Control Plane para ese repo.
+
+- Cambios implementados:
+  - `gitgov/src-tauri/src/config/mod.rs`
+    - Nuevo `save_config(repo_path, &GitGovConfig)` para serializar y persistir `gitgov.toml`.
+  - `gitgov/src-tauri/src/commands/config_commands.rs`
+    - Nuevo comando Tauri `cmd_save_repo_config(repo_path, config)` para escribir policy local desde frontend.
+  - `gitgov/src-tauri/src/lib.rs`
+    - Registro de `cmd_save_repo_config` en `invoke_handler`.
+  - `gitgov/src/components/cli/PipelineVisualizer.tsx`
+    - Se resolvió `repoFullName` desde `validation.remote_url` para identificar el repo actual en Control Plane.
+    - Se carga política remota (`loadPolicy`) automáticamente cuando hay repo + conexión activa.
+    - Se incorporó comparación de drift entre config local y remota para:
+      - `branches.protected`
+      - `branches.patterns`
+      - `rules.forbidden_patterns`
+      - `rules.require_linked_ticket`
+      - `rules.require_pull_request`
+    - Se agregó panel **Drift Detection** en `Gates / Blockers` con:
+      - estado global (`success|warning|failed|active|pending`);
+      - alertas accionables (detalle + acción sugerida);
+      - botones operativos `Reload local` (re-parsea `gitgov.toml`) y `Reload policy` (recarga policy remota).
+      - acción `Sync local policy` con confirmación para sobreescribir `gitgov.toml` local con policy remota y recargar config.
+      - acción `Push local policy` con confirmación para publicar el `gitgov.toml` local en Control Plane (override de policy remota) y recargar policy.
+    - Se contemplaron casos no ideales con alertas explícitas:
+      - repo sin `gitgov.toml`;
+      - `remote_url` sin owner/repo resoluble;
+      - config local no cargada;
+      - policy remota no encontrada o con error.
+    - Auditoría append-only de acciones de drift via `/cli/commands`:
+      - `policy_sync_local` y `policy_push_local` con metadata de checksums before/after, drift_count, critical_count, resultado y duración.
+      - `policy_drift_snapshot` (con throttle/cambio de firma) para métricas agregadas por repo.
+    - Guardrail de permisos en UI:
+      - `Push local policy` queda deshabilitado para no-admin y muestra mensaje explícito de rol requerido.
+    - Auto-check post-sync/push:
+      - recarga automática de fuentes local/remota para recalcular drift;
+      - estado visible en tarjeta (`0 drift` cuando se alinea).
+  - `gitgov/src/lib/policyDrift.ts`
+    - Utilidades puras para drift:
+      - parseo `owner/repo` desde remote URL,
+      - comparación normalizada de arrays,
+      - preview de diff de policy (protected/patterns/rules/enforcement),
+      - conteo de diffs críticos,
+      - checksum canónico (SHA-256 con fallback).
+  - `gitgov/src/components/cli/DriftDetectionCard.tsx`
+    - Componente UI dedicado para Drift Detection:
+      - preview visual de diff antes de aplicar,
+      - botones de operación y guardrails,
+      - visualización de alertas accionables.
+  - `gitgov/src/store/useControlPlaneStore.ts`
+    - Nuevo estado/acción de métricas:
+      - `policyDriftMetrics` + `isPolicyDriftLoading`
+      - `loadPolicyDriftMetrics()` (agrega snapshots/auditoría de policy para `repos_with_drift`, `critical_drift_repos`, `last_sync_at`).
+    - Integración en `refreshDashboardData` para actualizar métricas con cada refresh admin.
+  - `gitgov/src/components/control_plane/PolicyDriftWidget.tsx`
+    - Nuevo widget en dashboard admin:
+      - repos con drift,
+      - repos con drift crítico,
+      - último sync de policy.
+  - `gitgov/src/components/control_plane/ServerDashboard.tsx`
+    - Integración del `PolicyDriftWidget` en la grilla principal.
+  - Tests de drift:
+    - `gitgov/src/test/lib/policyDrift.test.ts` (unit tests de utilidades).
+    - `gitgov/src/test/components/DriftDetectionCard.test.tsx` (UI tests de casos: sin remote, sin gitgov.toml, policy missing, drift múltiple, guardrail admin).
+
+- Impacto esperado:
+  - El dashboard detecta drift de política de forma visible y accionable sin tocar el Golden Path.
+  - Reduce riesgo de bloqueos/avisos inconsistentes entre cliente local y Control Plane.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov && npx eslint src/components/cli/PipelineVisualizer.tsx src/components/cli/DriftDetectionCard.tsx src/components/control_plane/PolicyDriftWidget.tsx src/lib/policyDrift.ts src/store/useControlPlaneStore.ts src/test/lib/policyDrift.test.ts src/test/components/DriftDetectionCard.test.tsx` -> OK
+  - `cd gitgov && npx tsc -b --pretty false` -> OK
+  - `cd gitgov && npx vitest run src/test/lib/policyDrift.test.ts src/test/components/DriftDetectionCard.test.tsx` -> `2 files passed; 9 tests passed`
+  - `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov/src-tauri && cargo test -q` -> `19 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo test -q` -> `116 passed; 0 failed`
+
+## 2026-03-10 - Drift Detection hardening (endpoint dedicado + guardrails + métricas)
+
+- Problema atendido:
+  - El drift se auditaba reutilizando `cli_commands`, mezclando telemetría de terminal con cambios de política.
+  - Faltaba preview de diff contextual antes de aplicar sync/push.
+  - Faltaba guardrail estricto en UI para evitar `Push local policy` fuera de rol admin.
+  - Las métricas de drift no tenían canal dedicado ni widget en dashboard admin.
+
+- Cambios implementados:
+  - Backend server (`gitgov-server`):
+    - `gitgov/gitgov-server/src/models.rs`
+      - Nuevos contratos: `PolicyDriftEventInput`, `PolicyDriftEventResponse`, `PolicyDriftEventRecord`.
+    - `gitgov/gitgov-server/src/db.rs`
+      - Nuevos métodos:
+        - `insert_policy_drift_event(...)`
+        - `list_policy_drift_events(...)`
+    - `gitgov/gitgov-server/src/handlers/policy_drift_audit.rs` (nuevo)
+      - `POST /policy/drift-events` para ingesta dedicada.
+      - `GET /policy/drift-events` para listado con filtros (admin: todos, developer: propio scope).
+    - `gitgov/gitgov-server/src/handlers.rs`
+      - Incluye nuevo handler split.
+    - `gitgov/gitgov-server/src/main.rs`
+      - Nueva ruta autenticada:
+        - `POST/GET /policy/drift-events`
+      - Línea de endpoint en startup log.
+    - Esquema SQL:
+      - `gitgov/gitgov-server/supabase/supabase_schema_v14.sql` (nuevo migration)
+      - `gitgov/gitgov-server/supabase_schema.sql` actualizado con tabla `policy_drift_events` append-only + índices + trigger.
+
+  - Tauri / Control Plane bridge:
+    - `gitgov/src-tauri/src/control_plane/server.rs`
+      - Nuevos tipos y cliente:
+        - `PolicyDriftEventInput/Response/Record/ListResponse`
+        - `ingest_policy_drift_event(...)`
+        - `list_policy_drift_events(...)`
+    - `gitgov/src-tauri/src/commands/server_commands.rs`
+      - Nuevos comandos:
+        - `cmd_server_ingest_policy_drift_event`
+        - `cmd_server_list_policy_drift_events`
+    - `gitgov/src-tauri/src/lib.rs`
+      - Registro de ambos comandos en `invoke_handler`.
+
+  - Frontend Drift UX:
+    - `gitgov/src/lib/policyDrift.ts` (nuevo)
+      - Utilidades puras para:
+        - parse repo de remote URL,
+        - diff preview,
+        - severidad/critical count,
+        - checksum canónico,
+        - resumen de confirmación con contexto.
+    - `gitgov/src/components/cli/DriftDetectionCard.tsx` (nuevo)
+      - Tarjeta dedicada de Drift:
+        - preview visual de diferencias,
+        - alertas accionables,
+        - botones de operación.
+    - `gitgov/src/components/cli/PipelineVisualizer.tsx`
+      - Migra auditoría de drift a endpoint dedicado (`cmd_server_ingest_policy_drift_event`).
+      - Confirmaciones con diff contextual antes de sync/push.
+      - Guardrail UI: `Push local policy` solo admin.
+      - Auto-check post-sync/push con recarga automática de fuentes.
+      - Snapshot audit (`drift_snapshot`) con throttle para métricas.
+
+  - Dashboard métricas:
+    - `gitgov/src/store/useControlPlaneStore.ts`
+      - Nuevo estado/acción:
+        - `policyDriftMetrics`, `isPolicyDriftLoading`, `loadPolicyDriftMetrics()`
+      - `refreshDashboardData` ahora incluye refresh de métricas de drift.
+    - `gitgov/src/components/control_plane/PolicyDriftWidget.tsx` (nuevo)
+      - Widget admin:
+        - repos con drift
+        - repos con drift crítico
+        - último sync
+    - `gitgov/src/components/control_plane/ServerDashboard.tsx`
+      - Integración del widget en grilla principal.
+
+  - Tests:
+    - `gitgov/src/test/lib/policyDrift.test.ts`
+      - Unit tests utilidades drift.
+    - `gitgov/src/test/components/DriftDetectionCard.test.tsx`
+      - Casos UI: sin remote, sin gitgov.toml, policy missing, drift múltiple, guardrail admin.
+
+- Impacto esperado:
+  - Auditoría de drift separada y trazable sin contaminar `cli_commands`.
+  - Menor riesgo operativo por cambios de policy sin contexto (preview + confirmación).
+  - Mejora de control por rol en acciones destructivas (`Push local policy`).
+  - Visibilidad ejecutiva de drift en dashboard admin.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov && npx eslint src/components/cli/PipelineVisualizer.tsx src/components/cli/DriftDetectionCard.tsx src/components/control_plane/PolicyDriftWidget.tsx src/lib/policyDrift.ts src/store/useControlPlaneStore.ts src/components/control_plane/ServerDashboard.tsx src/test/lib/policyDrift.test.ts src/test/components/DriftDetectionCard.test.tsx` -> OK
+  - `cd gitgov && npx tsc -b --pretty false` -> OK
+  - `cd gitgov && npx vitest run src/test/lib/policyDrift.test.ts src/test/components/DriftDetectionCard.test.tsx` -> `2 files passed; 9 tests passed`
+  - `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov/src-tauri && cargo test -q` -> `19 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov/gitgov-server && cargo test -q` -> `116 passed; 0 failed`
+
+## 2026-03-10 - Workflow de aprobación para cambios de policy (request/approve/reject)
+
+- Problema atendido:
+  - Faltaba separar “quién propone” y “quién aprueba” cambios de policy, con trazabilidad formal y bloqueo de auto-aprobación.
+
+- Cambios implementados:
+  - Backend server (`gitgov-server`):
+    - Nuevos contratos en `gitgov/gitgov-server/src/models.rs`:
+      - `PolicyChangeRequestInput`
+      - `PolicyChangeRequestDecisionInput`
+      - `PolicyChangeRequestRecord`
+      - `PolicyChangeRequestCreateResponse`
+      - `PolicyChangeRequestListResponse`
+    - Persistencia en `gitgov/gitgov-server/src/db.rs`:
+      - `create_policy_change_request(...)`
+      - `list_policy_change_requests(...)`
+      - `get_policy_change_request_by_id(...)`
+      - `approve_policy_change_request(...)`
+      - `reject_policy_change_request(...)`
+      - Refactor del create con `CreatePolicyChangeRequestInput` para clippy limpio.
+    - Nuevo handler split `gitgov/gitgov-server/src/handlers/policy_change_requests.rs`:
+      - `POST /policy/:repo/requests` (crear solicitud)
+      - `GET /policy/:repo/requests` (listar solicitudes)
+      - `POST /policy/requests/:id/approve` (admin)
+      - `POST /policy/requests/:id/reject` (admin)
+      - guardrails:
+        - solo admin decide,
+        - no se permite auto-aprobación / auto-decisión,
+        - request no se decide dos veces.
+    - Ruteo actualizado en `gitgov/gitgov-server/src/main.rs` y `src/handlers.rs`.
+    - SQL append-only:
+      - `gitgov/gitgov-server/supabase_schema.sql`
+      - migración nueva `gitgov/gitgov-server/supabase/supabase_schema_v15.sql`
+      - tablas:
+        - `policy_change_requests`
+        - `policy_change_request_decisions`
+    - Auditoría admin:
+      - `policy_change_request_created`
+      - `policy_change_request_approved`
+      - `policy_change_request_rejected`
+
+  - Tauri bridge:
+    - `gitgov/src-tauri/src/control_plane/server.rs`
+      - cliente para create/list/approve/reject.
+    - `gitgov/src-tauri/src/commands/server_commands.rs`
+      - comandos:
+        - `cmd_server_create_policy_change_request`
+        - `cmd_server_list_policy_change_requests`
+        - `cmd_server_approve_policy_change_request`
+        - `cmd_server_reject_policy_change_request`
+    - `gitgov/src-tauri/src/lib.rs`
+      - registro de comandos en `invoke_handler`.
+
+  - Frontend:
+    - `gitgov/src/store/useControlPlaneStore.ts`
+      - estado y acciones para workflow de requests:
+        - `policyChangeRequests`, `policyChangeRequestsTotal`
+        - `isPolicyRequestsLoading`, `isPolicyRequestSubmitting`, `isPolicyRequestDecisioning`
+        - `createPolicyChangeRequest`, `loadPolicyChangeRequests`
+        - `approvePolicyChangeRequest`, `rejectPolicyChangeRequest`
+    - `gitgov/src/components/control_plane/GovernanceRulesPanel.tsx`
+      - comportamiento por rol:
+        - Admin: sigue con “Guardar política” directo.
+        - No admin: “Solicitar cambio” (con razón opcional).
+      - lista de solicitudes en el panel con estado/actor/fecha/checksum.
+      - acciones de aprobar/rechazar para admin en solicitudes pendientes.
+      - recarga automática de policy/historial al aprobar.
+
+- Impacto esperado:
+  - Se formaliza el control de cambios de policy con separación de funciones.
+  - Se evita que el mismo actor proponga y apruebe.
+  - Mejora trazabilidad y cumplimiento sin tocar Golden Path de commit/push/events.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov/gitgov-server && cargo test` -> `125 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+  - `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov && npx tsc -b --pretty false` -> OK
+  - `cd gitgov && npm run lint` -> OK
+  - `cd gitgov && npx eslint src/components/control_plane/GovernanceRulesPanel.tsx src/store/useControlPlaneStore.ts` -> OK
+
+## 2026-03-10 - Cierre de sesión (resumen consolidado + próximo arranque)
+
+- Estado operativo reportado:
+  - Migración `supabase_schema_v15.sql` aplicada en entorno.
+
+- Consolidado de esta sesión (implementado):
+  - Drift Detection en `Pipeline Flow` con comparación local vs remota.
+  - Acciones operativas de policy:
+    - `Sync local policy` (remota -> local),
+    - `Push local policy` (local -> remota, con guardrail admin).
+  - Preview de cambios antes de aplicar sync/push (diff visual de policy).
+  - Auditoría append-only dedicada de drift (`policy_drift_events`) separada de `cli_commands`.
+  - Métricas de drift en dashboard admin (`repos con drift`, `drift crítico`, `último sync`).
+  - Export de cumplimiento extendido para incluir drift en JSON/CSV.
+  - Alertas proactivas cuando aparece drift crítico.
+  - Workflow formal de cambios de policy:
+    - crear solicitud,
+    - aprobar/rechazar por admin,
+    - bloqueo de auto-aprobación,
+    - auditoría de creación/aprobación/rechazo.
+  - UI de Governance Rules por rol:
+    - admin aplica directo,
+    - no-admin envía solicitud con razón opcional,
+    - admin decide solicitudes pendientes.
+
+- Validación de cierre (última corrida en esta sesión):
+  - `cd gitgov/gitgov-server && cargo test` -> `125 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+  - `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov && npx tsc -b --pretty false` -> OK
+  - `cd gitgov && npm run lint` -> OK
+
+- Qué sigue (abrir próxima sesión desde aquí):
+  1. QA funcional rápido del flujo de policy request:
+     - developer solicita cambio,
+     - admin aprueba/rechaza,
+     - validar refresco de policy/historial en UI.
+  2. Hardening UX:
+     - reemplazar prompts de nota por modal dedicado (aprobación/rechazo),
+     - filtros de solicitudes (`pending/approved/rejected`) en panel.
+  3. Alertas proactivas v2:
+     - definir canal externo (ej. Slack/Email/Webhook) para drift crítico.
+  4. Export compliance v2:
+     - agregar columna/sección de “policy change requests” en export para auditoría externa completa.
+  5. Cierre release:
+     - runbook de despliegue + checklist de verificación post-deploy.
+  - Estado actualizado 2026-03-12:
+    - puntos 2, 3 y 4 ya tienen implementación base y cobertura parcial en tests;
+    - se mantiene pendiente la ejecución live de QA multi-sesión y cierre operativo de release.
+
+## 2026-03-11 - Forense de congelamiento en Settings > Reglas y hardening de carga
+
+- Problema atendido:
+  - La app quedaba en `GitGov (No responde)` al abrir `Settings > Reglas`, mostrando `Cargando política de gobierno...`.
+
+- Hallazgos forenses (causa probable):
+  - El panel de gobernanza disparaba cargas concurrentes al montar:
+    - `loadPolicy(...)`
+    - `loadPolicyHistory(...)`
+    - `loadPolicyChangeRequests(...)`
+  - Además, el listado de solicitudes cargaba hasta 100 registros y cada registro incluía `requested_config` completo.
+  - Esto elevaba riesgo de saturación de renderer/IPC en repos con historial grande.
+
+- Cambios implementados:
+  - Frontend panel:
+    - `gitgov/src/components/control_plane/GovernanceRulesPanel.tsx`
+      - Carga inicial reducida: solo `loadPolicy(...)`.
+      - Historial lazy-load: se consulta al abrir sección de historial.
+      - Solicitudes lazy-load: botón explícito `Cargar solicitudes`.
+      - Tamaño de página de solicitudes reducido a 20.
+      - `isDirty` sin `JSON.stringify` masivo; comparación explícita por campos/listas.
+      - Sanitización defensiva de listas (`protected`, `patterns`, `forbidden_patterns`).
+  - Frontend store:
+    - `gitgov/src/store/useControlPlaneStore.ts`
+      - Timeout defensivo para cargas de policy/historial/solicitudes (`withTimeout`, 12s).
+      - `loadPolicyChangeRequests` acepta `includeConfig` y por defecto usa `false`.
+      - Límite por defecto de store ajustado a 50 (panel usa 20).
+  - Tauri bridge:
+    - `gitgov/src-tauri/src/commands/server_commands.rs`
+      - `cmd_server_list_policy_change_requests` ahora recibe `include_config`.
+    - `gitgov/src-tauri/src/control_plane/server.rs`
+      - Query `include_config` propagada al endpoint HTTP.
+  - Backend server:
+    - `gitgov/gitgov-server/src/handlers/policy_change_requests.rs`
+      - Nuevo query param opcional `include_config`.
+    - `gitgov/gitgov-server/src/db.rs`
+      - `list_policy_change_requests(...)` acepta `include_config`.
+      - Si `include_config=false`, devuelve `{}` en `requested_config` para evitar payload pesado.
+
+- Impacto esperado:
+  - Menor probabilidad de freeze al entrar a `Reglas`.
+  - Menor volumen de datos en listado de solicitudes (modo liviano).
+  - UX más estable: cargas bajo demanda y timeout claro ante backend lento.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov && npx eslint src/components/control_plane/GovernanceRulesPanel.tsx src/store/useControlPlaneStore.ts src/test/components/GovernanceRulesPanel.test.tsx` -> OK
+  - `cd gitgov && npm run typecheck` (`tsc -b`) -> OK
+  - `cd gitgov && npx vitest run src/test/components/GovernanceRulesPanel.test.tsx` -> `7 passed; 0 failed`
+  - `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+## 2026-03-11 - Forense v2: timeout en policy load (bridge IPC) y fallback HTTP directo
+
+- Problema observado en campo:
+  - Persistía `No responde` intermitente en `Settings > Reglas`.
+  - Nuevo error visible en UI: `Timeout cargando política de gobierno`.
+
+- Ajuste implementado:
+  - `gitgov/src/store/useControlPlaneStore.ts`
+    - Se agregó ruta de carga `HTTP directo` (renderer -> server) para:
+      - `loadPolicy`
+      - `loadPolicyHistory`
+      - `loadPolicyChangeRequests`
+    - Orden de ejecución:
+      1) intento directo por `fetch` con `Authorization: Bearer`.
+      2) si falla, fallback al bridge Tauri (`tauriInvoke`) existente.
+    - Se preserva timeout defensivo para evitar spinner infinito.
+    - Objetivo: evitar bloqueos en caso de stall del bridge IPC/command thread.
+
+- Impacto esperado:
+  - Menor exposición a cuelgues por `cmd_server_get_policy` cuando el bridge no responde a tiempo.
+  - La vista de reglas puede cargar por HTTP directo incluso si el fallback IPC está degradado.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov && npx eslint src/store/useControlPlaneStore.ts src/components/control_plane/GovernanceRulesPanel.tsx src/test/components/GovernanceRulesPanel.test.tsx` -> OK
+  - `cd gitgov && npm run typecheck` -> OK
+  - `cd gitgov && npx vitest run src/test/useControlPlaneStore.test.ts src/test/components/GovernanceRulesPanel.test.tsx` -> `24 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+## 2026-03-11 - Forense v3: fugas de listeners/sesiones al navegar Dashboard -> Settings
+
+- Problema de fondo detectado:
+  - El congelamiento en `Settings > Reglas` no venía solo de la carga de policy.
+  - Había riesgo real de fugas al desmontar Dashboard:
+    - listeners asíncronos (`tauriListen`) podían quedar activos si la vista se desmontaba durante el `await`.
+    - en `TerminalPanel`, el start de sesión nativa podía completar después del unmount, dejando sesión PTY huérfana.
+
+- Causa técnica:
+  - Patrón vulnerable en varios componentes:
+    - `let unlisten = null; void setup(); return () => unlisten?.()`
+    - Si `setup()` resolvía tarde, cleanup se ejecutaba sin `unlisten`, y el listener quedaba vivo.
+  - En terminal nativa:
+    - faltaba guardia de lifecycle para cancelar start tardío y cerrar sesión recién creada si la vista ya no estaba montada.
+
+- Cambios implementados:
+  - `gitgov/src/components/cli/PipelineVisualizer.tsx`
+    - cleanup cancelable para listeners SSE y CLI (`disposed` guard + unlisten inmediato si llega tarde).
+  - `gitgov/src/components/cli/AuditTrailPanel.tsx`
+    - mismo patrón cancelable para listeners de CLI output/finished.
+  - `gitgov/src/components/cli/TerminalPanel.tsx`
+    - guardas de lifecycle:
+      - `unmountedRef`
+      - secuencia `startSessionSeqRef` para invalidar starts viejos.
+      - `latestRepoPathRef` para descartar start tardío de cwd obsoleto.
+    - si un `cmd_start_native_terminal` llega tarde, la sesión se cierra de inmediato (`cmd_stop_native_terminal`) para evitar sesiones huérfanas.
+    - listeners `pty-output` y `pty-exit` con cleanup cancelable (sin fugas por race).
+    - arranque automático simplificado: depende solo de `startNativeSession` (el callback ya depende de `repoPath`).
+
+- Impacto esperado:
+  - Al abrir `Configurar reglas` desde Pipeline, no deben quedar listeners/sesiones colgados del Dashboard.
+  - Menor presión de eventos de fondo sobre renderer/IPC al entrar a Settings.
+  - Reducción de riesgo de `GitGov (No responde)` por acumulación de side-effects huérfanos.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov && npx eslint src/components/cli/PipelineVisualizer.tsx src/components/cli/AuditTrailPanel.tsx src/components/cli/TerminalPanel.tsx` -> OK
+  - `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+  - `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+## 2026-03-11 - Forense v4: raíz de freeze en stop de terminal PTY (mutex contendido)
+
+- Causa raíz confirmada:
+  - En backend PTY nativo había contención de mutex sobre el child del terminal:
+    - `gitgov/src-tauri/src/commands/cli_commands.rs` (antes):
+      - hilo de salida hacía `child.lock()` + `child.wait()` (bloqueaba el lock toda la vida de la sesión).
+      - `cmd_stop_native_terminal` intentaba `child.lock()` para `kill()`.
+    - Resultado: al navegar Dashboard -> Settings, `stop` podía quedar bloqueado esperando el mutex y contribuir al estado `GitGov (No responde)`.
+  - Evidencia operativa en entorno local:
+    - proceso `powershell.exe` hijo de `gitgov.exe` permanecía activo estando en `Settings`, consistente con sesión PTY no cerrada correctamente.
+
+- Cambios implementados:
+  - `gitgov/src-tauri/src/commands/cli_commands.rs`
+    - Se eliminó el hilo separado que hacía `wait()` reteniendo el lock del child.
+    - Se unificó lifecycle en un solo hilo:
+      - stream de `gitgov:pty-output` mientras haya bytes,
+      - luego `wait()` del child al cerrar stream,
+      - emisión de `gitgov:pty-exit` y cleanup de sesión.
+    - `cmd_stop_native_terminal` pasa a `try_lock()` defensivo para no bloquear el thread de comando:
+      - si logra lock -> `kill()`,
+      - si lock ocupado -> warning + retorno inmediato (`stopped: true`) tras remover sesión del mapa.
+
+- Impacto esperado:
+  - `stop` del terminal deja de depender de un lock retenido por `wait()` de larga vida.
+  - Menor riesgo de freeze al abrir `Settings > Reglas` tras navegar desde Dashboard.
+  - Reducción de sesiones nativas huérfanas y mejor cierre en transiciones de vista.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov/src-tauri && cargo test` -> `19 passed; 0 failed`
+  - `cd gitgov/src-tauri && cargo clippy -- -D warnings` -> OK
+  - `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+  - `cd gitgov/gitgov-server && cargo test` -> `131 passed; 0 failed`
+
+## 2026-03-11 - Founder-only para creación de organización + hardening de panel admin
+
+- Problema corregido:
+  - Un admin que no era founder podía ver y ejecutar `Crear/Upsert Org` desde Settings > Onboarding.
+  - Eso abría la posibilidad de crear organizaciones fuera del modelo esperado (founder crea org; admin de org gestiona su org).
+
+- Cambios implementados:
+  - Backend (enforcement real):
+    - `gitgov/gitgov-server/src/auth.rs`
+      - nuevo helper `is_founder_global_admin(...)` con regla explícita:
+        - rol `Admin`,
+        - `org_id` nulo (scope global),
+        - `client_id == bootstrap-admin` (case-insensitive).
+      - tests unitarios agregados para cubrir casos founder/no-founder.
+    - `gitgov/gitgov-server/src/handlers/org_core.rs`
+      - `create_org` ahora exige founder global y devuelve `403` si no cumple.
+    - `gitgov/gitgov-server/src/integration_tests.rs`
+      - se agregó cobertura explícita `create_org_requires_founder_global_admin_key`:
+        - admin no-founder recibe `403`,
+        - founder (`bootstrap-admin`) puede crear org.
+      - el router de test ahora incluye `POST /orgs`.
+  - Frontend (UX alineada a permisos):
+    - `gitgov/src/pages/SettingsPage.tsx`
+      - se calcula `isFounderControlPlane` desde `userClientId`.
+      - `AdminOnboardingPanel` recibe `canCreateOrganization`.
+    - `gitgov/src/components/control_plane/AdminOnboardingPanel.tsx`
+      - se oculta la acción de crear org para admin no-founder.
+      - se muestra aviso en español indicando que la creación de org es solo del founder.
+    - `gitgov/src/store/useControlPlaneStore.ts`
+      - `createOrg` agrega guard de cliente: si `userClientId` no es `bootstrap-admin`, bloquea la acción en frontend y reporta error claro.
+    - `gitgov/src/test/components/AdminOnboardingPanel.test.tsx`
+      - cobertura UI para evitar regresión:
+        - no-founder no ve `Crear/Upsert Org`,
+        - founder sí ve el control.
+  - Hardening adicional de build:
+    - `gitgov/src/components/cli/TerminalPanel.tsx`
+      - se removieron estados React sin uso (`sessionId`, `shellName`) para eliminar error TS6133 preexistente y dejar `tsc -b` en verde.
+
+- Validación ejecutada (resultados reales):
+  - `cd gitgov && npx eslint src/pages/SettingsPage.tsx src/components/control_plane/AdminOnboardingPanel.tsx src/components/cli/TerminalPanel.tsx` -> OK
+  - `cd gitgov && npx tsc -b --pretty false` -> OK
+  - `cd gitgov && npx vitest run src/test/components/AdminOnboardingPanel.test.tsx` -> `2 passed; 0 failed`
+  - `cd gitgov/gitgov-server && cargo test` -> `133 passed; 0 failed`
+
+## 2026-03-15 - Cierre de drift prod/repo (EC2 + PostgreSQL local + capacidad validada)
+
+- Objetivo:
+  - Alinear repositorio con cambios ya activos en producción (EC2), evitando drift entre runtime y código versionado.
+
+- Cambios versionados:
+  - Nueva migración `gitgov/gitgov-server/supabase/supabase_schema_v18.sql`:
+    - agrega índices:
+      - `idx_client_events_user_login_created`
+      - `idx_client_events_branch_created`
+    - reemplaza `get_audit_stats(...)` con implementación optimizada (agregaciones con `FILTER`, sin subqueries repetitivas).
+  - `docs/DEPLOYMENT.md`:
+    - loop de migraciones actualizado a `v7..v18`.
+    - agregado perfil productivo validado single-node (valores runtime reales).
+    - `DATABASE_URL` descrito para PostgreSQL local o remoto según topología.
+
+- Verificación runtime en EC2 (evidencia operativa):
+  - `gitgov-server` activo (`systemctl is-active` => `active`).
+  - `/health/detailed` con DB conectada y latencia ~`1-2ms`.
+  - `DATABASE_URL` en producción apuntando a `127.0.0.1:5432`.
+  - Backup diario presente:
+    - cron: `/etc/cron.d/gitgov-backup` (`0 3 * * *`)
+    - script: `/opt/gitgov/backups/gitgov-backup.sh`
+    - backup generado: `gitgov_2026-03-15_0508.sql.gz`.
+  - Índices en DB confirmados (`pg_indexes`):
+    - `idx_client_events_created`
+    - `idx_client_events_user_login_created`
+    - `idx_client_events_branch_created`
+  - `get_audit_stats` runtime confirmado en versión optimizada (`pg_get_functiondef`).
+  - Golden Path contractual remoto (`/events`, `/stats`, `/logs`) => HTTP `200`.
+
+- Evidencia de capacidad (artifacts en EC2 `/tmp`):
+  - `bench_final_u20.json`, `bench_final_u30.json`, `bench_final_u35.json`, `bench_final_u50.json`, `bench_final_u100.json`
+  - `bench_final_u50_realistic.json`, `bench_final_u100_realistic.json`
+  - Resultado operativo:
+    - stress (`think_ms=120`): pasa hasta `30` usuarios; `35+` falla por p95 en `/stats`.
+    - realista (`think_ms=2000`): `50` y `100` usuarios pasan p95<800ms en core.
