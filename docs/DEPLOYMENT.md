@@ -238,6 +238,8 @@ Resultados certificados con esa configuración:
 - `gitgov-server` corriendo como systemd
 - Nginx proxy hacia `127.0.0.1:3000`
 - Endpoints validados: `/health`, `/stats` con Bearer
+- Fuente de despliegue activa en EC2: `/home/ubuntu/GitGov-deploy` (alineada a `origin/main`)
+- Repo legacy archivado para evitar drift operativo: `/home/ubuntu/GitGov-legacy-20260315-074028`
 
 ### URLs actuales (sin dominio)
 

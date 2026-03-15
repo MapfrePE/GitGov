@@ -7643,3 +7643,31 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
 - Resultado de capacidad (mismo costo, sin escalar instancias):
   - El cuello histórico de `/stats` queda mitigado por single-flight + invalidación separada.
   - Capacidad certificada en stress (`think_ms=120`): `250` simultáneos en la `t3.small` medida.
+
+## 2026-03-15 - Post-sync EC2 (fuente única + recertificación rápida)
+
+- Operación de higiene:
+  - Se archivó el repo operativo antiguo en EC2: `/home/ubuntu/GitGov-legacy-20260315-074028`.
+  - Se dejó como fuente única de despliegue: `/home/ubuntu/GitGov-deploy`.
+
+- Deploy limpio confirmado:
+  - EC2 build/deploy desde `origin/main` en commit `25bc390`.
+  - Servicio `gitgov-server` activo y `/health/detailed` en `ok`.
+
+- Recertificación post-sync (stress, `think_ms=120`, 60s):
+  - `bench_postsync_u50_2026-03-15.json`
+    - `/events` p95 `14.3ms` p99 `89.5ms`
+    - `/logs` p95 `10.4ms` p99 `77.8ms`
+    - `/stats` p95 `177.2ms` p99 `7363.9ms`
+    - `/chat` p95 `22.3ms` p99 `116.4ms`
+    - `401=0`, `429=0`, `5xx=0`
+  - `bench_postsync_u100_2026-03-15.json`
+    - `/events` p95 `47.2ms` p99 `151.4ms`
+    - `/logs` p95 `33.8ms` p99 `99.4ms`
+    - `/stats` p95 `75.4ms` p99 `839.9ms`
+    - `/chat` p95 `67.0ms` p99 `189.6ms`
+    - `401=0`, `429=0`, `5xx=0`
+
+- Evidencia:
+  - `gitgov/gitgov-server/tests/artifacts/bench_postsync_u50_2026-03-15.json`
+  - `gitgov/gitgov-server/tests/artifacts/bench_postsync_u100_2026-03-15.json`
