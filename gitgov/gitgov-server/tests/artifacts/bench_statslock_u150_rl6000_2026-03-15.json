@@ -1,0 +1,163 @@
+{
+  "generated_at": 1773558767536,
+  "config": {
+    "server_url": "http://127.0.0.1:3000",
+    "server_urls": [
+      "http://127.0.0.1:3000"
+    ],
+    "server_nodes": 1,
+    "users": 150,
+    "duration_sec": 60.0,
+    "think_ms": 120.0,
+    "timeout_sec": 12.0,
+    "api_keys_count": 1,
+    "profile": {
+      "events_ratio": 70,
+      "dashboard_ratio": 20,
+      "chat_ratio": 10
+    }
+  },
+  "total_requests": 43185,
+  "actual_duration_sec": 60.395283709978685,
+  "overall_throughput_rps": 715.0392770299189,
+  "endpoints": {
+    "POST /events": {
+      "endpoint": "POST /events",
+      "requests": 30246,
+      "duration_sec": 60.395283709978685,
+      "throughput_rps": 500.8006940615243,
+      "http_counts": {
+        "200": 30246
+      },
+      "error_counts": {},
+      "latency_ms": {
+        "min": 10.982509003952146,
+        "avg": 89.87266193302754,
+        "p50": 85.48190898727626,
+        "p95": 140.46848349971697,
+        "p99": 183.43461493495846,
+        "max": 860.2347101550549
+      },
+      "error_rate": {
+        "401": 0.0,
+        "429": 0.0,
+        "5xx": 0.0
+      }
+    },
+    "POST /chat/ask": {
+      "endpoint": "POST /chat/ask",
+      "requests": 4364,
+      "duration_sec": 60.395283709978685,
+      "throughput_rps": 72.25729778762455,
+      "http_counts": {
+        "200": 4364
+      },
+      "error_counts": {},
+      "latency_ms": {
+        "min": 10.55397605523467,
+        "avg": 121.7377216423504,
+        "p50": 110.94139504712075,
+        "p95": 214.2133178771473,
+        "p99": 425.22806255379686,
+        "max": 1001.0317249689251
+      },
+      "error_rate": {
+        "401": 0.0,
+        "429": 0.0,
+        "5xx": 0.0
+      }
+    },
+    "GET /logs": {
+      "endpoint": "GET /logs",
+      "requests": 5202,
+      "duration_sec": 60.395283709978685,
+      "throughput_rps": 86.13255341228756,
+      "http_counts": {
+        "200": 5202
+      },
+      "error_counts": {},
+      "latency_ms": {
+        "min": 4.170625004917383,
+        "avg": 50.542167461350466,
+        "p50": 43.94532949663699,
+        "p95": 109.39440695801748,
+        "p99": 153.02749491063878,
+        "max": 722.4889749195427
+      },
+      "error_rate": {
+        "401": 0.0,
+        "429": 0.0,
+        "5xx": 0.0
+      }
+    },
+    "GET /stats": {
+      "endpoint": "GET /stats",
+      "requests": 3373,
+      "duration_sec": 60.395283709978685,
+      "throughput_rps": 55.848731768482494,
+      "http_counts": {
+        "200": 3373
+      },
+      "error_counts": {},
+      "latency_ms": {
+        "min": 2.119845012202859,
+        "avg": 58.024880898193636,
+        "p50": 39.45202101022005,
+        "p95": 82.60577106848356,
+        "p99": 676.0119446087615,
+        "max": 1268.9851040486246
+      },
+      "error_rate": {
+        "401": 0.0,
+        "429": 0.0,
+        "5xx": 0.0
+      }
+    }
+  },
+  "core_summary": {
+    "endpoint": "CORE",
+    "requests": 38821,
+    "duration_sec": 60.395283709978685,
+    "throughput_rps": 642.7819792422944,
+    "http_counts": {
+      "200": 38821
+    },
+    "error_counts": {},
+    "latency_ms": {
+      "min": 2.119845012202859,
+      "avg": 81.83526470801637,
+      "p50": 77.15460797771811,
+      "p95": 137.6924340147525,
+      "p99": 190.75632756575948,
+      "max": 1268.9851040486246
+    },
+    "error_rate": {
+      "401": 0.0,
+      "429": 0.0,
+      "5xx": 0.0
+    }
+  },
+  "chat_summary": {
+    "endpoint": "POST /chat/ask",
+    "requests": 4364,
+    "duration_sec": 60.395283709978685,
+    "throughput_rps": 72.25729778762455,
+    "http_counts": {
+      "200": 4364
+    },
+    "error_counts": {},
+    "latency_ms": {
+      "min": 10.55397605523467,
+      "avg": 121.7377216423504,
+      "p50": 110.94139504712075,
+      "p95": 214.2133178771473,
+      "p99": 425.22806255379686,
+      "max": 1001.0317249689251
+    },
+    "error_rate": {
+      "401": 0.0,
+      "429": 0.0,
+      "5xx": 0.0
+    }
+  }
+}

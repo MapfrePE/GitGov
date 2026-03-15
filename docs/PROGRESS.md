@@ -7586,3 +7586,60 @@ Los builds compilan con warnings menores (variables no usadas, código muerto), 
   - Resultado operativo:
     - stress (`think_ms=120`): pasa hasta `30` usuarios; `35+` falla por p95 en `/stats`.
     - realista (`think_ms=2000`): `50` y `100` usuarios pasan p95<800ms en core.
+
+## 2026-03-15 - Optimización sin escalar instancia (p95 de /stats en t3.small)
+
+- Objetivo:
+  - Mejorar concurrencia sin aumentar costo (mantener 1 instancia `t3.small`).
+  - Reducir p95 de `/stats` bajo ráfagas de `/events`.
+
+- Cambios implementados:
+  - `gitgov/gitgov-server/src/handlers/client_ingest_dashboard.rs`
+    - `load_audit_stats(...)` ahora usa single-flight lock (`stats_cache_refresh_lock`) para evitar stampede:
+      - ante miss de cache concurrente, un solo request recalcula; el resto espera y reutiliza.
+    - invalidación de cache separada por endpoint:
+      - `/stats` usa `stats_cache_invalidation_min_interval`.
+      - `/logs` usa `logs_cache_invalidation_min_interval`.
+      - fallback al valor general `cache_invalidation_min_interval` para compatibilidad.
+  - `gitgov/gitgov-server/src/handlers/prelude_health.rs`
+    - `AppState` extiende campos:
+      - `stats_cache_invalidation_min_interval`
+      - `logs_cache_invalidation_min_interval`
+      - `stats_cache_refresh_lock`
+  - `gitgov/gitgov-server/src/main.rs`
+    - nuevas env vars:
+      - `GITGOV_STATS_CACHE_INVALIDATION_MIN_INTERVAL_MS` (default fallback al valor general)
+      - `GITGOV_LOGS_CACHE_INVALIDATION_MIN_INTERVAL_MS` (default fallback al valor general)
+    - wiring de nuevos campos al construir `AppState`.
+  - `gitgov/gitgov-server/src/integration_tests.rs`
+    - inicialización de `AppState` actualizada con los nuevos campos.
+  - `docs/DEPLOYMENT.md`
+    - documentadas nuevas variables para perfil 250 y perfil single-node validado.
+
+- Impacto esperado:
+  - Menos recomputaciones simultáneas de `/stats` en picos de ingest.
+  - Menor contención y menor varianza de latencia p95/p99 para `/stats`.
+
+- Validación ejecutada:
+  - `cd gitgov/gitgov-server && cargo test` -> `142 passed; 0 failed`
+  - `cd gitgov && npm run typecheck` -> OK (`tsc -b`)
+  - Benchmarks live en EC2 (single-node `t3.small`, 60s, profile 70/20/10, `think_ms=120`):
+    - `bench_statslock_u35_2026-03-15.json`
+      - `/events` p95 `9.4ms`, `/logs` p95 `7.9ms`, `/stats` p95 `5.2ms`, `/chat` p95 `16.5ms`
+      - `401=0`, `429=0`, `5xx=0`
+    - `bench_statslock_u50_2026-03-15.json`
+      - `/events` p95 `11.1ms`, `/logs` p95 `7.8ms`, `/stats` p95 `6.5ms`, `/chat` p95 `17.9ms`
+      - `401=0`, `429=0`, `5xx=0`
+    - `bench_statslock_u100_rl6000_2026-03-15.json`
+      - `/events` p95 `49.2ms`, `/logs` p95 `30.6ms`, `/stats` p95 `32.8ms`, `/chat` p95 `72.3ms`
+      - `401=0`, `429=0`, `5xx=0`
+    - `bench_statslock_u150_rl6000_2026-03-15.json`
+      - `/events` p95 `140.5ms`, `/logs` p95 `109.4ms`, `/stats` p95 `82.6ms`, `/chat` p95 `214.2ms`
+      - `401=0`, `429=0`, `5xx=0`
+    - `bench_statslock_u250_rl6000_2026-03-15.json`
+      - `/events` p95 `352.2ms`, `/logs` p95 `319.7ms`, `/stats` p95 `394.6ms`, `/chat` p95 `734.4ms`
+      - `401=0`, `429=0`, `5xx=0`
+
+- Resultado de capacidad (mismo costo, sin escalar instancias):
+  - El cuello histórico de `/stats` queda mitigado por single-flight + invalidación separada.
+  - Capacidad certificada en stress (`think_ms=120`): `250` simultáneos en la `t3.small` medida.

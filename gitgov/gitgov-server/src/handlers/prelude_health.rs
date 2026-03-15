@@ -1,6 +1,7 @@
 use crate::auth::{require_admin, AuthUser};
 use crate::db::{
-    Database, DbError, Job, JobMetrics, NoncomplianceSignalsQuery, UpsertOrgUserInput,
+    CreatePolicyChangeRequestInput, Database, DbError, Job, JobMetrics, NoncomplianceSignalsQuery,
+    UpsertOrgUserInput,
 };
 use crate::models::*;
 use crate::notifications;
@@ -18,10 +19,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -53,6 +55,51 @@ pub struct StatsCacheEntry {
 pub struct LogsCacheEntry {
     pub events: Vec<CombinedEvent>,
     pub expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrgLookupCacheEntry {
+    pub org_id: Option<String>,
+    pub expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepoLookupCacheEntry {
+    pub repo: Option<Repo>,
+    pub expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyCheckBlockingScope {
+    pub org_pattern: String,
+    pub branch_pattern: String,
+}
+
+impl PolicyCheckBlockingScope {
+    pub fn new(org_pattern: String, branch_pattern: String) -> Self {
+        Self {
+            org_pattern,
+            branch_pattern,
+        }
+    }
+
+    pub fn matches(&self, org_name: &str, branch: &str) -> bool {
+        fn match_pattern(pattern: &str, value: &str) -> bool {
+            if pattern == "*" {
+                return true;
+            }
+            match glob::Pattern::new(pattern) {
+                Ok(glob_pattern) => glob_pattern.matches(value),
+                Err(_) => pattern.eq_ignore_ascii_case(value),
+            }
+        }
+
+        let normalized_org = org_name.trim().to_ascii_lowercase();
+        let normalized_org_pattern = self.org_pattern.trim().to_ascii_lowercase();
+        let branch_pattern = self.branch_pattern.trim();
+        match_pattern(&normalized_org_pattern, &normalized_org)
+            && match_pattern(branch_pattern, branch.trim())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -222,6 +269,9 @@ pub struct AppState {
     pub worker_id: String,
     pub http_client: reqwest::Client,
     pub alert_webhook_url: Option<String>,
+    /// Dedicated webhook URLs for policy drift critical alerts.
+    /// If empty, drift alerts fallback to `alert_webhook_url`.
+    pub drift_alert_webhook_urls: Vec<String>,
     pub strict_actor_match: bool,
     pub reject_synthetic_logins: bool,
     /// Max number of events accepted per `/events` request (0 disables the guard).
@@ -244,6 +294,28 @@ pub struct AppState {
     pub stats_cache_ttl: Duration,
     /// Cache keyed by org scope (`org_id` or `__global__`).
     pub stats_cache: Arc<Mutex<HashMap<String, StatsCacheEntry>>>,
+    /// TTL for org login -> org_id lookup cache used in `/events`.
+    pub org_lookup_cache_ttl: Duration,
+    /// Shared cache for org login -> org_id resolution.
+    pub org_lookup_cache: Arc<Mutex<HashMap<String, OrgLookupCacheEntry>>>,
+    /// TTL for repo full_name -> repo lookup cache used in `/events`.
+    pub repo_lookup_cache_ttl: Duration,
+    /// Shared cache for repo full_name -> repo resolution.
+    pub repo_lookup_cache: Arc<Mutex<HashMap<String, RepoLookupCacheEntry>>>,
+    /// Minimum interval between background repo upsert attempts for the same org/repo key.
+    pub repo_upsert_min_interval: Duration,
+    /// Debounce state for background repo upsert scheduling in `/events`.
+    pub repo_upsert_last_attempt: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Minimum interval between cache invalidations under high ingest load.
+    pub cache_invalidation_min_interval: Duration,
+    /// Optional override for `/stats` cache invalidation debounce.
+    pub stats_cache_invalidation_min_interval: Duration,
+    /// Optional override for `/logs` cache invalidation debounce.
+    pub logs_cache_invalidation_min_interval: Duration,
+    /// Last wall-clock timestamp used to invalidate `/stats` cache.
+    pub stats_cache_last_invalidation_ms: Arc<AtomicI64>,
+    /// Single-flight guard to prevent stampede recomputation of `/stats` on cache miss.
+    pub stats_cache_refresh_lock: Arc<AsyncMutex<()>>,
     /// In-memory short TTL cache for `/logs` payloads (keyed by scoped filter).
     pub logs_cache_ttl: Duration,
     /// Extra grace window to serve recently expired `/logs` cache when DB fails.
@@ -259,14 +331,27 @@ pub struct AppState {
     pub outbox_lease_telemetry: Arc<Mutex<OutboxLeaseTelemetry>>,
     /// Cache keyed by effective filter + role scoping.
     pub logs_cache: Arc<Mutex<HashMap<String, LogsCacheEntry>>>,
+    /// Last wall-clock timestamp used to invalidate `/logs` cache.
+    pub logs_cache_last_invalidation_ms: Arc<AtomicI64>,
+    /// Minimum interval between non-critical `client_sessions` upserts per client.
+    pub client_session_upsert_min_interval: Duration,
+    /// Per-client in-memory debounce state for session upserts.
+    pub client_session_last_upsert: Arc<Mutex<HashMap<String, Instant>>>,
     /// Broadcast channel for SSE dashboard notifications.
     pub sse_tx: tokio::sync::broadcast::Sender<SseNotification>,
     /// Max concurrent SSE connections allowed server-wide.
     pub sse_max_connections: Arc<Semaphore>,
+    /// Enables cross-instance SSE fan-out via PostgreSQL `NOTIFY`.
+    pub sse_distributed_enabled: bool,
+    /// PostgreSQL channel used for cross-instance SSE fan-out.
+    pub sse_distributed_channel: String,
+    /// Optional transport-level blocking scopes for `POST /policy/check`.
+    /// Format source: `GITGOV_POLICY_CHECK_BLOCK_SCOPES=org:branch_glob`.
+    pub policy_check_block_scopes: Vec<PolicyCheckBlockingScope>,
 }
 
 /// Lightweight notification sent via SSE to connected dashboard clients.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseNotification {
     /// New events were ingested via POST /events.
@@ -276,6 +361,59 @@ pub enum SseNotification {
     StatsUpdated,
     /// Server heartbeat (keep-alive).
     Heartbeat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistributedSseEnvelope {
+    pub source_node: String,
+    pub emitted_at_ms: i64,
+    pub notification: SseNotification,
+}
+
+pub async fn fanout_sse_new_events(state: &Arc<AppState>, count: u32) {
+    if count == 0 {
+        return;
+    }
+    fanout_sse_notification(state, SseNotification::NewEvents { count }).await;
+}
+
+pub fn invalidate_dashboard_caches_for_sse(state: &AppState) {
+    invalidate_stats_cache(state);
+    invalidate_logs_cache(state);
+}
+
+pub async fn fanout_sse_notification(state: &Arc<AppState>, notification: SseNotification) {
+    if matches!(notification, SseNotification::NewEvents { .. }) {
+        invalidate_dashboard_caches_for_sse(state);
+    }
+    let _ = state.sse_tx.send(notification.clone());
+    if !state.sse_distributed_enabled {
+        return;
+    }
+
+    let envelope = DistributedSseEnvelope {
+        source_node: state.worker_id.clone(),
+        emitted_at_ms: chrono::Utc::now().timestamp_millis(),
+        notification,
+    };
+    let payload = match serde_json::to_string(&envelope) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to serialize distributed SSE envelope");
+            return;
+        }
+    };
+    if let Err(e) = state
+        .db
+        .publish_sse_notification(&state.sse_distributed_channel, &payload)
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            channel = %state.sse_distributed_channel,
+            "Failed to publish distributed SSE notification"
+        );
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]

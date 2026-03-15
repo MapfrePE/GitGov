@@ -82,13 +82,7 @@ pub async fn ingest_client_events(
             if let Some(cached) = org_id_cache.get(org_name) {
                 cached.clone()
             } else {
-                let resolved = state
-                    .db
-                    .get_org_by_login(org_name)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|o| o.id);
+                let resolved = resolve_org_id_with_cache(&state, org_name).await;
                 org_id_cache.insert(org_name.clone(), resolved.clone());
                 resolved
             }
@@ -141,11 +135,7 @@ pub async fn ingest_client_events(
             if let Some(cached) = repo_cache.get(repo_full_name) {
                 cached.clone()
             } else {
-                let resolved = state
-                    .db
-                    .get_repo_by_full_name(repo_full_name)
-                    .await
-                    .unwrap_or_default();
+                let resolved = resolve_repo_with_cache(&state, repo_full_name).await;
                 repo_cache.insert(repo_full_name.clone(), resolved.clone());
                 resolved
             }
@@ -180,38 +170,16 @@ pub async fn ingest_client_events(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(full_name);
-            match state
-                .db
-                .upsert_repo_by_full_name(Some(effective_org_id), full_name, repo_name, true)
-                .await
-            {
-                Ok(id) => {
-                    // Populate in-batch cache so repeated events in same payload avoid extra lookups/upserts.
-                    repo_cache.insert(
-                        full_name.to_string(),
-                        Some(Repo {
-                            id: id.clone(),
-                            org_id: Some(effective_org_id.to_string()),
-                            github_id: None,
-                            full_name: full_name.to_string(),
-                            name: repo_name.to_string(),
-                            private: true,
-                            created_at: chrono::Utc::now().timestamp_millis(),
-                        }),
-                    );
-                    Some(id)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        full_name = %full_name,
-                        org_id = %effective_org_id,
-                        event_uuid = %input.event_uuid,
-                        "Failed to upsert repo from client event (non-fatal)"
-                    );
-                    None
-                }
+            if should_schedule_repo_upsert(state.as_ref(), effective_org_id, full_name) {
+                schedule_repo_upsert(
+                    Arc::clone(&state),
+                    effective_org_id.to_string(),
+                    full_name.to_string(),
+                    repo_name.to_string(),
+                    input.event_uuid.clone(),
+                );
             }
+            None
         } else {
             None
         };
@@ -253,9 +221,6 @@ pub async fn ingest_client_events(
             if !pre_validation_errors.is_empty() {
                 response.errors.extend(pre_validation_errors);
             }
-            invalidate_stats_cache(&state);
-            invalidate_logs_cache(&state);
-
             // Prometheus counters
             metrics::counter!("gitgov_events_ingested_total", "status" => "accepted")
                 .increment(response.accepted.len() as u64);
@@ -268,11 +233,12 @@ pub async fn ingest_client_events(
             // Single notification — frontend refreshes both logs and stats on new_events.
             let accepted_count = response.accepted.len() as u32;
             if accepted_count > 0 {
-                let _ = state.sse_tx.send(SseNotification::NewEvents { count: accepted_count });
+                fanout_sse_new_events(&state, accepted_count).await;
             }
 
-            // Fire-and-forget: update client_sessions last_seen + device metadata
-            {
+            // Fire-and-forget (debounced): update client_sessions last_seen + device metadata.
+            let should_touch_session = !response.accepted.is_empty() || !response.duplicates.is_empty();
+            if should_touch_session {
                 let client_id = auth_user.client_id.clone();
                 let org_id = auth_user.org_id.clone();
                 // Extract device metadata from the first event that has it
@@ -282,15 +248,20 @@ pub async fn ingest_client_events(
                         e.metadata.get("device").cloned()
                     })
                     .unwrap_or(serde_json::json!({}));
-                let db = Arc::clone(&state.db);
-                tokio::spawn(async move {
-                    if let Err(e) = db
-                        .upsert_client_session(&client_id, org_id.as_deref(), &device_meta)
-                        .await
-                    {
-                        tracing::debug!(error = %e, "Failed to upsert client session (non-critical)");
-                    }
-                });
+                if should_upsert_client_session(&state, &client_id) {
+                    let db = Arc::clone(&state.db);
+                    tokio::spawn(async move {
+                        if let Err(e) = db
+                            .upsert_client_session(&client_id, org_id.as_deref(), &device_meta)
+                            .await
+                        {
+                            tracing::debug!(
+                                error = %e,
+                                "Failed to upsert client session (non-critical)"
+                            );
+                        }
+                    });
+                }
             }
 
             // Fire-and-forget alert for blocked_push events
@@ -630,6 +601,17 @@ fn invalidate_stats_cache(state: &AppState) {
     if state.stats_cache_ttl.is_zero() {
         return;
     }
+    let min_interval = if state.stats_cache_invalidation_min_interval.is_zero() {
+        state.cache_invalidation_min_interval
+    } else {
+        state.stats_cache_invalidation_min_interval
+    };
+    if !should_invalidate_cache(
+        &state.stats_cache_last_invalidation_ms,
+        min_interval,
+    ) {
+        return;
+    }
 
     match state.stats_cache.lock() {
         Ok(mut cache) => {
@@ -737,6 +719,17 @@ fn invalidate_logs_cache(state: &AppState) {
     if state.logs_cache_ttl.is_zero() {
         return;
     }
+    let min_interval = if state.logs_cache_invalidation_min_interval.is_zero() {
+        state.cache_invalidation_min_interval
+    } else {
+        state.logs_cache_invalidation_min_interval
+    };
+    if !should_invalidate_cache(
+        &state.logs_cache_last_invalidation_ms,
+        min_interval,
+    ) {
+        return;
+    }
 
     match state.logs_cache.lock() {
         Ok(mut cache) => {
@@ -750,18 +743,277 @@ fn invalidate_logs_cache(state: &AppState) {
     }
 }
 
+const MAX_ORG_LOOKUP_CACHE_ENTRIES: usize = 2_048;
+const MAX_REPO_LOOKUP_CACHE_ENTRIES: usize = 8_192;
+
+async fn resolve_org_id_with_cache(state: &AppState, org_name: &str) -> Option<String> {
+    let cache_key = org_name.trim().to_ascii_lowercase();
+    if cache_key.is_empty() {
+        return None;
+    }
+
+    if let Some(cached) = get_cached_org_id(state, &cache_key) {
+        return cached;
+    }
+
+    let resolved = state
+        .db
+        .get_org_by_login(org_name)
+        .await
+        .ok()
+        .flatten()
+        .map(|org| org.id);
+    put_cached_org_id(state, cache_key, resolved.clone());
+    resolved
+}
+
+fn get_cached_org_id(state: &AppState, cache_key: &str) -> Option<Option<String>> {
+    if state.org_lookup_cache_ttl.is_zero() {
+        return None;
+    }
+
+    let now = Instant::now();
+    let mut cache = state.org_lookup_cache.lock().ok()?;
+    let entry = cache.get(cache_key)?;
+    if entry.expires_at <= now {
+        cache.remove(cache_key);
+        return None;
+    }
+    Some(entry.org_id.clone())
+}
+
+fn put_cached_org_id(state: &AppState, cache_key: String, org_id: Option<String>) {
+    if state.org_lookup_cache_ttl.is_zero() {
+        return;
+    }
+
+    let now = Instant::now();
+    let mut cache = match state.org_lookup_cache.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!("org_lookup_cache lock poisoned; skipping cache write");
+            return;
+        }
+    };
+    cache.insert(
+        cache_key,
+        OrgLookupCacheEntry {
+            org_id,
+            expires_at: now + state.org_lookup_cache_ttl,
+        },
+    );
+    if cache.len() > MAX_ORG_LOOKUP_CACHE_ENTRIES {
+        cache.retain(|_, entry| entry.expires_at > now);
+    }
+}
+
+async fn resolve_repo_with_cache(state: &AppState, repo_full_name: &str) -> Option<Repo> {
+    let cache_key = repo_full_name.trim().to_ascii_lowercase();
+    if cache_key.is_empty() {
+        return None;
+    }
+
+    if let Some(cached) = get_cached_repo(state, &cache_key) {
+        return cached;
+    }
+
+    let resolved = state
+        .db
+        .get_repo_by_full_name(repo_full_name)
+        .await
+        .unwrap_or_default();
+    put_cached_repo(state, cache_key, resolved.clone());
+    resolved
+}
+
+fn get_cached_repo(state: &AppState, cache_key: &str) -> Option<Option<Repo>> {
+    if state.repo_lookup_cache_ttl.is_zero() {
+        return None;
+    }
+
+    let now = Instant::now();
+    let mut cache = state.repo_lookup_cache.lock().ok()?;
+    let entry = cache.get(cache_key)?;
+    if entry.expires_at <= now {
+        cache.remove(cache_key);
+        return None;
+    }
+    Some(entry.repo.clone())
+}
+
+fn put_cached_repo(state: &AppState, cache_key: String, repo: Option<Repo>) {
+    if state.repo_lookup_cache_ttl.is_zero() {
+        return;
+    }
+
+    let now = Instant::now();
+    let mut cache = match state.repo_lookup_cache.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!("repo_lookup_cache lock poisoned; skipping cache write");
+            return;
+        }
+    };
+    cache.insert(
+        cache_key,
+        RepoLookupCacheEntry {
+            repo,
+            expires_at: now + state.repo_lookup_cache_ttl,
+        },
+    );
+    if cache.len() > MAX_REPO_LOOKUP_CACHE_ENTRIES {
+        cache.retain(|_, entry| entry.expires_at > now);
+    }
+}
+
+const MAX_TRACKED_REPO_UPSERT_ATTEMPTS: usize = 8_192;
+
+fn should_schedule_repo_upsert(state: &AppState, org_id: &str, repo_full_name: &str) -> bool {
+    if state.repo_upsert_min_interval.is_zero() {
+        return true;
+    }
+    let cache_key = format!("{}:{}", org_id.trim(), repo_full_name.trim().to_ascii_lowercase());
+    if cache_key.ends_with(':') {
+        return false;
+    }
+
+    let now = Instant::now();
+    let mut cache = match state.repo_upsert_last_attempt.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!("repo_upsert_last_attempt lock poisoned; bypassing debounce");
+            return true;
+        }
+    };
+
+    if let Some(last_attempt) = cache.get(&cache_key) {
+        if now.saturating_duration_since(*last_attempt) < state.repo_upsert_min_interval {
+            return false;
+        }
+    }
+    cache.insert(cache_key, now);
+    if cache.len() > MAX_TRACKED_REPO_UPSERT_ATTEMPTS {
+        let stale_after = std::cmp::max(state.repo_upsert_min_interval, Duration::from_secs(120));
+        cache.retain(|_, ts| now.saturating_duration_since(*ts) <= stale_after);
+    }
+
+    true
+}
+
+fn schedule_repo_upsert(
+    state: Arc<AppState>,
+    org_id: String,
+    full_name: String,
+    repo_name: String,
+    event_uuid: String,
+) {
+    tokio::spawn(async move {
+        match state
+            .db
+            .upsert_repo_by_full_name(Some(org_id.as_str()), &full_name, &repo_name, true)
+            .await
+        {
+            Ok(repo_id) => {
+                let repo = Repo {
+                    id: repo_id,
+                    org_id: Some(org_id),
+                    github_id: None,
+                    full_name: full_name.clone(),
+                    name: repo_name,
+                    private: true,
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                };
+                put_cached_repo(&state, full_name.to_ascii_lowercase(), Some(repo));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    repo = %full_name,
+                    event_uuid = %event_uuid,
+                    "Background repo upsert from /events failed (non-fatal)"
+                );
+            }
+        }
+    });
+}
+
+fn should_invalidate_cache(
+    last_invalidation_ms: &Arc<AtomicI64>,
+    min_interval: Duration,
+) -> bool {
+    if min_interval.is_zero() {
+        return true;
+    }
+
+    let min_interval_ms = min_interval.as_millis().min(i64::MAX as u128) as i64;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    loop {
+        let previous_ms = last_invalidation_ms.load(Ordering::Acquire);
+        if previous_ms > 0 && now_ms.saturating_sub(previous_ms) < min_interval_ms {
+            return false;
+        }
+        if last_invalidation_ms
+            .compare_exchange(previous_ms, now_ms, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+const MAX_TRACKED_CLIENT_SESSIONS: usize = 8_192;
+
+fn should_upsert_client_session(state: &AppState, client_id: &str) -> bool {
+    if state.client_session_upsert_min_interval.is_zero() {
+        return true;
+    }
+
+    let now = Instant::now();
+    let min_interval = state.client_session_upsert_min_interval;
+    let mut cache = match state.client_session_last_upsert.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!("client_session_last_upsert lock poisoned; bypassing debounce");
+            return true;
+        }
+    };
+
+    if let Some(last_seen) = cache.get(client_id) {
+        if now.saturating_duration_since(*last_seen) < min_interval {
+            return false;
+        }
+    }
+
+    cache.insert(client_id.to_string(), now);
+    if cache.len() > MAX_TRACKED_CLIENT_SESSIONS {
+        let stale_after = std::cmp::max(min_interval, Duration::from_secs(120));
+        cache.retain(|_, last_seen| now.saturating_duration_since(*last_seen) <= stale_after);
+    }
+
+    true
+}
+
 async fn load_audit_stats(state: &AppState, org_id: Option<&str>) -> Result<AuditStats, DbError> {
     if let Some(stats) = get_cached_stats(state, org_id) {
         return Ok(stats);
     }
 
-    let mut stats = state.db.get_stats(org_id).await?;
-    stats.pipeline = state
-        .db
-        .get_pipeline_health_stats(org_id)
-        .await
-        .unwrap_or_default();
-    stats.client_events.desktop_pushes_today = match state.db.get_desktop_pushes_today(org_id).await {
+    // Single-flight guard: if many requests miss cache simultaneously,
+    // only one recomputes stats while others wait and reuse the result.
+    let _refresh_guard = state.stats_cache_refresh_lock.lock().await;
+    if let Some(stats) = get_cached_stats(state, org_id) {
+        return Ok(stats);
+    }
+
+    let stats_fut = state.db.get_stats(org_id);
+    let pipeline_fut = state.db.get_pipeline_health_stats(org_id);
+    let desktop_pushes_fut = state.db.get_desktop_pushes_today(org_id);
+    let (stats_result, pipeline_result, desktop_pushes_result) =
+        tokio::join!(stats_fut, pipeline_fut, desktop_pushes_fut);
+
+    let mut stats = stats_result?;
+    stats.pipeline = pipeline_result.unwrap_or_default();
+    stats.client_events.desktop_pushes_today = match desktop_pushes_result {
         Ok(count) => count,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to compute desktop pushes today for /stats");
@@ -1139,6 +1391,48 @@ fn branch_matches_policy(policy: &GitGovConfig, branch: &str) -> bool {
     false
 }
 
+fn org_name_from_repo_full_name(repo_full_name: &str) -> Option<&str> {
+    repo_full_name
+        .split('/')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn should_block_policy_check_transport(
+    state: &AppState,
+    repo_full_name: &str,
+    branch: &str,
+) -> bool {
+    if state.policy_check_block_scopes.is_empty() {
+        return false;
+    }
+    let org_name = match org_name_from_repo_full_name(repo_full_name) {
+        Some(value) => value,
+        None => return false,
+    };
+    state
+        .policy_check_block_scopes
+        .iter()
+        .any(|scope| scope.matches(org_name, branch))
+}
+
+fn policy_check_response_status(
+    state: &AppState,
+    repo_full_name: &str,
+    branch: &str,
+    response: &PolicyCheckResponse,
+) -> StatusCode {
+    if response.allowed {
+        return StatusCode::OK;
+    }
+    if should_block_policy_check_transport(state, repo_full_name, branch) {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::OK
+    }
+}
+
 fn ticket_id_regex() -> &'static Regex {
     static TICKET_ID_RE: OnceLock<Regex> = OnceLock::new();
     TICKET_ID_RE.get_or_init(|| {
@@ -1197,6 +1491,7 @@ pub async fn policy_check(
     metrics::counter!("gitgov_policy_checks_total").increment(1);
 
     let repo_name = repo_name_from_policy_check_input(&payload.repo);
+    let branch = payload.branch.trim();
     let mut response = PolicyCheckResponse {
         advisory: true,
         allowed: true,
@@ -1215,7 +1510,8 @@ pub async fn policy_check(
         Ok(None) => {
             response.allowed = false;
             response.reasons.push("Repository not found in GitGov".to_string());
-            return (StatusCode::OK, Json(response));
+            let status = policy_check_response_status(state.as_ref(), &repo_name, branch, &response);
+            return (status, Json(response));
         }
         Err(_) => {
             response.allowed = false;
@@ -1229,7 +1525,8 @@ pub async fn policy_check(
         Ok(None) => {
             response.allowed = false;
             response.reasons.push("No policy configured for repository".to_string());
-            return (StatusCode::OK, Json(response));
+            let status = policy_check_response_status(state.as_ref(), &repo_name, branch, &response);
+            return (status, Json(response));
         }
         Err(_) => {
             response.allowed = false;
@@ -1237,8 +1534,6 @@ pub async fn policy_check(
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(response));
         }
     };
-
-    let branch = payload.branch.trim();
     let config = &policy.config;
     let enforcement = &config.enforcement;
 
@@ -1349,5 +1644,9 @@ pub async fn policy_check(
             .push("Commit SHA not provided; commit-specific checks skipped".to_string());
     }
 
-    (StatusCode::OK, Json(response))
+    let status = policy_check_response_status(state.as_ref(), &repo_name, branch, &response);
+    if status == StatusCode::CONFLICT {
+        metrics::counter!("gitgov_policy_checks_transport_blocked_total").increment(1);
+    }
+    (status, Json(response))
 }

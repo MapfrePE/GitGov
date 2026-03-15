@@ -20,9 +20,11 @@ use axum::{
 use clap::Parser;
 use dotenvy::dotenv;
 use sha2::Digest;
+use sqlx::postgres::PgListener;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicI64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -30,7 +32,7 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::handlers::AppState;
+use crate::handlers::{AppState, PolicyCheckBlockingScope};
 
 #[derive(Parser, Debug)]
 #[command(name = "gitgov-server", about = "GitGov Control Plane")]
@@ -49,6 +51,9 @@ const MIN_AUDIT_RETENTION_DAYS: i64 = 365 * 5;
 const SIMULATE_RATE_LIMIT_INTERNAL_ERROR_ENV: &str = "GITGOV_SIMULATE_RATE_LIMIT_INTERNAL_ERROR";
 const SIMULATE_RATE_LIMIT_INTERNAL_ERROR_FOR_ENV: &str =
     "GITGOV_SIMULATE_RATE_LIMIT_INTERNAL_ERROR_FOR";
+const SSE_DISTRIBUTED_CHANNEL_DEFAULT: &str = "gitgov_sse_events";
+const SSE_LISTENER_BACKOFF_START_SECS: u64 = 1;
+const SSE_LISTENER_BACKOFF_MAX_SECS: u64 = 30;
 
 #[derive(Debug)]
 struct RateBucket {
@@ -79,6 +84,8 @@ struct DistributedDbRateLimiter {
     window: Duration,
     fail_open_on_db_error: bool,
     db: Arc<db::Database>,
+    denied_until_cache: Arc<Mutex<HashMap<String, Instant>>>,
+    denied_until_cache_max_entries: usize,
 }
 
 #[derive(Clone)]
@@ -209,6 +216,8 @@ impl DistributedDbRateLimiter {
             window,
             fail_open_on_db_error,
             db,
+            denied_until_cache: Arc::new(Mutex::new(HashMap::new())),
+            denied_until_cache_max_entries: 16_384,
         }
     }
 
@@ -244,16 +253,37 @@ impl DistributedDbRateLimiter {
             };
         }
 
+        if let Some(retry_after_secs) = get_cached_denied_retry_secs(&self.denied_until_cache, key)
+        {
+            return RateLimitDecision {
+                allowed: false,
+                retry_after_secs,
+                internal_error: false,
+            };
+        }
+
         match self
             .db
             .check_distributed_rate_limit(self.name, key, self.limit, self.window)
             .await
         {
-            Ok(result) => RateLimitDecision {
-                allowed: result.allowed,
-                retry_after_secs: result.retry_after_secs,
-                internal_error: false,
-            },
+            Ok(result) => {
+                if result.allowed {
+                    clear_cached_denied_key(&self.denied_until_cache, key);
+                } else {
+                    put_cached_denied_retry_secs(
+                        &self.denied_until_cache,
+                        key,
+                        result.retry_after_secs,
+                        self.denied_until_cache_max_entries,
+                    );
+                }
+                RateLimitDecision {
+                    allowed: result.allowed,
+                    retry_after_secs: result.retry_after_secs,
+                    internal_error: false,
+                }
+            }
             Err(e) => {
                 let mode = if self.fail_open_on_db_error {
                     "fail-open"
@@ -281,6 +311,51 @@ impl DistributedDbRateLimiter {
                 }
             }
         }
+    }
+}
+
+fn get_cached_denied_retry_secs(cache: &Mutex<HashMap<String, Instant>>, key: &str) -> Option<u64> {
+    let now = Instant::now();
+    let mut guard = cache.lock().ok()?;
+    let denied_until = guard.get(key).copied()?;
+    if denied_until <= now {
+        guard.remove(key);
+        return None;
+    }
+    Some(denied_until.duration_since(now).as_secs().max(1))
+}
+
+fn put_cached_denied_retry_secs(
+    cache: &Mutex<HashMap<String, Instant>>,
+    key: &str,
+    retry_after_secs: u64,
+    max_entries: usize,
+) {
+    if retry_after_secs == 0 {
+        return;
+    }
+    let denied_until = Instant::now() + Duration::from_secs(retry_after_secs.max(1));
+    let mut guard = match cache.lock() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+    guard.insert(key.to_string(), denied_until);
+    if guard.len() > max_entries {
+        let now = Instant::now();
+        guard.retain(|_, expires_at| *expires_at > now);
+        if guard.len() > max_entries {
+            let overflow = guard.len().saturating_sub(max_entries);
+            let stale_keys = guard.keys().take(overflow).cloned().collect::<Vec<_>>();
+            for stale_key in stale_keys {
+                guard.remove(&stale_key);
+            }
+        }
+    }
+}
+
+fn clear_cached_denied_key(cache: &Mutex<HashMap<String, Instant>>, key: &str) {
+    if let Ok(mut guard) = cache.lock() {
+        guard.remove(key);
     }
 }
 
@@ -360,6 +435,46 @@ fn parse_i64_env(key: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
+fn parse_csv_env(key: &str) -> Vec<String> {
+    std::env::var(key)
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_policy_check_block_scopes_env(key: &str) -> Vec<PolicyCheckBlockingScope> {
+    std::env::var(key)
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .filter_map(|entry| {
+                    let mut parts = entry.splitn(2, ':');
+                    let org_pattern = parts
+                        .next()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(ToOwned::to_owned)?;
+                    let branch_pattern = parts
+                        .next()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or("*")
+                        .to_string();
+                    Some(PolicyCheckBlockingScope::new(org_pattern, branch_pattern))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 fn parse_runtime_env() -> (String, bool, bool) {
     let runtime_env_explicit = std::env::var("GITGOV_ENV").is_ok();
     let default_env = if cfg!(debug_assertions) {
@@ -395,7 +510,12 @@ fn rate_limit_key_from_request(req: &Request<Body>) -> String {
     // If auth middleware has already run, use the authenticated user identity.
     // For multi-tenant isolation, scope by org_id when available.
     if let Some(auth_user) = req.extensions().get::<auth::AuthUser>() {
-        if let Some(org_id) = auth_user.org_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(org_id) = auth_user
+            .org_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             return format!("org:{}:user:{}", org_id, auth_user.client_id);
         }
         return format!("user:{}", auth_user.client_id);
@@ -558,6 +678,87 @@ async fn rate_limit_middleware(
     }
 
     response
+}
+
+fn spawn_distributed_sse_listener(state: Arc<handlers::AppState>, database_url: String) {
+    let channel = state.sse_distributed_channel.clone();
+    let source_node = state.worker_id.clone();
+    tokio::spawn(async move {
+        let mut backoff_secs = SSE_LISTENER_BACKOFF_START_SECS;
+        loop {
+            let mut listener = match PgListener::connect(&database_url).await {
+                Ok(listener) => listener,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        channel = %channel,
+                        backoff_secs,
+                        "Distributed SSE listener failed to connect"
+                    );
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs =
+                        (backoff_secs.saturating_mul(2)).min(SSE_LISTENER_BACKOFF_MAX_SECS);
+                    continue;
+                }
+            };
+
+            if let Err(e) = listener.listen(&channel).await {
+                tracing::warn!(
+                    error = %e,
+                    channel = %channel,
+                    backoff_secs,
+                    "Distributed SSE listener failed to subscribe"
+                );
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs.saturating_mul(2)).min(SSE_LISTENER_BACKOFF_MAX_SECS);
+                continue;
+            }
+
+            tracing::info!(channel = %channel, "Distributed SSE listener connected");
+            backoff_secs = SSE_LISTENER_BACKOFF_START_SECS;
+            loop {
+                match listener.recv().await {
+                    Ok(notification) => {
+                        let payload = notification.payload();
+                        let envelope =
+                            match serde_json::from_str::<handlers::DistributedSseEnvelope>(payload)
+                            {
+                                Ok(parsed) => parsed,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        channel = %channel,
+                                        "Distributed SSE payload decode failed"
+                                    );
+                                    continue;
+                                }
+                            };
+                        if envelope.source_node == source_node {
+                            continue;
+                        }
+                        if matches!(
+                            envelope.notification,
+                            handlers::SseNotification::NewEvents { .. }
+                        ) {
+                            handlers::invalidate_dashboard_caches_for_sse(&state);
+                        }
+                        let _ = state.sse_tx.send(envelope.notification);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            channel = %channel,
+                            "Distributed SSE listener lost connection; reconnecting"
+                        );
+                        break;
+                    }
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+            backoff_secs = (backoff_secs.saturating_mul(2)).min(SSE_LISTENER_BACKOFF_MAX_SECS);
+        }
+    });
 }
 
 #[tokio::main]
@@ -818,25 +1019,62 @@ async fn main() {
     });
 
     let alert_webhook_url = std::env::var("GITGOV_ALERT_WEBHOOK_URL").ok();
+    let mut drift_alert_webhook_urls = parse_csv_env("GITGOV_DRIFT_ALERT_WEBHOOK_URLS");
+    if drift_alert_webhook_urls.is_empty() {
+        if let Ok(single_url) = std::env::var("GITGOV_DRIFT_ALERT_WEBHOOK_URL") {
+            let trimmed = single_url.trim();
+            if !trimmed.is_empty() {
+                drift_alert_webhook_urls.push(trimmed.to_string());
+            }
+        }
+    }
+    drift_alert_webhook_urls.sort();
+    drift_alert_webhook_urls.dedup();
     let strict_actor_match = parse_bool_env("GITGOV_STRICT_ACTOR_MATCH", true);
     let reject_synthetic_logins = parse_bool_env("GITGOV_REJECT_SYNTHETIC_LOGINS", false);
     let llm_api_key = std::env::var("GEMINI_API_KEY").ok();
     let llm_model =
         std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string());
     let feature_request_webhook_url = std::env::var("FEATURE_REQUEST_WEBHOOK_URL").ok();
-    let chat_llm_max_concurrency = parse_usize_env("GITGOV_CHAT_LLM_MAX_CONCURRENCY", 4);
-    let chat_llm_queue_timeout_ms = parse_usize_env("GITGOV_CHAT_LLM_QUEUE_TIMEOUT_MS", 500) as u64;
+    let chat_llm_max_concurrency = parse_usize_env("GITGOV_CHAT_LLM_MAX_CONCURRENCY", 16);
+    let chat_llm_queue_timeout_ms =
+        parse_usize_env("GITGOV_CHAT_LLM_QUEUE_TIMEOUT_MS", 3000) as u64;
     let chat_llm_timeout_ms = parse_usize_env("GITGOV_CHAT_LLM_TIMEOUT_MS", 9000) as u64;
     let stats_cache_ttl_ms = parse_usize_env("GITGOV_STATS_CACHE_TTL_MS", 3000) as u64;
     let logs_cache_ttl_ms = parse_usize_env("GITGOV_LOGS_CACHE_TTL_MS", 800) as u64;
+    let org_lookup_cache_ttl_ms = parse_usize_env("GITGOV_ORG_LOOKUP_CACHE_TTL_MS", 30_000) as u64;
+    let repo_lookup_cache_ttl_ms =
+        parse_usize_env("GITGOV_REPO_LOOKUP_CACHE_TTL_MS", 30_000) as u64;
+    let repo_upsert_min_interval_ms =
+        parse_usize_env("GITGOV_REPO_UPSERT_MIN_INTERVAL_MS", 30_000) as u64;
+    let cache_invalidation_min_interval_ms =
+        parse_usize_env("GITGOV_CACHE_INVALIDATION_MIN_INTERVAL_MS", 120) as u64;
+    let stats_cache_invalidation_min_interval_ms = parse_usize_env(
+        "GITGOV_STATS_CACHE_INVALIDATION_MIN_INTERVAL_MS",
+        cache_invalidation_min_interval_ms as usize,
+    ) as u64;
+    let logs_cache_invalidation_min_interval_ms = parse_usize_env(
+        "GITGOV_LOGS_CACHE_INVALIDATION_MIN_INTERVAL_MS",
+        cache_invalidation_min_interval_ms as usize,
+    ) as u64;
     let logs_cache_stale_on_error_ms =
         parse_usize_env("GITGOV_LOGS_CACHE_STALE_ON_ERROR_MS", 5000) as u64;
+    let client_session_upsert_min_interval_ms =
+        parse_usize_env("GITGOV_CLIENT_SESSION_UPSERT_MIN_INTERVAL_MS", 15_000) as u64;
     let logs_reject_offset_pagination =
         parse_bool_env("GITGOV_LOGS_REJECT_OFFSET_PAGINATION", false);
     let outbox_server_lease_requested = parse_bool_env("GITGOV_OUTBOX_SERVER_LEASE_ENABLED", false);
     let outbox_server_lease_ttl_ms =
         parse_usize_env("GITGOV_OUTBOX_SERVER_LEASE_TTL_MS", 2_000).clamp(1_000, 60_000) as u64;
+    let sse_distributed_enabled = parse_bool_env("GITGOV_SSE_DISTRIBUTED_ENABLED", false);
+    let sse_distributed_channel = std::env::var("GITGOV_SSE_DISTRIBUTED_CHANNEL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| SSE_DISTRIBUTED_CHANNEL_DEFAULT.to_string());
     let events_max_batch = parse_usize_env("GITGOV_EVENTS_MAX_BATCH", 1000);
+    let policy_check_block_scopes =
+        parse_policy_check_block_scopes_env("GITGOV_POLICY_CHECK_BLOCK_SCOPES");
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -866,6 +1104,7 @@ async fn main() {
         worker_id: worker_id_clone.clone(),
         http_client,
         alert_webhook_url,
+        drift_alert_webhook_urls,
         strict_actor_match,
         reject_synthetic_logins,
         events_max_batch,
@@ -880,6 +1119,21 @@ async fn main() {
         chat_llm_timeout_ms,
         stats_cache_ttl: Duration::from_millis(stats_cache_ttl_ms),
         stats_cache: Arc::new(Mutex::new(HashMap::new())),
+        org_lookup_cache_ttl: Duration::from_millis(org_lookup_cache_ttl_ms),
+        org_lookup_cache: Arc::new(Mutex::new(HashMap::new())),
+        repo_lookup_cache_ttl: Duration::from_millis(repo_lookup_cache_ttl_ms),
+        repo_lookup_cache: Arc::new(Mutex::new(HashMap::new())),
+        repo_upsert_min_interval: Duration::from_millis(repo_upsert_min_interval_ms),
+        repo_upsert_last_attempt: Arc::new(Mutex::new(HashMap::new())),
+        cache_invalidation_min_interval: Duration::from_millis(cache_invalidation_min_interval_ms),
+        stats_cache_invalidation_min_interval: Duration::from_millis(
+            stats_cache_invalidation_min_interval_ms,
+        ),
+        logs_cache_invalidation_min_interval: Duration::from_millis(
+            logs_cache_invalidation_min_interval_ms,
+        ),
+        stats_cache_last_invalidation_ms: Arc::new(AtomicI64::new(0)),
+        stats_cache_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         logs_cache_ttl: Duration::from_millis(logs_cache_ttl_ms),
         logs_cache_stale_on_error: Duration::from_millis(logs_cache_stale_on_error_ms),
         logs_reject_offset_pagination,
@@ -887,11 +1141,37 @@ async fn main() {
         outbox_server_lease_ttl_ms,
         outbox_lease_telemetry: Arc::new(Mutex::new(handlers::OutboxLeaseTelemetry::default())),
         logs_cache: Arc::new(Mutex::new(HashMap::new())),
+        logs_cache_last_invalidation_ms: Arc::new(AtomicI64::new(0)),
+        client_session_upsert_min_interval: Duration::from_millis(
+            client_session_upsert_min_interval_ms,
+        ),
+        client_session_last_upsert: Arc::new(Mutex::new(HashMap::new())),
         sse_tx: tokio::sync::broadcast::channel::<handlers::SseNotification>(64).0,
         sse_max_connections: Arc::new(Semaphore::new(
             parse_u32_env("GITGOV_SSE_MAX_CONNECTIONS", 50) as usize,
         )),
+        sse_distributed_enabled,
+        sse_distributed_channel: sse_distributed_channel.clone(),
+        policy_check_block_scopes: policy_check_block_scopes.clone(),
     });
+
+    if sse_distributed_enabled {
+        spawn_distributed_sse_listener(Arc::clone(&state), database_url.clone());
+    }
+
+    if policy_check_block_scopes.is_empty() {
+        tracing::info!("Policy check transport mode: advisory-only (default)");
+    } else {
+        let scopes = policy_check_block_scopes
+            .iter()
+            .map(|scope| format!("{}:{}", scope.org_pattern, scope.branch_pattern))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::info!(
+            scopes = %scopes,
+            "Policy check transport mode: blocking for matching scopes"
+        );
+    }
 
     // Keep utility APIs exercised in non-test builds so strict linting does not
     // regress when these entry points are consumed by other binaries/tools.
@@ -1113,10 +1393,19 @@ async fn main() {
         chat_llm_timeout_ms,
         stats_cache_ttl_ms,
         logs_cache_ttl_ms,
+        org_lookup_cache_ttl_ms,
+        repo_lookup_cache_ttl_ms,
+        repo_upsert_min_interval_ms,
+        cache_invalidation_min_interval_ms,
+        stats_cache_invalidation_min_interval_ms,
+        logs_cache_invalidation_min_interval_ms,
         logs_cache_stale_on_error_ms,
+        client_session_upsert_min_interval_ms,
         logs_reject_offset_pagination,
         outbox_server_lease_enabled,
         outbox_server_lease_ttl_ms,
+        sse_distributed_enabled,
+        sse_distributed_channel = %sse_distributed_channel,
         "Rate limiting enabled for ingestion and control plane endpoints"
     );
 
@@ -1188,6 +1477,10 @@ async fn main() {
             get(handlers::get_jenkins_commit_correlations),
         )
         .route(
+            "/integrations/correlations/v2",
+            get(handlers::get_correlation_v2),
+        )
+        .route(
             "/integrations/jira",
             post(handlers::ingest_jira_webhook)
                 .layer(DefaultBodyLimit::max(jira_body_limit_bytes))
@@ -1243,6 +1536,18 @@ async fn main() {
         .route(
             "/policy/{repo_name}/override",
             put(handlers::override_policy),
+        )
+        .route(
+            "/policy/{repo_name}/requests",
+            post(handlers::create_policy_change_request).get(handlers::list_policy_change_requests),
+        )
+        .route(
+            "/policy/requests/{request_id}/approve",
+            post(handlers::approve_policy_change_request),
+        )
+        .route(
+            "/policy/requests/{request_id}/reject",
+            post(handlers::reject_policy_change_request),
         )
         .route("/export", post(handlers::export_events))
         .route("/exports", get(handlers::list_exports))
@@ -1381,6 +1686,10 @@ async fn main() {
             "/cli/commands",
             post(handlers::ingest_cli_command).get(handlers::list_cli_commands),
         )
+        .route(
+            "/policy/drift-events",
+            post(handlers::ingest_policy_drift_event).get(handlers::list_policy_drift_events),
+        )
         .layer(middleware::from_fn_with_state(
             Arc::clone(&db),
             auth::auth_middleware,
@@ -1409,7 +1718,7 @@ async fn main() {
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(request_metrics_middleware))
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(Arc::clone(&state));
 
     let addr: SocketAddr = std::env::var("GITGOV_SERVER_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
@@ -1418,6 +1727,15 @@ async fn main() {
 
     tracing::info!("GitGov Control Plane starting on {}", addr);
     tracing::info!("Using Supabase PostgreSQL database");
+    tracing::info!("");
+    tracing::info!(
+        configured = state.alert_webhook_url.is_some(),
+        "Generic alert webhook configured"
+    );
+    tracing::info!(
+        drift_webhook_targets = state.drift_alert_webhook_urls.len(),
+        "Dedicated drift alert webhook targets configured"
+    );
     tracing::info!("");
     tracing::info!("Endpoints:");
     tracing::info!("  GET  /health                    - Health check (public)");
@@ -1441,6 +1759,7 @@ async fn main() {
     tracing::info!(
         "  GET  /integrations/jenkins/correlations - Commit->pipeline correlations (admin)"
     );
+    tracing::info!("  GET  /integrations/correlations/v2 - Ticket->commit->pipeline view (admin)");
     tracing::info!("  POST /integrations/jira         - Jira webhook ingest (admin)");
     tracing::info!("  GET  /integrations/jira/status  - Jira integration health (admin)");
     tracing::info!("  GET  /integrations/jira/tickets/:ticket_id - Jira ticket detail (admin)");
@@ -1457,9 +1776,15 @@ async fn main() {
     tracing::info!("  GET  /violations/:id/decisions  - Get decision history (auth)");
     tracing::info!("  POST /violations/:id/decisions  - Add decision (admin)");
     tracing::info!("  GET  /policy/:repo              - Get policy (auth)");
-    tracing::info!("  POST /policy/check              - Policy check (advisory, admin)");
+    tracing::info!("  POST /policy/check              - Policy check (advisory + optional 409 block by scope, admin)");
     tracing::info!("  PUT  /policy/:repo/override     - Override policy (admin)");
     tracing::info!("  GET  /policy/:repo/history      - History (auth)");
+    tracing::info!("  POST /policy/:repo/requests     - Create policy change request (auth)");
+    tracing::info!("  GET  /policy/:repo/requests     - List policy change requests (auth)");
+    tracing::info!("  POST /policy/requests/:id/approve - Approve policy change request (admin)");
+    tracing::info!("  POST /policy/requests/:id/reject  - Reject policy change request (admin)");
+    tracing::info!("  POST /policy/drift-events       - Ingest drift audit event (auth)");
+    tracing::info!("  GET  /policy/drift-events       - List drift audit events (auth)");
     tracing::info!("  POST /export                    - Export (auth)");
     tracing::info!("  POST /orgs                      - Create/upsert org (admin)");
     tracing::info!("  POST /org-users                 - Create/update org user (admin)");
@@ -1479,6 +1804,12 @@ async fn main() {
     );
     tracing::info!(
         "  (opt) JIRA_WEBHOOK_SECRET       - Extra shared secret header x-gitgov-jira-secret"
+    );
+    tracing::info!(
+        "  (opt) GITGOV_ALERT_WEBHOOK_URL  - Generic alert webhook (Slack/Discord/Teams)"
+    );
+    tracing::info!(
+        "  (opt) GITGOV_DRIFT_ALERT_WEBHOOK_URLS - Dedicated drift alert webhooks (CSV)"
     );
     tracing::info!("  GET  /governance-events         - Query governance events (auth)");
     tracing::info!("  --- Job Queue Management ---");
@@ -1677,6 +2008,26 @@ mod tests {
         assert!(!decision.allowed);
         assert!(decision.internal_error);
         assert_eq!(decision.retry_after_secs, 1);
+    }
+
+    #[test]
+    fn distributed_denied_cache_returns_retry_window() {
+        let cache = Mutex::new(HashMap::new());
+        put_cached_denied_retry_secs(&cache, "k1", 3, 128);
+        let retry_after = get_cached_denied_retry_secs(&cache, "k1").expect("expected cached deny");
+        assert!((1..=3).contains(&retry_after));
+    }
+
+    #[test]
+    fn distributed_denied_cache_evicted_when_expired() {
+        let cache = Mutex::new(HashMap::new());
+        {
+            let mut guard = cache.lock().expect("cache lock");
+            guard.insert("k2".to_string(), Instant::now() - Duration::from_secs(1));
+        }
+        assert!(get_cached_denied_retry_secs(&cache, "k2").is_none());
+        let guard = cache.lock().expect("cache lock");
+        assert!(!guard.contains_key("k2"));
     }
 
     #[test]
