@@ -170,15 +170,15 @@ pub async fn list_policy_change_requests(
 
     match state
         .db
-        .list_policy_change_requests(
-            auth_user.org_id.as_deref(),
-            Some(repo_name.as_str()),
+        .list_policy_change_requests(ListPolicyChangeRequestsInput {
+            org_id: auth_user.org_id.as_deref(),
+            repo_name: Some(repo_name.as_str()),
             requested_by,
-            status.as_deref(),
+            status: status.as_deref(),
             limit,
             offset,
             include_config,
-        )
+        })
         .await
     {
         Ok((requests, total)) => (

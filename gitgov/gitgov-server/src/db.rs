@@ -135,6 +135,16 @@ pub struct CreatePolicyChangeRequestInput<'a> {
     pub created_at: i64,
 }
 
+pub struct ListPolicyChangeRequestsInput<'a> {
+    pub org_id: Option<&'a str>,
+    pub repo_name: Option<&'a str>,
+    pub requested_by: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub limit: i64,
+    pub offset: i64,
+    pub include_config: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct AcceptedOrgInvitation {
     pub invitation: OrgInvitation,
@@ -4766,13 +4776,7 @@ impl Database {
 
     pub async fn list_policy_change_requests(
         &self,
-        org_id: Option<&str>,
-        repo_name: Option<&str>,
-        requested_by: Option<&str>,
-        status: Option<&str>,
-        limit: i64,
-        offset: i64,
-        include_config: bool,
+        input: ListPolicyChangeRequestsInput<'_>,
     ) -> Result<(Vec<PolicyChangeRequestRecord>, i64), DbError> {
         let rows = sqlx::query(
             r#"
@@ -4804,13 +4808,13 @@ impl Database {
             LIMIT $5 OFFSET $6
             "#,
         )
-        .bind(org_id)
-        .bind(repo_name)
-        .bind(requested_by)
-        .bind(status)
-        .bind(limit)
-        .bind(offset)
-        .bind(include_config)
+        .bind(input.org_id)
+        .bind(input.repo_name)
+        .bind(input.requested_by)
+        .bind(input.status)
+        .bind(input.limit)
+        .bind(input.offset)
+        .bind(input.include_config)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
@@ -4827,10 +4831,10 @@ impl Database {
               AND ($4::text IS NULL OR COALESCE(d.decision, 'pending') = $4)
             "#,
         )
-        .bind(org_id)
-        .bind(repo_name)
-        .bind(requested_by)
-        .bind(status)
+        .bind(input.org_id)
+        .bind(input.repo_name)
+        .bind(input.requested_by)
+        .bind(input.status)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| DbError::DatabaseError(e.to_string()))?;
